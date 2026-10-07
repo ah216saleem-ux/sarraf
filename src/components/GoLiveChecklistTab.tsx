@@ -72,7 +72,7 @@ export const GoLiveChecklistTab: React.FC<GoLiveChecklistTabProps> = ({
       }
       if (tgRes.ok) {
         const tJson = await tgRes.json();
-        setIsDryRun(tJson.data?.dryRun ?? true);
+        setIsDryRun(tJson.data?.dryRun ?? false);
       }
       if (backupRes.ok) {
         const bJson = await backupRes.json();

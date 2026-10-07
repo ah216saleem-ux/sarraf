@@ -64,7 +64,7 @@ export const DEFAULT_SETTINGS: EngineSettings = {
   tier2PostMinutes: 15,
   volatilitySettleEnabled: true,
   spreadLimit: 0.6,
-  dryRun: process.env.DRY_RUN !== 'false',
+  dryRun: process.env.DRY_RUN === 'true',
   displayTz: process.env.DISPLAY_TZ || 'UTC',
   geminiValidatorEnabled: true,
   newsHeadsUpTelegram: false,

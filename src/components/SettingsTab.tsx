@@ -29,7 +29,7 @@ export const SettingsTab: React.FC = () => {
     newsLockPreMinutes: 30,
     newsLockPostMinutes: 15,
     spreadLimit: 0.6,
-    dryRun: true,
+    dryRun: false,
     displayTz: 'UTC',
     geminiValidatorEnabled: true,
     newsHeadsUpTelegram: false,

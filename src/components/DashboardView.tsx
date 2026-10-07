@@ -370,7 +370,7 @@ export const DashboardView: React.FC = () => {
 
   const activeSig = signalState?.activeSignal;
   const managerStatus = signalState?.state || 'SCANNING';
-  const isDryRun = telegramStatus?.dryRun ?? true;
+  const isDryRun = telegramStatus?.dryRun ?? false;
 
   // Next Message Live Preview Text
   const previewText = activeSig

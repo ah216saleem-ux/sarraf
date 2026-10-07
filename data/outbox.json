@@ -169,7 +169,11 @@
       "notes": "Market session closed. Signal closed at last live price as MARKET_CLOSE."
     },
     "createdAt": "2026-10-07T21:58:17.651Z",
-    "status": "PENDING_DELIVERY"
+    "status": "SENT",
+    "messageText": "Trade closed (market close) ⏱ +$0.00",
+    "lastAttemptAt": "2026-10-07T22:00:32.600Z",
+    "deliveryMode": "DRY_RUN",
+    "telegramMessageId": 516593
   },
   {
     "eventId": "EVT-1791410297653-5362c41d",
@@ -187,7 +191,11 @@
       "notes": "Market session closed. Pending limit order expired."
     },
     "createdAt": "2026-10-07T21:58:17.653Z",
-    "status": "PENDING_DELIVERY"
+    "status": "SENT",
+    "messageText": "Not filled, signal cancelled ⌛",
+    "lastAttemptAt": "2026-10-07T22:00:32.600Z",
+    "deliveryMode": "DRY_RUN",
+    "telegramMessageId": 666266
   },
   {
     "eventId": "EVT-1791410344095-9960f68e",
@@ -205,7 +213,11 @@
       "notes": "Market session closed. Signal closed at last live price as MARKET_CLOSE."
     },
     "createdAt": "2026-10-07T21:59:04.095Z",
-    "status": "PENDING_DELIVERY"
+    "status": "SENT",
+    "messageText": "Trade closed (market close) ⏱ +$0.00",
+    "lastAttemptAt": "2026-10-07T22:00:32.600Z",
+    "deliveryMode": "DRY_RUN",
+    "telegramMessageId": 573766
   },
   {
     "eventId": "EVT-1791410344098-aaadcc12",
@@ -223,7 +235,11 @@
       "notes": "Market session closed. Pending limit order expired."
     },
     "createdAt": "2026-10-07T21:59:04.098Z",
-    "status": "PENDING_DELIVERY"
+    "status": "SENT",
+    "messageText": "Not filled, signal cancelled ⌛",
+    "lastAttemptAt": "2026-10-07T22:00:32.602Z",
+    "deliveryMode": "DRY_RUN",
+    "telegramMessageId": 735803
   },
   {
     "eventId": "EVT-1791410407455-db2a2d72",
@@ -241,7 +257,11 @@
       "notes": "Market session closed. Signal closed at last live price as MARKET_CLOSE."
     },
     "createdAt": "2026-10-07T22:00:07.455Z",
-    "status": "PENDING_DELIVERY"
+    "status": "SENT",
+    "messageText": "Trade closed (market close) ⏱ +$0.00",
+    "lastAttemptAt": "2026-10-07T22:00:32.602Z",
+    "deliveryMode": "DRY_RUN",
+    "telegramMessageId": 863796
   },
   {
     "eventId": "EVT-1791410407457-faa62fc9",
@@ -259,6 +279,79 @@
       "notes": "Market session closed. Pending limit order expired."
     },
     "createdAt": "2026-10-07T22:00:07.457Z",
+    "status": "SENT",
+    "messageText": "Not filled, signal cancelled ⌛",
+    "lastAttemptAt": "2026-10-07T22:00:32.602Z",
+    "deliveryMode": "DRY_RUN",
+    "telegramMessageId": 733846
+  },
+  {
+    "eventId": "SUMMARY-D-2026-10-07",
+    "signalId": "SUMMARY-D-2026-10-07",
+    "type": "DAILY_SUMMARY",
+    "payload": {
+      "signalsCount": 7,
+      "tpCount": 1,
+      "slCount": 1,
+      "beCount": 0,
+      "totalDollars": 36.5,
+      "totalR": 3.65
+    },
+    "createdAt": "2026-10-07T22:30:04.182Z",
+    "status": "SENT",
+    "messageText": "Daily Summary 📊\nSignals: 7\nTP: 1 | SL: 1 | BE: 0\nResult: +$36.50 (+3.6R)",
+    "lastAttemptAt": "2026-10-07T22:54:38.538Z",
+    "deliveryMode": "DRY_RUN",
+    "telegramMessageId": 635655
+  },
+  {
+    "eventId": "ALERT-BOT_RESTARTED-1791414032445",
+    "signalId": "ALERT-BOT_RESTARTED-1791414032445",
+    "type": "ADMIN_ALERT",
+    "payload": {
+      "alertType": "BOT_RESTARTED"
+    },
+    "createdAt": "2026-10-07T23:00:32.445Z",
+    "status": "PENDING_DELIVERY",
+    "messageText": "⚠️ Bot restarted",
+    "lastAttemptAt": "2026-10-07T23:00:35.939Z",
+    "retryCount": 3,
+    "lastError": "Forbidden: the bot can't send messages to the bot"
+  },
+  {
+    "eventId": "EVT-1791414037064-c3b81eb8",
+    "signalId": "mock-active-close-test",
+    "type": "MARKET_CLOSE",
+    "payload": {
+      "signalId": "mock-active-close-test",
+      "direction": "BUY",
+      "eventPrice": 4165.5,
+      "bid": 4165.5,
+      "ask": 4165.5,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Market session closed. Signal closed at last live price as MARKET_CLOSE."
+    },
+    "createdAt": "2026-10-07T23:00:37.064Z",
+    "status": "PENDING_DELIVERY"
+  },
+  {
+    "eventId": "EVT-1791414037066-226d593f",
+    "signalId": "mock-pending-close-test",
+    "type": "EXPIRED",
+    "payload": {
+      "signalId": "mock-pending-close-test",
+      "direction": "BUY",
+      "eventPrice": 4150,
+      "bid": 4150,
+      "ask": 4150,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Market session closed. Pending limit order expired."
+    },
+    "createdAt": "2026-10-07T23:00:37.066Z",
     "status": "PENDING_DELIVERY"
   }
 ]
