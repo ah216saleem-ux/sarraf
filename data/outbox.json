@@ -125,6 +125,140 @@
       "notes": "Simulated stop hit"
     },
     "createdAt": "2026-10-07T20:46:41.426Z",
+    "status": "SENT",
+    "messageText": "SL hit ❌ -$10",
+    "lastAttemptAt": "2026-10-07T20:46:42.629Z",
+    "deliveryMode": "DRY_RUN",
+    "telegramMessageId": 965838
+  },
+  {
+    "eventId": "EVT-1791409602572-9da6e353",
+    "signalId": "TEST-SRF-LOSS-001",
+    "type": "SL",
+    "payload": {
+      "signalId": "TEST-SRF-LOSS-001",
+      "direction": "BUY",
+      "eventPrice": 4140,
+      "bid": 4140,
+      "ask": 4140,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Simulated stop hit"
+    },
+    "createdAt": "2026-10-07T21:46:42.572Z",
+    "status": "SENT",
+    "messageText": "SL hit ❌ -$10",
+    "lastAttemptAt": "2026-10-07T21:46:56.037Z",
+    "deliveryMode": "DRY_RUN",
+    "telegramMessageId": 300045
+  },
+  {
+    "eventId": "EVT-1791410297651-98364452",
+    "signalId": "mock-active-close-test",
+    "type": "MARKET_CLOSE",
+    "payload": {
+      "signalId": "mock-active-close-test",
+      "direction": "BUY",
+      "eventPrice": 4165.5,
+      "bid": 4165.5,
+      "ask": 4165.5,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Market session closed. Signal closed at last live price as MARKET_CLOSE."
+    },
+    "createdAt": "2026-10-07T21:58:17.651Z",
+    "status": "PENDING_DELIVERY"
+  },
+  {
+    "eventId": "EVT-1791410297653-5362c41d",
+    "signalId": "mock-pending-close-test",
+    "type": "EXPIRED",
+    "payload": {
+      "signalId": "mock-pending-close-test",
+      "direction": "BUY",
+      "eventPrice": 4150,
+      "bid": 4150,
+      "ask": 4150,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Market session closed. Pending limit order expired."
+    },
+    "createdAt": "2026-10-07T21:58:17.653Z",
+    "status": "PENDING_DELIVERY"
+  },
+  {
+    "eventId": "EVT-1791410344095-9960f68e",
+    "signalId": "mock-active-close-test",
+    "type": "MARKET_CLOSE",
+    "payload": {
+      "signalId": "mock-active-close-test",
+      "direction": "BUY",
+      "eventPrice": 4165.5,
+      "bid": 4165.5,
+      "ask": 4165.5,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Market session closed. Signal closed at last live price as MARKET_CLOSE."
+    },
+    "createdAt": "2026-10-07T21:59:04.095Z",
+    "status": "PENDING_DELIVERY"
+  },
+  {
+    "eventId": "EVT-1791410344098-aaadcc12",
+    "signalId": "mock-pending-close-test",
+    "type": "EXPIRED",
+    "payload": {
+      "signalId": "mock-pending-close-test",
+      "direction": "BUY",
+      "eventPrice": 4150,
+      "bid": 4150,
+      "ask": 4150,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Market session closed. Pending limit order expired."
+    },
+    "createdAt": "2026-10-07T21:59:04.098Z",
+    "status": "PENDING_DELIVERY"
+  },
+  {
+    "eventId": "EVT-1791410407455-db2a2d72",
+    "signalId": "mock-active-close-test",
+    "type": "MARKET_CLOSE",
+    "payload": {
+      "signalId": "mock-active-close-test",
+      "direction": "BUY",
+      "eventPrice": 4165.5,
+      "bid": 4165.5,
+      "ask": 4165.5,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Market session closed. Signal closed at last live price as MARKET_CLOSE."
+    },
+    "createdAt": "2026-10-07T22:00:07.455Z",
+    "status": "PENDING_DELIVERY"
+  },
+  {
+    "eventId": "EVT-1791410407457-faa62fc9",
+    "signalId": "mock-pending-close-test",
+    "type": "EXPIRED",
+    "payload": {
+      "signalId": "mock-pending-close-test",
+      "direction": "BUY",
+      "eventPrice": 4150,
+      "bid": 4150,
+      "ask": 4150,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Market session closed. Pending limit order expired."
+    },
+    "createdAt": "2026-10-07T22:00:07.457Z",
     "status": "PENDING_DELIVERY"
   }
 ]

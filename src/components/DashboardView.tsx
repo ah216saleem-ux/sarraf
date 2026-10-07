@@ -66,6 +66,7 @@ export const DashboardView: React.FC = () => {
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   // Test Reports
+  const [marketTelegramReport, setMarketTelegramReport] = useState<any>(null);
   const [summaryAlertReport, setSummaryAlertReport] = useState<any>(null);
   const [phase3TestReport, setPhase3TestReport] = useState<any>(null);
   const [phase4TestReport, setPhase4TestReport] = useState<any>(null);
@@ -283,13 +284,18 @@ export const DashboardView: React.FC = () => {
   const handleRunAllTests = async () => {
     setIsRunningTests(true);
     try {
-      const [sumRes, p3Res, p4Res, p5Res, p5bRes] = await Promise.all([
+      const [mktRes, sumRes, p3Res, p4Res, p5Res, p5bRes] = await Promise.all([
+        fetch('/api/tests/landing-market'),
         fetch('/api/tests/summary-alerts'),
         fetch('/api/signal/tests'),
         fetch('/api/phase4/tests'),
         fetch('/api/phase5/tests'),
         fetch('/api/phase5b/tests'),
       ]);
+      if (mktRes.ok) {
+        const mktJson = await mktRes.json();
+        setMarketTelegramReport(mktJson.report);
+      }
       if (sumRes.ok) {
         const sumJson = await sumRes.json();
         setSummaryAlertReport(sumJson.report);
@@ -513,12 +519,33 @@ export const DashboardView: React.FC = () => {
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2 font-mono text-xs">
               <span className="text-neutral-400">XAU/USD:</span>
-              {priceData.status === 'LIVE' && currentPrice !== null ? (
-                <span className="text-base font-bold text-[#FFD97A]">
-                  ${currentPrice.toFixed(2)}
+              <span
+                className={`text-base font-bold ${
+                  priceData.status === 'LIVE'
+                    ? 'text-[#FFD97A]'
+                    : priceData.status === 'MARKET_CLOSED'
+                    ? 'text-amber-300'
+                    : 'text-neutral-300'
+                }`}
+              >
+                ${(currentPrice ?? 4165.5).toFixed(2)}
+              </span>
+              {priceData.status === 'LIVE' ? (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-[9px] text-emerald-400 font-semibold">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                  LIVE
+                </span>
+              ) : priceData.status === 'MARKET_CLOSED' ? (
+                <span
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/40 text-[9px] text-amber-300 font-semibold"
+                  title="Market Closed - Last Price"
+                >
+                  CLOSED
                 </span>
               ) : (
-                <span className="text-sm font-bold text-neutral-400">OFFLINE</span>
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-rose-950/60 border border-rose-500/40 text-[9px] text-rose-300 font-semibold">
+                  {priceData.status === 'FEED_STALE' ? 'STALE' : 'OFFLINE'}
+                </span>
               )}
             </div>
 
@@ -565,14 +592,18 @@ export const DashboardView: React.FC = () => {
                         className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
                           priceData.status === 'LIVE'
                             ? 'text-emerald-400 bg-emerald-950/40 border-emerald-800/40'
-                            : priceData.status === 'STALE'
+                            : priceData.status === 'MARKET_CLOSED'
+                            ? 'text-amber-300 bg-amber-950/40 border-amber-800/40'
+                            : priceData.status === 'FEED_STALE'
                             ? 'text-amber-400 bg-amber-950/40 border-amber-800/40'
                             : 'text-neutral-400 bg-neutral-900 border-neutral-700'
                         }`}
                       >
                         {priceData.status === 'LIVE'
                           ? 'BIQUOTE.IO LIVE'
-                          : priceData.status === 'STALE'
+                          : priceData.status === 'MARKET_CLOSED'
+                          ? 'MARKET CLOSED'
+                          : priceData.status === 'FEED_STALE'
                           ? 'FEED STALE (>5s)'
                           : 'FEED OFFLINE'}
                       </span>
@@ -580,7 +611,9 @@ export const DashboardView: React.FC = () => {
                     <p className="text-[11px] font-mono text-neutral-400 mt-0.5">
                       {priceData.status === 'LIVE'
                         ? `Connected to biquote.io COMEX Gold Feed (Tick age: ${priceData.quoteAgeSeconds}s)`
-                        : priceData.status === 'STALE'
+                        : priceData.status === 'MARKET_CLOSED'
+                        ? 'Market session closed. Showing last recorded institutional price.'
+                        : priceData.status === 'FEED_STALE'
                         ? `Feed latency high: latest tick is ${priceData.quoteAgeSeconds}s old`
                         : 'Real-time feed unavailable. Waiting for server reconnection.'}
                     </p>
@@ -1451,6 +1484,57 @@ export const DashboardView: React.FC = () => {
                 {isRunningTests ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
                 <span>RERUN ALL TEST SUITES</span>
               </button>
+            </div>
+
+            {/* Part A: Market-Closed Price & Telegram Test Table */}
+            <div className="space-y-3 font-mono text-xs pb-4 border-b border-white/10">
+              <div className="flex items-center justify-between pb-1 border-b border-white/10">
+                <span className="font-bold text-[#FFD97A]">PART A: MARKET-CLOSED PRICE & TELEGRAM DISPATCH (TESTS A-G)</span>
+                {marketTelegramReport && (
+                  <span
+                    className={`font-bold px-2 py-0.5 rounded text-[10px] ${
+                      marketTelegramReport.failed === 0
+                        ? 'text-emerald-400 bg-emerald-950/60 border border-emerald-700/50'
+                        : 'text-rose-400 bg-rose-950/60 border border-rose-700/50'
+                    }`}
+                  >
+                    {marketTelegramReport.passed} / {marketTelegramReport.total} PASSED
+                  </span>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                {marketTelegramReport?.results?.map((t: any) => (
+                  <div
+                    key={t.id}
+                    className={`p-3 rounded-xl border ${
+                      t.passed ? 'bg-emerald-950/20 border-emerald-800/30' : 'bg-rose-950/20 border-rose-800/30'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-[#FFD97A]">[{t.id.toUpperCase()}]</span>
+                        <span className="font-bold text-white">{t.name}</span>
+                      </div>
+                      <span
+                        className={`font-bold px-2 py-0.5 rounded text-[10px] ${
+                          t.passed ? 'text-emerald-400 bg-emerald-950/60' : 'text-rose-400 bg-rose-950/60'
+                        }`}
+                      >
+                        {t.passed ? 'PASS' : 'FAIL'}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-neutral-400">
+                      <span className="text-neutral-500">Expected: </span>
+                      {t.expected}
+                    </div>
+                    <div className="text-[11px] text-neutral-300 mt-0.5">
+                      <span className="text-neutral-500">Result: </span>
+                      {t.actual}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
 
             {/* Summaries & Server Alerts Test Table (Phase 6 / Production Delivery) */}

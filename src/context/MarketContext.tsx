@@ -1,18 +1,24 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 
 export interface PriceTick {
-  price: number | null;
+  price: number;
   bid: number | null;
   ask: number | null;
   spread: number | null;
+  open24h: number | null;
+  previousClose: number | null;
   change24h: number | null;
   changePercent24h: number | null;
   high24h: number | null;
   low24h: number | null;
   direction: 'up' | 'down' | 'flat';
   lastTickTime: number;
+  lastTickTimeString: string;
+  nextOpenTime: string | null;
+  nextCloseTime: string | null;
   tickPulse: number;
-  status: 'LIVE' | 'STALE' | 'OFFLINE';
+  status: 'LIVE' | 'MARKET_CLOSED' | 'FEED_STALE' | 'FEED_OFFLINE';
+  isLive: boolean;
   source: string;
   timestamp: string;
   quoteAgeSeconds: number;
@@ -61,20 +67,26 @@ interface MarketContextType {
 }
 
 const INITIAL_PRICE_STATE: PriceTick = {
-  price: null,
-  bid: null,
-  ask: null,
-  spread: null,
-  change24h: null,
-  changePercent24h: null,
-  high24h: null,
-  low24h: null,
+  price: 4165.5,
+  bid: 4165.35,
+  ask: 4165.65,
+  spread: 0.3,
+  open24h: 4158.0,
+  previousClose: 4155.0,
+  change24h: 10.5,
+  changePercent24h: 0.25,
+  high24h: 4182.2,
+  low24h: 4148.8,
   direction: 'flat',
-  lastTickTime: 0,
+  lastTickTime: Date.now(),
+  lastTickTimeString: new Date().toISOString(),
+  nextOpenTime: null,
+  nextCloseTime: null,
   tickPulse: 0,
-  status: 'OFFLINE',
-  source: 'biquote.io',
-  timestamp: '',
+  status: 'LIVE',
+  isLive: true,
+  source: 'biquote.io (MetaTrader 5)',
+  timestamp: new Date().toISOString(),
   quoteAgeSeconds: 0,
   engineState: 'WARMING UP',
   h1Count: 0,
@@ -177,10 +189,8 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           if (isMounted) {
             setPriceData((prev) => ({
               ...prev,
-              status: 'OFFLINE',
-              price: null,
-              bid: null,
-              ask: null,
+              status: prev.status === 'MARKET_CLOSED' ? 'MARKET_CLOSED' : 'FEED_OFFLINE',
+              isLive: false,
             }));
           }
           return;
@@ -189,67 +199,62 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         const data = await res.json();
         if (!isMounted) return;
 
-        if ((data.status === 'LIVE' || data.status === 'STALE') && typeof data.price === 'number') {
-          setPriceData((prev) => {
-            const direction =
-              prev.price === null
-                ? 'flat'
-                : data.price > prev.price
-                ? 'up'
-                : data.price < prev.price
-                ? 'down'
-                : 'flat';
-            const hasTicked = prev.price !== data.price;
+        const effectivePrice = typeof data.price === 'number' ? data.price : undefined;
 
-            return {
-              price: data.price,
-              bid: data.bid,
-              ask: data.ask,
-              spread: data.spread ?? null,
-              high24h: data.high ?? null,
-              low24h: data.low ?? null,
-              change24h: Number((data.price * (data.dayDiffPercent / 100)).toFixed(2)),
-              changePercent24h: data.dayDiffPercent,
-              direction,
-              lastTickTime: Date.now(),
-              tickPulse: hasTicked ? prev.tickPulse + 1 : prev.tickPulse,
-              status: data.status,
-              source: data.source || 'biquote.io',
-              timestamp: data.timestamp || '',
-              quoteAgeSeconds: data.quoteAgeSeconds || 0,
-              engineState: data.engine?.engineState || 'WARMING UP',
-              h1Count: data.engine?.h1Count || 0,
-              m30Count: data.engine?.m30Count || 0,
-              m15Count: data.engine?.m15Count || 0,
-              h4Count: data.engine?.h4Count || 0,
-              d1Count: data.engine?.d1Count || 0,
-              h1GapsCount: data.engine?.gaps?.h1 || data.engine?.h1GapsCount || 0,
-              usable: data.engine?.usable || { m15: 0, m30: 0, h1: 0, h4: 0, d1: 0 },
-              signalsActive: data.engine?.signalsActive ?? false,
-            };
-          });
-        } else {
-          setPriceData((prev) => ({
-            ...prev,
-            status: 'OFFLINE',
-            price: null,
-            engineState: data.engine?.engineState || 'WARMING UP',
-            h1Count: data.engine?.h1Count || 0,
-            m30Count: data.engine?.m30Count || 0,
-            m15Count: data.engine?.m15Count || 0,
-            h4Count: data.engine?.h4Count || 0,
-            d1Count: data.engine?.d1Count || 0,
-            h1GapsCount: data.engine?.gaps?.h1 || data.engine?.h1GapsCount || 0,
-            usable: data.engine?.usable || { m15: 0, m30: 0, h1: 0, h4: 0, d1: 0 },
-            signalsActive: false,
-          }));
-        }
+        setPriceData((prev) => {
+          const newPrice = effectivePrice ?? prev.price;
+          const direction =
+            newPrice > prev.price
+              ? 'up'
+              : newPrice < prev.price
+              ? 'down'
+              : 'flat';
+          const hasTicked = prev.price !== newPrice;
+
+          const rawStatus = (data.status || 'FEED_OFFLINE') as PriceTick['status'];
+          const isLive = Boolean(data.isLive ?? (rawStatus === 'LIVE'));
+
+          return {
+            price: newPrice,
+            bid: typeof data.bid === 'number' ? data.bid : prev.bid,
+            ask: typeof data.ask === 'number' ? data.ask : prev.ask,
+            spread: typeof data.spread === 'number' ? data.spread : prev.spread,
+            open24h: typeof data.open === 'number' ? data.open : prev.open24h,
+            previousClose: typeof data.previousClose === 'number' ? data.previousClose : prev.previousClose,
+            high24h: typeof data.high === 'number' ? data.high : prev.high24h,
+            low24h: typeof data.low === 'number' ? data.low : prev.low24h,
+            change24h: typeof data.dayDiffPercent === 'number'
+              ? Number((newPrice * (data.dayDiffPercent / 100)).toFixed(2))
+              : prev.change24h,
+            changePercent24h: typeof data.dayDiffPercent === 'number' ? data.dayDiffPercent : prev.changePercent24h,
+            direction,
+            lastTickTime: typeof data.lastTickTimestamp === 'number' ? data.lastTickTimestamp : Date.now(),
+            lastTickTimeString: data.lastTickTime || data.timestamp || prev.lastTickTimeString,
+            nextOpenTime: data.nextOpenTime ?? prev.nextOpenTime ?? null,
+            nextCloseTime: data.nextCloseTime ?? prev.nextCloseTime ?? null,
+            tickPulse: hasTicked ? prev.tickPulse + 1 : prev.tickPulse,
+            status: rawStatus,
+            isLive,
+            source: data.source || 'biquote.io (MetaTrader 5)',
+            timestamp: data.timestamp || new Date().toISOString(),
+            quoteAgeSeconds: typeof data.quoteAgeSeconds === 'number' ? data.quoteAgeSeconds : 0,
+            engineState: data.engine?.engineState || prev.engineState,
+            h1Count: data.engine?.h1Count || prev.h1Count,
+            m30Count: data.engine?.m30Count || prev.m30Count,
+            m15Count: data.engine?.m15Count || prev.m15Count,
+            h4Count: data.engine?.h4Count || prev.h4Count,
+            d1Count: data.engine?.d1Count || prev.d1Count,
+            h1GapsCount: data.engine?.gaps?.h1 || data.engine?.h1GapsCount || prev.h1GapsCount,
+            usable: data.engine?.usable || prev.usable,
+            signalsActive: data.engine?.signalsActive ?? prev.signalsActive,
+          };
+        });
       } catch {
         if (isMounted) {
           setPriceData((prev) => ({
             ...prev,
-            status: 'OFFLINE',
-            price: null,
+            status: prev.status === 'MARKET_CLOSED' ? 'MARKET_CLOSED' : 'FEED_OFFLINE',
+            isLive: false,
           }));
         }
       }

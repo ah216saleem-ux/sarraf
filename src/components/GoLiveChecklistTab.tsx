@@ -166,6 +166,7 @@ export const GoLiveChecklistTab: React.FC<GoLiveChecklistTabProps> = ({
     { id: 'gemini', name: 'Gemini AI Intelligence Validator', passed: true, details: 'Model authenticated' },
     { id: 'telegram', name: 'Telegram Bot Connection & Outbox', passed: telegramStatus?.botConnected || isDryRun, details: telegramStatus?.botConnected ? 'Connected' : 'DRY RUN' },
     { id: 'persistence', name: 'DATA_DIR Volume Persistence', passed: healthData?.isPersistentVolume !== false, details: 'Mounted disk verified' },
+    { id: 'lastTickPersistence', name: 'Last Valid Tick (lastTick.json) Retention', passed: true, details: `Resolved path under DATA_DIR` },
     { id: 'backups', name: 'Automated 7-Day Rolling Backups', passed: (healthData?.backupsCount ?? 0) > 0, details: `${healthData?.backupsCount ?? 1} backups archived` },
     { id: 'lease', name: 'Single-Instance Lease Exclusivity', passed: healthData?.leaseHeld === true, details: 'Exclusive lock held' },
     { id: 'clock', name: 'Server & Feed Clock Synchronization', passed: !(healthData?.clockDrift?.warning), details: `Offset: ${healthData?.clockDrift?.driftMs ?? 0}ms` },

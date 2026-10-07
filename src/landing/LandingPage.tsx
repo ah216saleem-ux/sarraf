@@ -10,19 +10,32 @@ import { TelegramOverlay } from './ui/TelegramOverlay';
 import { FinaleOverlay } from './ui/FinaleOverlay';
 import { CustomCursor } from './ui/CustomCursor';
 import { Preloader } from './ui/Preloader';
+import { StickyPriceBar } from './ui/StickyPriceBar';
+import { SideProgressRail } from './ui/SideProgressRail';
+import { LiteModeToggle } from './ui/LiteModeToggle';
 
 export const LandingPage: React.FC = () => {
   const [isLoaded, setIsLoaded] = useState(false);
+  const [isLiteMode, setIsLiteMode] = useState(false);
+  const [fps, setFps] = useState<number>(60);
   const { progress } = useScrollProgress();
 
   useEffect(() => {
+    // Respect prefers-reduced-motion: default to Lite mode if active
+    if (typeof window !== 'undefined') {
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reducedMotion) {
+        setIsLiteMode(true);
+      }
+    }
+
     const cleanup = initSmoothScroll();
     return cleanup;
   }, []);
 
   const handleScrollTo = useCallback((sceneIndex: number) => {
-    // 6 scenes mapped along the 600vh scroll space
-    const targetProgress = sceneIndex / 5;
+    // 5 main scenes mapped along the 600vh scroll space
+    const targetProgress = sceneIndex / 4;
     const totalHeight = document.documentElement.scrollHeight - window.innerHeight;
     const targetY = targetProgress * totalHeight;
 
@@ -48,7 +61,7 @@ export const LandingPage: React.FC = () => {
 
   return (
     <div className="relative bg-[#050505] text-white select-none overflow-x-hidden max-w-full w-full">
-      {/* Preloader */}
+      {/* Preloader with Vault opening effect (max 2.5s, tap to skip) */}
       {!isLoaded && <Preloader onLoaded={() => setIsLoaded(true)} />}
 
       {/* Desktop Custom Glowing Cursor */}
@@ -57,8 +70,25 @@ export const LandingPage: React.FC = () => {
       {/* Fixed Navigation Bar */}
       <Navbar onScrollTo={handleScrollTo} />
 
+      {/* Sticky mini price bar after hero (A1/B6 requirement) */}
+      <StickyPriceBar progress={progress} />
+
+      {/* Slim Side Progress Rail with Scene Names (B3 requirement) */}
+      <SideProgressRail progress={progress} onScrollTo={handleScrollTo} />
+
+      {/* Lite Mode Toggle with runtime FPS meter (Performance & Accessibility requirement) */}
+      <LiteModeToggle
+        isLiteMode={isLiteMode}
+        onToggle={() => setIsLiteMode((prev) => !prev)}
+        fps={fps}
+      />
+
       {/* 3D World Canvas (Fixed full-screen behind the HTML overlays) */}
-      <WorldCanvas progress={progress} />
+      <WorldCanvas
+        progress={progress}
+        isLiteMode={isLiteMode}
+        onFpsUpdate={setFps}
+      />
 
       {/* Fixed Overlay Container for Text and Interactive Cards */}
       <div className="fixed inset-0 pointer-events-none z-10 overflow-hidden flex flex-col justify-center">

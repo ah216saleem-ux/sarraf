@@ -1,0 +1,17 @@
+{
+  "symbol": "XAUUSD",
+  "price": 4172.9,
+  "bid": 4172.75,
+  "ask": 4173.05,
+  "high": 4185,
+  "low": 4160,
+  "open": 4165,
+  "previousClose": 4155,
+  "spread": 0.3,
+  "dayDiffPercent": 0.43,
+  "direction": "UP",
+  "timestamp": "2026-10-07T21:00:00.000Z",
+  "lastReceivedAt": 1791406807453,
+  "source": "biquote.io (MetaTrader 5)",
+  "marketState": "CLOSED"
+}

@@ -664,20 +664,90 @@ export function closeActiveSignal(
   enterCooldown();
 }
 
+// Phase 3 Rule: Market Close Handling
+// If a signal is ACTIVE when the market closes, close at the last live price as MARKET_CLOSE (never left frozen or open).
+// PENDING and PENDING_REVIEW signals expire immediately.
+export function handleMarketClose(lastLivePrice?: number): {
+  closedActive: boolean;
+  expiredPending: boolean;
+  closedSignal?: SignalRecord;
+} {
+  let closedActive = false;
+  let expiredPending = false;
+  let closedSignal: SignalRecord | undefined;
+  const exitPrice =
+    typeof lastLivePrice === 'number' && lastLivePrice > 0
+      ? lastLivePrice
+      : (managerState.currentSignal?.entryFillPrice || 4165.5);
+
+  // 1. ACTIVE signal: Close at last live price as MARKET_CLOSE (never left frozen or open)
+  if (managerState.state === 'ACTIVE' && managerState.currentSignal) {
+    const sig = managerState.currentSignal;
+    const entry = sig.entryFillPrice || sig.entryTarget;
+    const isBull = sig.direction === 'BUY';
+    const diff = isBull ? exitPrice - entry : entry - exitPrice;
+    const resultClass: ResultClass =
+      diff > 0.5 ? 'WIN' : diff < -0.5 ? 'LOSS' : 'BREAKEVEN';
+
+    console.log(
+      `[SIGNAL MANAGER] Market closed with ACTIVE signal ${sig.id}. Applying Phase 3 MARKET_CLOSE rule at $${exitPrice.toFixed(2)} (${resultClass}).`
+    );
+
+    closeActiveSignal(
+      sig,
+      'MARKET_CLOSE',
+      resultClass,
+      exitPrice,
+      0,
+      false,
+      'Market session closed. Signal closed at last live price as MARKET_CLOSE.'
+    );
+
+    closedActive = true;
+    closedSignal = sig;
+  } else if (managerState.state === 'PENDING' && managerState.currentSignal) {
+    // 2. PENDING signal: Expire immediately (never left pending across market close)
+    const sig = managerState.currentSignal;
+    console.log(`[SIGNAL MANAGER] Market closed with PENDING signal ${sig.id}. Expiring immediately.`);
+    closePendingExpired(sig, 'Market session closed. Pending limit order expired.');
+    expiredPending = true;
+    closedSignal = sig;
+  } else if (managerState.state === 'PENDING_REVIEW' && managerState.currentSignal) {
+    // 3. PENDING_REVIEW signal: Expire immediately
+    const sig = managerState.currentSignal;
+    console.log(`[SIGNAL MANAGER] Market closed with PENDING_REVIEW setup ${sig.id}. Expiring immediately.`);
+    closePendingReview(sig, 'REVIEW_TIMEOUT', 'Market session closed before review approval.');
+    expiredPending = true;
+    closedSignal = sig;
+  }
+
+  // Freeze state in HALTED_FEED during market closure
+  managerState.state = 'HALTED_FEED';
+  saveSignalsToDisk();
+
+  return { closedActive, expiredPending, closedSignal };
+}
+
 // Master tick processing function called every second on real biquote.io tick
 export function processSignalManagerTick(
   livePrice: number,
   bid: number,
   ask: number,
   spread: number,
-  feedStatus: 'LIVE' | 'STALE' | 'OFFLINE',
+  feedStatus: 'LIVE' | 'STALE' | 'OFFLINE' | 'MARKET_CLOSED',
   newsLockActive: boolean = false
 ) {
   checkDailyReset();
 
   managerState.lastTickTimestamp = Date.now();
 
-  // 1. FEED SAFETY (Section 6)
+  // 1. MARKET CLOSED: Apply Phase 3 market close rule (close active, expire pending)
+  if (feedStatus === 'MARKET_CLOSED') {
+    handleMarketClose(livePrice);
+    return;
+  }
+
+  // 2. FEED SAFETY (Section 6)
   if (feedStatus === 'OFFLINE' || feedStatus === 'STALE') {
     if (managerState.state !== 'HALTED_FEED') {
       managerState.previousStateBeforeHalt = managerState.state;

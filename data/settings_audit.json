@@ -4,6 +4,22 @@
     "field": "maxSignalsPerDay",
     "oldValue": 4,
     "newValue": 3,
+    "id": "AUD-MUYN0VTD",
+    "timestamp": "2026-10-07T21:46:42.577Z"
+  },
+  {
+    "adminEmail": "test-admin@sarraf.gold",
+    "field": "maxSignalsPerDay",
+    "oldValue": 3,
+    "newValue": 4,
+    "id": "AUD-MUYN0VTC",
+    "timestamp": "2026-10-07T21:46:42.576Z"
+  },
+  {
+    "adminEmail": "test-admin@sarraf.gold",
+    "field": "maxSignalsPerDay",
+    "oldValue": 4,
+    "newValue": 3,
     "id": "AUD-MUYKVP5H",
     "timestamp": "2026-10-07T20:46:41.429Z"
   },

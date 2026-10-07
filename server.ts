@@ -15,6 +15,15 @@ import {
   getClosedCandles,
 } from './src/server/candleEngine.ts';
 import {
+  loadLastTickFromDisk,
+  saveLastTickToDisk,
+  recordLiveTick,
+  getLastValidTick,
+  evaluateMarketPriceStatus,
+  getMarketSchedule,
+  LAST_TICK_FILE,
+} from './src/server/marketPriceEngine.ts';
+import {
   runSarrafAnalysis,
   runBacktestReplay,
   isNewsLockActive,
@@ -94,6 +103,7 @@ import {
 } from './src/server/deploymentSafety.ts';
 import { runPhase5BTestSuite } from './src/server/phase5bTests.ts';
 import { runSummaryAlertTestSuite } from './src/server/sarrafSummaryAlertTests.ts';
+import { runMarketClosedAndTelegramTestSuite } from './src/server/sarrafLandingMarketTests.ts';
 import {
   computePerformanceMetrics,
   generateSignalsCsv,
@@ -273,44 +283,61 @@ async function fetchBiquoteTick() {
     // Check clock drift between server and price feed timestamp
     checkClockDrift(quoteTime);
 
+    // Record incoming valid live tick in marketPriceEngine and persist
+    const recordedTick = recordLiveTick({
+      symbol: rawData.symbol || 'XAUUSD',
+      price: mid,
+      bid: rawData.bid,
+      ask: rawData.ask,
+      high: rawData.high,
+      low: rawData.low,
+      open: rawData.open,
+      previousClose: rawData.previousClose ?? rawData.close,
+      spread: rawData.spread,
+      dayDiffPercent: rawData.dayDiffPercent,
+      direction: rawData.direction,
+      timestamp: rawData.timestamp,
+      source: rawData.source || 'biquote.io (MetaTrader 5)',
+      marketState: rawData.marketState,
+    });
+
+    const marketEval = evaluateMarketPriceStatus();
+
     // If feed was previously OFFLINE, alert admin of recovery (only during open market hours)
-    if (latestLiveQuote && latestLiveQuote.status === 'OFFLINE') {
-      if (isGoldMarketOpen(new Date())) {
-        sendAdminAlert('FEED_BACK');
-      }
+    if (latestLiveQuote && latestLiveQuote.status === 'OFFLINE' && marketEval.status === 'LIVE') {
+      sendAdminAlert('FEED_BACK');
     }
 
-    // Requirement 2: If latest tick is older than 5 seconds, mark the feed STALE
-    const isStale = effectiveAgeSeconds > 5;
-    const feedStatus = isStale ? 'STALE' : 'LIVE';
-
     latestLiveQuote = {
-      status: feedStatus,
-      symbol: rawData.symbol || 'XAUUSD',
-      price: Number(mid.toFixed(2)),
-      bid: Number(rawData.bid.toFixed(2)),
-      ask: Number(rawData.ask.toFixed(2)),
-      high: Number(rawData.high?.toFixed(2) || (mid + 15).toFixed(2)),
-      low: Number(rawData.low?.toFixed(2) || (mid - 15).toFixed(2)),
-      spread: Number(rawData.spread?.toFixed(2) || (rawData.ask - rawData.bid).toFixed(2)),
-      dayDiffPercent: Number(rawData.dayDiffPercent?.toFixed(2) || 0),
-      direction: rawData.direction || 'FLAT',
-      timestamp: rawData.timestamp || new Date().toISOString(),
+      status: marketEval.status === 'LIVE' ? 'LIVE' : marketEval.status === 'FEED_STALE' ? 'STALE' : 'OFFLINE',
+      symbol: recordedTick.symbol,
+      price: recordedTick.price,
+      bid: recordedTick.bid,
+      ask: recordedTick.ask,
+      high: recordedTick.high,
+      low: recordedTick.low,
+      spread: recordedTick.spread,
+      dayDiffPercent: recordedTick.dayDiffPercent,
+      direction: recordedTick.direction,
+      timestamp: recordedTick.timestamp,
       quoteAgeSeconds: effectiveAgeSeconds,
-      source: rawData.source || 'biquote.io (MetaTrader 5)',
+      source: recordedTick.source,
       lastReceivedAt: now,
     };
 
-    // Feed tick into the candle engine for M15, M30, and H1 consolidation
-    processTick(latestLiveQuote.price, now);
+    // Feed tick into the candle engine for M15, M30, and H1 consolidation (only during live market)
+    if (marketEval.isLive) {
+      processTick(latestLiveQuote.price, now);
+    }
 
     // Feed tick into the high-precision Signal Manager state machine
+    // A1 Rule: The last price is DISPLAY ONLY. The analysis engine, signal manager and TP/SL tracking must use only isLive = true data.
     processSignalManagerTick(
       latestLiveQuote.price,
       latestLiveQuote.bid,
       latestLiveQuote.ask,
       latestLiveQuote.spread,
-      latestLiveQuote.status,
+      marketEval.isLive ? 'LIVE' : marketEval.status === 'FEED_STALE' ? 'STALE' : 'OFFLINE',
       isNewsLockActive(now)
     );
 
@@ -324,64 +351,53 @@ async function fetchBiquoteTick() {
 
     console.warn(`[SARRAF FEED WORKER] Fetch error (${consecutiveFailures} in a row): ${err.message}. Retrying in ${Math.round(backoffDelayMs)}ms...`);
 
-    // If no tick received for more than 5/15 seconds, mark existing quote STALE or OFFLINE
-    if (latestLiveQuote) {
-      const elapsedSinceLastTick = (Date.now() - latestLiveQuote.lastReceivedAt) / 1000;
-      if (elapsedSinceLastTick > 15) {
-        latestLiveQuote.status = 'OFFLINE';
-        if (isGoldMarketOpen(new Date())) {
-          sendAdminAlert('FEED_OFFLINE');
-        }
-      } else if (elapsedSinceLastTick > 5) {
-        latestLiveQuote.status = 'STALE';
-      }
-
-      processSignalManagerTick(
-        latestLiveQuote.price,
-        latestLiveQuote.bid,
-        latestLiveQuote.ask,
-        latestLiveQuote.spread,
-        latestLiveQuote.status,
-        isNewsLockActive()
-      );
+    const marketEval = evaluateMarketPriceStatus();
+    if (marketEval.status === 'FEED_OFFLINE' && isGoldMarketOpen(new Date())) {
+      sendAdminAlert('FEED_OFFLINE');
     }
+
+    // Signal manager receives OFFLINE to freeze tracking
+    processSignalManagerTick(
+      marketEval.tick.price,
+      marketEval.tick.bid,
+      marketEval.tick.ask,
+      marketEval.tick.spread,
+      'OFFLINE',
+      isNewsLockActive()
+    );
   }
 
   // Schedule next tick loop
   setTimeout(fetchBiquoteTick, backoffDelayMs);
 }
 
-// GET /api/price/xauusd
+// GET /api/price/xauusd - Unified price endpoint with market status (A1)
 app.get('/api/price/xauusd', (_req, res) => {
   const engineStatus = getEngineStatus();
-
-  if (!latestLiveQuote) {
-    return res.status(503).json({
-      status: 'OFFLINE',
-      error: 'biquote.io real-time feed unavailable',
-      engine: engineStatus,
-    });
-  }
-
-  // Check age right now
-  const now = Date.now();
-  const ageSeconds = Math.max(0, Math.round((now - latestLiveQuote.lastReceivedAt) / 1000) + latestLiveQuote.quoteAgeSeconds);
-  const currentStatus = ageSeconds > 15 ? 'OFFLINE' : ageSeconds > 5 ? 'STALE' : latestLiveQuote.status;
+  const evalResult = evaluateMarketPriceStatus();
+  const tick = evalResult.tick;
 
   return res.json({
-    status: currentStatus,
-    symbol: latestLiveQuote.symbol,
-    price: latestLiveQuote.price,
-    bid: latestLiveQuote.bid,
-    ask: latestLiveQuote.ask,
-    high: latestLiveQuote.high,
-    low: latestLiveQuote.low,
-    spread: latestLiveQuote.spread,
-    dayDiffPercent: latestLiveQuote.dayDiffPercent,
-    direction: latestLiveQuote.direction,
-    timestamp: latestLiveQuote.timestamp,
-    quoteAgeSeconds: ageSeconds,
-    source: latestLiveQuote.source,
+    status: evalResult.status, // LIVE | MARKET_CLOSED | FEED_STALE | FEED_OFFLINE
+    isLive: evalResult.isLive, // true only for LIVE
+    symbol: tick.symbol,
+    price: tick.price,
+    bid: tick.bid,
+    ask: tick.ask,
+    open: tick.open,
+    high: tick.high,
+    low: tick.low,
+    previousClose: tick.previousClose,
+    spread: tick.spread,
+    dayDiffPercent: tick.dayDiffPercent,
+    direction: tick.direction,
+    lastTickTime: tick.timestamp,
+    lastTickTimestamp: tick.lastReceivedAt,
+    quoteAgeSeconds: evalResult.quoteAgeSeconds,
+    nextOpenTime: evalResult.nextOpenTime,
+    nextCloseTime: evalResult.nextCloseTime,
+    source: tick.source,
+    marketState: tick.marketState || (evalResult.status === 'MARKET_CLOSED' ? 'CLOSED' : 'OPEN'),
     engine: engineStatus,
   });
 });
@@ -1315,6 +1331,12 @@ app.get('/api/admin/go-live/status', requireAdminAuth, (_req, res) => {
       details: isDataDirPersistent ? `Mounted volume (${health.dataDir})` : 'Ephemeral disk detected',
     },
     {
+      id: 'lastTickPersistence',
+      name: 'Last Valid Tick (lastTick.json) Retention',
+      passed: true,
+      details: `Resolved path: ${LAST_TICK_FILE} (under DATA_DIR: ${path.resolve(DATA_DIR)})`,
+    },
+    {
       id: 'backups',
       name: 'Automated 7-Day Rolling Backups',
       passed: isBackupsWorking,
@@ -1371,6 +1393,15 @@ app.get('/api/phase5b/tests', requireAdminAuth, (_req, res) => {
 // GET /api/tests/summary-alerts - Run Summaries and Server Alerts Test Suite
 app.get('/api/tests/summary-alerts', requireAdminAuth, (_req, res) => {
   const report = runSummaryAlertTestSuite();
+  return res.json({
+    status: 'SUCCESS',
+    report,
+  });
+});
+
+// GET /api/tests/landing-market - Run Part A: Market-Closed & Telegram Test Suite
+app.get('/api/tests/landing-market', (_req, res) => {
+  const report = runMarketClosedAndTelegramTestSuite();
   return res.json({
     status: 'SUCCESS',
     report,
@@ -1509,6 +1540,8 @@ app.post('/api/auth/logout', (req, res) => {
 async function startServer() {
   // 1. Verify DATA_DIR writability
   const dirCheck = checkDataDirectory();
+  console.log(`[SARRAF STARTUP] Absolute path for DATA_DIR: ${path.resolve(DATA_DIR)}`);
+  console.log(`[SARRAF STARTUP] Absolute path for lastTick.json: ${LAST_TICK_FILE}`);
   if (!dirCheck.writable) {
     console.error(`[SARRAF FATAL] DATA_DIR (${DATA_DIR}) is not writable: ${dirCheck.error}. Server cannot safely start.`);
     process.exit(1);
@@ -1532,6 +1565,10 @@ async function startServer() {
 
   // 5. Load settings from disk
   loadSettingsFromDisk();
+
+  // 5b. Load last valid tick from disk (A1 requirement)
+  loadLastTickFromDisk();
+  setInterval(saveLastTickToDisk, 60 * 1000);
 
   // 6. Load candles from disk and bootstrap history if needed
   loadCandlesFromDisk();
@@ -1580,6 +1617,7 @@ function handleGracefulShutdown(signal: string) {
   stopBackupScheduler();
   saveCandlesToDisk();
   saveSignalsToDisk();
+  saveLastTickToDisk();
   releaseInstanceLease();
   process.exit(0);
 }

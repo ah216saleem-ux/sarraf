@@ -39,11 +39,11 @@ export const VaultFinaleDoor: React.FC<VaultFinaleDoorProps> = ({ progress }) =>
       doorPivotRef.current.rotation.y = -openProgress * 1.3;
     }
 
-    // Volumetric floodlight intensifies as door cracks open
+    // Volumetric floodlight with controlled warm light (no screen glare washout)
     if (lightFloodRef.current) {
       const mat = lightFloodRef.current.material as THREE.MeshBasicMaterial;
       if (mat) {
-        mat.opacity = openProgress * 0.85;
+        mat.opacity = openProgress * 0.22;
       }
     }
   });

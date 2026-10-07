@@ -1,5 +1,5 @@
-import React, { Suspense, useState, useEffect } from 'react';
-import { Canvas } from '@react-three/fiber';
+import React, { Suspense, useState, useEffect, useRef } from 'react';
+import { Canvas, useFrame } from '@react-three/fiber';
 import { EffectComposer, Bloom } from '@react-three/postprocessing';
 import { WorldCamera } from './WorldCamera';
 import { HeroVaultSlit } from './HeroVaultSlit';
@@ -13,19 +13,96 @@ import { AmbientDust } from './AmbientDust';
 
 interface WorldCanvasProps {
   progress: number;
+  isLiteMode?: boolean;
+  onFpsUpdate?: (fps: number) => void;
 }
 
-export const WorldCanvas: React.FC<WorldCanvasProps> = ({ progress }) => {
+// Inner FPS monitor component running inside Canvas frame loop
+function FpsTracker({
+  onLowFpsDetected,
+  onFpsUpdate,
+}: {
+  onLowFpsDetected: () => void;
+  onFpsUpdate?: (fps: number) => void;
+}) {
+  const frameCount = useRef(0);
+  const lastTime = useRef(performance.now());
+  const lowFpsCount = useRef(0);
+
+  useFrame(() => {
+    frameCount.current += 1;
+    const now = performance.now();
+    const delta = now - lastTime.current;
+
+    if (delta >= 1000) {
+      const currentFps = Math.round((frameCount.current * 1000) / delta);
+      onFpsUpdate?.(currentFps);
+
+      if (currentFps < 45) {
+        lowFpsCount.current += 1;
+        if (lowFpsCount.current >= 2) {
+          // 2 consecutive seconds below 45 FPS -> degrade quality
+          onLowFpsDetected();
+        }
+      } else {
+        lowFpsCount.current = 0;
+      }
+
+      frameCount.current = 0;
+      lastTime.current = now;
+    }
+  });
+
+  return null;
+}
+
+export const WorldCanvas: React.FC<WorldCanvasProps> = ({
+  progress,
+  isLiteMode = false,
+  onFpsUpdate,
+}) => {
   const [dpr, setDpr] = useState(1);
   const [isMobile, setIsMobile] = useState(false);
+  const [enableBloom, setEnableBloom] = useState(true);
+  const [isTabVisible, setIsTabVisible] = useState(true);
+
+  // Check tab visibility to pause Three.js rendering when hidden
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      setIsTabVisible(document.visibilityState === 'visible');
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
-    // Adaptive DPR: max 1.25 on mobile to guarantee smooth 60fps on mid-range devices
     const mobile = window.innerWidth < 768;
     setIsMobile(mobile);
     const pixelRatio = window.devicePixelRatio || 1;
-    setDpr(Math.min(pixelRatio, mobile ? 1.25 : 1.75));
+    setDpr(Math.min(pixelRatio, mobile ? 1.0 : 1.5));
   }, []);
+
+  const handleLowFps = () => {
+    // Lower quality automatically when below 45 FPS
+    setEnableBloom(false);
+    setDpr(1.0);
+  };
+
+  // Lite mode or Tab hidden calm fallback
+  if (isLiteMode) {
+    return (
+      <div className="fixed inset-0 z-0 pointer-events-none w-full h-full overflow-hidden bg-[#050505]">
+        <div className="absolute inset-0 bg-radial from-[#1e1708] via-[#08080a] to-[#040405] opacity-90" />
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-[#E8B84A]/10 blur-[120px] rounded-full pointer-events-none" />
+      </div>
+    );
+  }
+
+  if (!isTabVisible) {
+    return <div className="fixed inset-0 z-0 bg-[#050505]" />;
+  }
 
   return (
     <div className="fixed inset-0 z-0 pointer-events-none w-full h-full overflow-hidden bg-[#050505]">
@@ -40,6 +117,11 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({ progress }) => {
         }}
       >
         <color attach="background" args={['#050505']} />
+
+        <FpsTracker
+          onLowFpsDetected={handleLowFps}
+          onFpsUpdate={onFpsUpdate}
+        />
 
         {/* Ambient lighting with subtle warm amber tint */}
         <ambientLight intensity={0.4} color="#382d1c" />
@@ -73,15 +155,17 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({ progress }) => {
           {/* Scene 6: Finale - Massive Rotating Dual-Ring Gold Vault */}
           <VaultFinaleDoor progress={progress} />
 
-          {/* Cinematic Bloom Postprocessing */}
-          <EffectComposer multisampling={0}>
-            <Bloom
-              luminanceThreshold={0.55}
-              luminanceSmoothing={0.3}
-              intensity={isMobile ? 0.5 : 0.85}
-              radius={isMobile ? 0.4 : 0.7}
-            />
-          </EffectComposer>
+          {/* Cinematic Bloom Postprocessing (auto disabled if FPS < 45) */}
+          {enableBloom && (
+            <EffectComposer multisampling={0}>
+              <Bloom
+                luminanceThreshold={0.55}
+                luminanceSmoothing={0.3}
+                intensity={isMobile ? 0.4 : 0.75}
+                radius={isMobile ? 0.35 : 0.6}
+              />
+            </EffectComposer>
+          )}
         </Suspense>
       </Canvas>
     </div>
