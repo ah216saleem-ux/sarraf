@@ -28,8 +28,5 @@ RUN mkdir -p /app/data
 # Expose server port
 EXPOSE 3000
 
-# Mount persistent volume here in production
-VOLUME ["/app/data"]
-
 # Start full-stack server
 CMD ["node", "--import", "tsx", "server.ts"]
