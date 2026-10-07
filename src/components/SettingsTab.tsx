@@ -290,15 +290,13 @@ export const SettingsTab: React.FC = () => {
                 />
               </div>
 
-              <div className="space-y-1.5 bg-black/40 p-3 rounded-xl border border-white/5">
-                <label className="text-neutral-300 font-bold block">Max Signals / Day (1 - 5):</label>
+              <div className="space-y-1.5 bg-black/40 p-3 rounded-xl border border-white/5 opacity-75">
+                <label className="text-neutral-300 font-bold block">Daily Signal Limit:</label>
                 <input
-                  type="number"
-                  min={1}
-                  max={5}
-                  value={formState.maxSignalsPerDay}
-                  onChange={(e) => setFormState({ ...formState, maxSignalsPerDay: parseInt(e.target.value) })}
-                  className="w-full bg-black border border-white/15 rounded-lg px-3 py-1.5 text-white focus:border-[#E8B84A] focus:outline-none"
+                  type="text"
+                  disabled
+                  value="Unlimited (No Daily Cap)"
+                  className="w-full bg-black/60 border border-white/10 rounded-lg px-3 py-1.5 text-neutral-400 focus:outline-none cursor-not-allowed font-medium text-xs"
                 />
               </div>
 

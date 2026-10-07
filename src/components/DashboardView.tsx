@@ -833,7 +833,7 @@ export const DashboardView: React.FC = () => {
 
                   <div className="flex items-center gap-2 font-mono text-xs">
                     <span className="text-neutral-400 text-[11px]">
-                      TODAY: <strong className="text-white">{signalState?.todaySignalsCount ?? 0}/3</strong>
+                      TODAY: <strong className="text-white">{signalState?.todaySignalsCount ?? 0} sent</strong>
                     </span>
 
                     <button

@@ -531,7 +531,20 @@ export function triggerAdminTelegramAlert(alertType: string, message: string): b
   lastAlertTimestampMap.set(alertType, now);
 
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
+  let chatId = process.env.TELEGRAM_CHAT_ID;
+
+  // Fallback to dynamic chat ID from file to avoid circular imports
+  try {
+    const DYNAMIC_CHAT_FILE = path.resolve(DATA_DIR, 'telegram_chat.json');
+    if (fs.existsSync(DYNAMIC_CHAT_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(DYNAMIC_CHAT_FILE, 'utf-8'));
+      if (parsed && typeof parsed.chatId === 'string') {
+        chatId = parsed.chatId;
+      }
+    }
+  } catch {
+    // ignore
+  }
 
   if (!token || !chatId || token === 'MY_TELEGRAM_BOT_TOKEN') {
     console.log(`[ADMIN TELEGRAM ALERT] (${alertType}) [DRY RUN / NO BOT]: ${message}`);

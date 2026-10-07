@@ -252,7 +252,7 @@ export function formatCommandResponse(
       const cd = context.cooldownMinutes ? `${context.cooldownMinutes}m remaining` : 'None';
       return [
         `SARRAF Terminal Status: ${state}`,
-        `Signals Today: ${count}/3`,
+        `Signals Today: ${count}`,
         `Cooldown: ${cd}`,
       ].join('\n');
     }

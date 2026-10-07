@@ -786,10 +786,8 @@ export function processSignalManagerTick(
 
   // 3. SCANNING STATE: Look for new setup if no pending/active signal exists
   if (managerState.state === 'SCANNING') {
-    const maxSignals = getCurrentSettings().maxSignalsPerDay ?? 3;
-    if (managerState.dailySignalsCount >= maxSignals) {
-      return;
-    }
+    // Note: Daily signal limit check removed per user request ("simple ismein minimum or maximum nahi hai").
+    // System runs 24/5 sequentially: Trade -> SL/TP Hit -> Cooldown -> Next Trade. No daily limit cap.
 
     if (signalCreationLock) return;
 

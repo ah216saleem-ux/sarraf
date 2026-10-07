@@ -601,25 +601,8 @@ export function runSarrafAnalysis(livePrice: number, liveSpread: number): Engine
     };
   }
 
-  // Max 3 signals per day, 1 active signal at a time
-  if (dailySignalsCount >= 3) {
-    return {
-      timestamp: nowStr,
-      engineState: engineStatus.engineState,
-      filters: filterStates,
-      bias: { d1: d1Struct.bias, h4: h4Struct.bias, h1: h1Struct.bias, alignment: htfAlignment },
-      htfLevels,
-      nearestObstacleDistance: Number(minObstacleDistance.toFixed(2)),
-      activeZones: m30Zones,
-      activeSignal: activeSignalStore,
-      dailySignalsCount,
-      latestScoreBreakdown: null,
-      latestScanDecision: {
-        action: 'NO_SETUP',
-        reason: 'Daily execution cap reached (Max 3 institutional signals per day).',
-      },
-    };
-  }
+  // Note: Daily signal limit check removed per user request.
+  // System runs sequentially with unlimited signals per day, paced by post-trade cooldown.
 
   // Find candidate zones in the H1 bias direction
   const targetType = h1Struct.bias === 'BULLISH' ? 'BULLISH_OB' : 'BEARISH_OB';

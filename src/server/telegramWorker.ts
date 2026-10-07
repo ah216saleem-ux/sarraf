@@ -26,7 +26,7 @@ import {
 } from './signalManager.ts';
 import { getClosedCandles, getEngineStatus, getCandleStore } from './candleEngine.ts';
 import { evaluateStructureBias, isGoldMarketOpen } from './sarrafEngine.ts';
-import { getCurrentSettings, updateSettings } from './settingsEngine.ts';
+import { getCurrentSettings, updateSettings, verifyAdminUsername, verifyAdminPassword } from './settingsEngine.ts';
 import { getNewsFeedStatus, checkNewsLockState } from './newsEngine.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -34,6 +34,37 @@ const __dirname = path.dirname(__filename);
 const DATA_DIR = path.resolve(__dirname, '../../data');
 const OUTBOX_FILE = path.resolve(DATA_DIR, 'outbox.json');
 const THREAD_MAP_FILE = path.resolve(DATA_DIR, 'telegram_threads.json');
+const DYNAMIC_CHAT_FILE = path.resolve(DATA_DIR, 'telegram_chat.json');
+
+let dynamicChatId: string | null = null;
+
+export function getDynamicTelegramChatId(): string | null {
+  if (dynamicChatId) return dynamicChatId;
+  if (fs.existsSync(DYNAMIC_CHAT_FILE)) {
+    try {
+      const data = fs.readFileSync(DYNAMIC_CHAT_FILE, 'utf-8');
+      const parsed = JSON.parse(data);
+      if (parsed && typeof parsed.chatId === 'string') {
+        dynamicChatId = parsed.chatId;
+        return dynamicChatId;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
+export function setDynamicTelegramChatId(id: string) {
+  dynamicChatId = id;
+  try {
+    ensureDataDir();
+    fs.writeFileSync(DYNAMIC_CHAT_FILE, JSON.stringify({ chatId: id }, null, 2), 'utf-8');
+    console.log(`[TELEGRAM WORKER] Dynamic target chat ID updated to: ${id}`);
+  } catch (err: any) {
+    console.error('[TELEGRAM WORKER] Failed to save dynamic chat ID:', err.message);
+  }
+}
 
 export interface OutboxRecord {
   eventId: string;
@@ -133,7 +164,7 @@ export async function sendTelegramHttpRequest(
   parseMode?: 'HTML' | 'Markdown'
 ): Promise<{ success: boolean; messageId?: number; error?: string; retryAfterSec?: number }> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = targetChatId || process.env.TELEGRAM_CHAT_ID;
+  const chatId = targetChatId || getDynamicTelegramChatId() || process.env.TELEGRAM_CHAT_ID;
 
   if (!token || !chatId || token === '123456789:ABCdefGhIJKlmNoPQRstuVWXyz') {
     return { success: false, error: 'Telegram bot token or target chat ID unconfigured.' };
@@ -362,10 +393,27 @@ async function processOutboxItem(item: OutboxRecord): Promise<void> {
     item.retryCount = (item.retryCount || 0) + 1;
     item.lastError = result.error || 'Failed to dispatch';
 
-    if (item.retryCount >= 5) {
+    const isFatalError = result.error && (
+      result.error.includes('Forbidden:') ||
+      result.error.includes('chat not found') ||
+      result.error.includes('deactivated')
+    );
+
+    if (isFatalError) {
+      item.status = 'FAILED';
+      console.error(`[TELEGRAM WORKER] Fatal delivery error for event ${item.eventId}: ${item.lastError}. Retries aborted.`);
+      console.error(`[TELEGRAM WORKER] ADVICE: If the error is 'Forbidden: the bot can't send messages to the bot', this means TELEGRAM_CHAT_ID is set incorrectly (it might be set to the bot's own ID/username). Please run the '/setchat <username> <password>' command in your target Telegram chat or group to register it dynamically!`);
+      
+      // Prevent infinite alert loop by not sending failure alerts for ALERT/ADMIN events
+      if (item.type !== 'ADMIN_ALERT' && !item.eventId.startsWith('ALERT-')) {
+        sendAdminAlert('TELEGRAM_FAILING');
+      }
+    } else if (item.retryCount >= 5) {
       item.status = 'FAILED';
       console.error(`[TELEGRAM WORKER] Permanently failed event ${item.eventId} after 5 attempts: ${item.lastError}`);
-      sendAdminAlert('TELEGRAM_FAILING');
+      if (item.type !== 'ADMIN_ALERT' && !item.eventId.startsWith('ALERT-')) {
+        sendAdminAlert('TELEGRAM_FAILING');
+      }
     } else {
       console.warn(`[TELEGRAM WORKER] Event ${item.eventId} attempt ${item.retryCount}/5 failed: ${item.lastError}`);
     }
@@ -460,7 +508,7 @@ async function executeTelegramAction(
       `📡 <b>Target Chat ID:</b> <code>${chatId}</code>`,
       `⚙️ <b>Execution Mode:</b> ${dryRun ? '🟡 DRY RUN (SIMULATION)' : '🟢 LIVE DISPATCH'}`,
       `⚡ <b>Scanner State:</b> ${managerState.isPaused ? '⏸️ PAUSED' : managerState.state}`,
-      `📊 <b>Daily Signals:</b> ${managerState.dailySignalsCount}/3 | <b>Max:</b> 3/day`,
+      `📊 <b>Daily Signals:</b> ${managerState.dailySignalsCount} sent today | <b>Max:</b> Unlimited`,
       `⏱️ <b>Cooldown:</b> ${managerState.cooldownEndsAt ? '⏳ Active Cooldown' : '✅ Active Scanning'}`,
       '',
       '👇 <b>Quick Control Panel (Tap any button below):</b>',
@@ -489,7 +537,7 @@ async function executeTelegramAction(
       `⚡ <b>Engine Health:</b> ${engineStatus.engineState} (${engineStatus.usable.h1} H1 / ${engineStatus.usable.m15} M15 bars)`,
       `🎯 <b>Scanner State:</b> ${managerState.isPaused ? '⏸️ PAUSED' : managerState.state}`,
       `🚀 <b>Mode:</b> ${dryRun ? '🟡 DRY RUN (Simulation)' : '🟢 LIVE DISPATCH'}`,
-      `📈 <b>Daily Signals:</b> ${managerState.dailySignalsCount}/3`,
+      `📈 <b>Daily Signals Sent:</b> ${managerState.dailySignalsCount}`,
       `⏱️ <b>Cooldown:</b> ${cdMins > 0 ? `⏳ ${cdMins} min remaining` : '✅ Inactive (Scanning)'}`,
       `📰 <b>News Lock:</b> ${newsStatus.isLockActive ? `🔴 LOCKED (${newsStatus.activeLockEvent?.title})` : '🟢 Unlocked'}`,
       `📡 <b>Outbox Deliveries:</b> Sent: ${workerStatus.sentCount} | Pending: ${workerStatus.pendingCount} | Failed: ${workerStatus.failedCount}`,
@@ -715,7 +763,7 @@ async function executeTelegramAction(
       '',
       `⏱️ <b>Post-Trade Cooldown:</b> ${settings.cooldownMinMinutes}m - ${settings.cooldownMaxMinutes}m`,
       `💯 <b>Minimum Confluence Score:</b> ${settings.minScore}/100`,
-      `📊 <b>Max Signals Per Day:</b> ${settings.maxSignalsPerDay}`,
+      `📊 <b>Max Signals Per Day:</b> Unlimited (Sequential)`,
       `🛡️ <b>Spread Limit:</b> $${settings.spreadLimit.toFixed(2)}`,
     ].join('\n');
 
@@ -739,6 +787,57 @@ async function executeTelegramAction(
     ].join('\n');
 
     await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+    return;
+  }
+
+  if (normAction === 'setchat' || normAction === 'register' || normAction === 'setchannel') {
+    if (!rawArgs || rawArgs.length < 2) {
+      const usageText = [
+        '⚠️ <b>INVALID CREDENTIALS FOR CHAT REGISTRATION</b>',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        'Please provide your administrative credentials to register this chat:',
+        '',
+        '<code>/setchat [admin_username] [admin_password]</code>',
+        '',
+        '💡 <i>Example:</i> <code>/setchat gmcf7 MySecretPassword123</code>',
+        '',
+        'This secures the terminal and prevents unauthorized configuration.',
+      ].join('\n');
+      await sendTelegramHttpRequest(usageText, replyToMessageId, chatId, undefined, 'HTML');
+      return;
+    }
+
+    const usernameInput = rawArgs[0];
+    const passwordInput = rawArgs[1];
+
+    const userValid = verifyAdminUsername(usernameInput);
+    const passValid = verifyAdminPassword(passwordInput);
+
+    if (!userValid || !passValid) {
+      const failText = [
+        '❌ <b>AUTHENTICATION FAILED</b>',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━',
+        'The admin username or password provided is incorrect.',
+        'Please verify your credentials and try again.',
+      ].join('\n');
+      await sendTelegramHttpRequest(failText, replyToMessageId, chatId, undefined, 'HTML');
+      return;
+    }
+
+    // Dynamic Chat ID registration
+    setDynamicTelegramChatId(String(chatId));
+
+    const successText = [
+      '✅ <b>TELEGRAM CHAT REGISTERED SUCCESSFULLY</b>',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `This chat (ID: <code>${chatId}</code>) is now registered as the active target for all institutional setups, market summaries, and system notifications.`,
+      '',
+      '⚙️ <b>Live automatic trades will start dispatching here immediately!</b>',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      '<i>Ab is chat par automatic signals, summaries, aur alerts send kiye jayein ge!</i> 🚀',
+    ].join('\n');
+
+    await sendTelegramHttpRequest(successText, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
     return;
   }
 
@@ -1292,7 +1391,7 @@ export function getTelegramWorkerStatus(): TelegramWorkerStatus {
   const lastSent = outbox.filter((o) => o.status === 'SENT').pop();
 
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
+  const chatId = getDynamicTelegramChatId() || process.env.TELEGRAM_CHAT_ID;
   const configured = Boolean(token && chatId && token !== '123456789:ABCdefGhIJKlmNoPQRstuVWXyz');
 
   return {
