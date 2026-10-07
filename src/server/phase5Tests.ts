@@ -345,6 +345,12 @@ export function runPhase5TestSuite(): Phase5TestSuiteReport {
   // Test G: Admin Password Change & New IP Tracking
   // -------------------------------------------------------------
   try {
+    const testDataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.resolve(process.cwd(), 'data');
+    const testKnownIpsFile = path.resolve(testDataDir, 'known_ips.json');
+    if (fs.existsSync(testKnownIpsFile)) {
+      try { fs.unlinkSync(testKnownIpsFile); } catch {}
+    }
+
     const initialVerify = verifyAdminPassword('SarrafAdmin2026!');
     const ipCheck1 = recordSuccessfulLogin('192.168.1.50');
     const ipCheck2 = recordSuccessfulLogin('192.168.1.50'); // existing IP

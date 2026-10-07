@@ -31,9 +31,6 @@ export interface CandleStore {
   D1: Candle[];
 }
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const DATA_DIR = path.resolve(__dirname, '../../data');
 const DATA_FILE = path.resolve(DATA_DIR, 'candles.json');
 
 let store: CandleStore = {

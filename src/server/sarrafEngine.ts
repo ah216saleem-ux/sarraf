@@ -382,8 +382,8 @@ export function isNewsLockActive(timeMs: number = Date.now()): boolean {
   }
 
   const settings = getCurrentSettings();
-  const preMins = settings.newsLockPreMinutes || 30;
-  const postMins = settings.newsLockPostMinutes || 15;
+  const preMins = settings.tier1PreMinutes || 45;
+  const postMins = settings.tier1PostMinutes || 30;
 
   for (const event of HIGH_IMPACT_NEWS_SCHEDULE) {
     const eventTime = new Date(event.time).getTime();

@@ -64,5 +64,23 @@
     "lastAttemptAt": "2026-10-07T13:06:48.582Z",
     "deliveryMode": "DRY_RUN",
     "telegramMessageId": 574736
+  },
+  {
+    "eventId": "EVT-1791402869954-af2f2d80",
+    "signalId": "SRF-TEST-TIMEOUT-1791402869953",
+    "type": "REVIEW_TIMEOUT",
+    "payload": {
+      "signalId": "SRF-TEST-TIMEOUT-1791402869953",
+      "direction": "BUY",
+      "eventPrice": 4160,
+      "bid": 4160,
+      "ask": 4160,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Test timeout simulation"
+    },
+    "createdAt": "2026-10-07T19:54:29.954Z",
+    "status": "PENDING_DELIVERY"
   }
 ]
