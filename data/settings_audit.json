@@ -1,6 +1,62 @@
 [
   {
     "adminEmail": "test-admin@sarraf.gold",
+    "field": "maxSignalsPerDay",
+    "oldValue": 4,
+    "newValue": 3,
+    "id": "AUD-MUYKVP5H",
+    "timestamp": "2026-10-07T20:46:41.429Z"
+  },
+  {
+    "adminEmail": "test-admin@sarraf.gold",
+    "field": "maxSignalsPerDay",
+    "oldValue": 3,
+    "newValue": 4,
+    "id": "AUD-MUYKVP5H",
+    "timestamp": "2026-10-07T20:46:41.429Z"
+  },
+  {
+    "adminEmail": "audit-admin@sarraf.gold",
+    "field": "dryRun",
+    "oldValue": false,
+    "newValue": true,
+    "id": "AUD-MUYJMZZI",
+    "timestamp": "2026-10-07T20:11:55.950Z"
+  },
+  {
+    "adminEmail": "audit-admin@sarraf.gold",
+    "field": "dryRun",
+    "oldValue": true,
+    "newValue": false,
+    "id": "AUD-MUYJMZZH",
+    "timestamp": "2026-10-07T20:11:55.949Z"
+  },
+  {
+    "adminEmail": "test-admin@sarraf.gold",
+    "field": "minScore",
+    "oldValue": 80,
+    "newValue": 84,
+    "id": "AUD-MUYJMZYI",
+    "timestamp": "2026-10-07T20:11:55.914Z"
+  },
+  {
+    "adminEmail": "test-admin@sarraf.gold",
+    "field": "minScore",
+    "oldValue": 80,
+    "newValue": 84,
+    "id": "AUD-MUYJC62I",
+    "timestamp": "2026-10-07T20:03:30.618Z"
+  },
+  {
+    "adminEmail": "test-admin@sarraf.gold",
+    "field": "minScore",
+    "oldValue": 80,
+    "newValue": 84,
+    "id": "AUD-MUYIZQUL",
+    "timestamp": "2026-10-07T19:53:51.021Z"
+  },
+  {
+    "adminEmail": "test-admin@sarraf.gold",
     "field": "minScore",
     "oldValue": 80,
     "newValue": 84,

@@ -19,6 +19,7 @@ import {
   runBacktestReplay,
   isNewsLockActive,
   evaluateStructureBias,
+  isGoldMarketOpen,
 } from './src/server/sarrafEngine.ts';
 import {
   loadSignalsFromDisk,
@@ -40,6 +41,10 @@ import {
   startTelegramWorker,
   getTelegramWorkerStatus,
   sendManualTestMessage,
+  sendSampleTestSignal,
+  sendManualTestDailySummary,
+  sendManualTestWeeklyReport,
+  sendAdminAlert,
   setDryRunMode,
   retryFailedOutboxItem,
   getIsDryRun,
@@ -67,6 +72,7 @@ import {
   exportSettingsJson,
   importSettingsJson,
   verifyAdminPassword,
+  verifyAdminUsername,
   changeAdminPassword,
   recordSuccessfulLogin,
 } from './src/server/settingsEngine.ts';
@@ -87,6 +93,7 @@ import {
   DATA_DIR,
 } from './src/server/deploymentSafety.ts';
 import { runPhase5BTestSuite } from './src/server/phase5bTests.ts';
+import { runSummaryAlertTestSuite } from './src/server/sarrafSummaryAlertTests.ts';
 import {
   computePerformanceMetrics,
   generateSignalsCsv,
@@ -266,9 +273,11 @@ async function fetchBiquoteTick() {
     // Check clock drift between server and price feed timestamp
     checkClockDrift(quoteTime);
 
-    // If feed was previously OFFLINE, alert admin of recovery
+    // If feed was previously OFFLINE, alert admin of recovery (only during open market hours)
     if (latestLiveQuote && latestLiveQuote.status === 'OFFLINE') {
-      triggerAdminTelegramAlert('FEED_RESTORED', `XAU/USD Spot Price Feed restored at $${mid.toFixed(2)}.`);
+      if (isGoldMarketOpen(new Date())) {
+        sendAdminAlert('FEED_BACK');
+      }
     }
 
     // Requirement 2: If latest tick is older than 5 seconds, mark the feed STALE
@@ -320,6 +329,9 @@ async function fetchBiquoteTick() {
       const elapsedSinceLastTick = (Date.now() - latestLiveQuote.lastReceivedAt) / 1000;
       if (elapsedSinceLastTick > 15) {
         latestLiveQuote.status = 'OFFLINE';
+        if (isGoldMarketOpen(new Date())) {
+          sendAdminAlert('FEED_OFFLINE');
+        }
       } else if (elapsedSinceLastTick > 5) {
         latestLiveQuote.status = 'STALE';
       }
@@ -616,6 +628,33 @@ app.post('/api/telegram/test-message', requireAdminAuth, async (req, res) => {
   const user = (req as any).user;
   console.log(`[AUDIT] Admin ${user?.email} triggered test Telegram message.`);
   const result = await sendManualTestMessage(user?.email || 'admin');
+  return res.json(result);
+});
+
+// POST /api/telegram/test-signal - Manual Sample Signal Dispatch to Telegram
+app.post('/api/telegram/test-signal', requireAdminAuth, async (req, res) => {
+  const user = (req as any).user;
+  const { chatId } = req.body || {};
+  console.log(`[AUDIT] Admin ${user?.email} triggered sample test trade signal to Telegram.`);
+  const result = await sendSampleTestSignal(chatId);
+  return res.json(result);
+});
+
+// POST /api/telegram/test-daily-summary - Manual Test Daily Summary Dispatch
+app.post('/api/telegram/test-daily-summary', requireAdminAuth, async (req, res) => {
+  const user = (req as any).user;
+  const { chatId } = req.body || {};
+  console.log(`[AUDIT] Admin ${user?.email} triggered test Daily Summary to Telegram.`);
+  const result = await sendManualTestDailySummary(chatId);
+  return res.json(result);
+});
+
+// POST /api/telegram/test-weekly-report - Manual Test Weekly Report Dispatch
+app.post('/api/telegram/test-weekly-report', requireAdminAuth, async (req, res) => {
+  const user = (req as any).user;
+  const { chatId } = req.body || {};
+  console.log(`[AUDIT] Admin ${user?.email} triggered test Weekly Report to Telegram.`);
+  const result = await sendManualTestWeeklyReport(chatId);
   return res.json(result);
 });
 
@@ -1360,6 +1399,15 @@ app.get('/api/phase5b/tests', requireAdminAuth, (_req, res) => {
   });
 });
 
+// GET /api/tests/summary-alerts - Run Summaries and Server Alerts Test Suite
+app.get('/api/tests/summary-alerts', requireAdminAuth, (_req, res) => {
+  const report = runSummaryAlertTestSuite();
+  return res.json({
+    status: 'SUCCESS',
+    report,
+  });
+});
+
 // POST /api/admin/go-live/override - Admin override with typed phrase
 app.post('/api/admin/go-live/override', requireAdminAuth, (req, res) => {
   const user = (req as any).user;
@@ -1406,7 +1454,7 @@ app.post('/api/auth/login', (req, res) => {
     });
   }
 
-  const isUserValid = email.trim().toLowerCase() === configuredAdminUser.trim().toLowerCase();
+  const isUserValid = verifyAdminUsername(email);
   const isPassValid = verifyAdminPassword(password);
 
   if (isUserValid && isPassValid) {
@@ -1421,7 +1469,7 @@ app.post('/api/auth/login', (req, res) => {
 
     const token = crypto.randomBytes(32).toString('hex');
     const userPayload = {
-      email: configuredAdminUser,
+      email: email.trim().toLowerCase(),
       accountType: 'Institutional Desk',
       terminalId: `SRF-${Math.floor(1000 + Math.random() * 9000)}-XAU`,
     };

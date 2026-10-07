@@ -315,6 +315,76 @@ export const SettingsTab: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {/* Automated Telegram Summaries & Reports */}
+          <div className="glass-panel p-5 rounded-2xl border border-white/10 space-y-4">
+            <h3 className="text-sm font-bold text-white tracking-wider flex items-center gap-2 pb-3 border-b border-white/10">
+              <Zap className="w-4 h-4 text-[#FFD97A]" />
+              <span>AUTOMATED TELEGRAM SUMMARIES & REPORTS</span>
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2 bg-black/40 p-3.5 rounded-xl border border-white/5">
+                <div className="flex items-center justify-between">
+                  <label className="text-neutral-200 font-bold">Daily Summary:</label>
+                  <label className="flex items-center gap-2 cursor-pointer text-xs">
+                    <input
+                      type="checkbox"
+                      checked={formState.dailySummaryEnabled ?? true}
+                      onChange={(e) => setFormState({ ...formState, dailySummaryEnabled: e.target.checked })}
+                      className="accent-[#E8B84A]"
+                    />
+                    <span className={formState.dailySummaryEnabled ? 'text-emerald-400 font-bold' : 'text-neutral-500'}>
+                      {formState.dailySummaryEnabled ? 'Enabled' : 'Disabled'}
+                    </span>
+                  </label>
+                </div>
+                <div className="space-y-1">
+                  <span className="text-[11px] text-neutral-400 block">Scheduled UTC Time (HH:MM):</span>
+                  <input
+                    type="text"
+                    placeholder="22:30"
+                    value={formState.dailySummaryTimeUtc || '22:30'}
+                    onChange={(e) => setFormState({ ...formState, dailySummaryTimeUtc: e.target.value })}
+                    className="w-full bg-black border border-white/15 rounded-lg px-3 py-1.5 text-white focus:border-[#E8B84A] focus:outline-none font-mono text-xs"
+                  />
+                  <span className="text-[10px] text-neutral-500 block">
+                    Displays in <strong>{formState.displayTz || 'UTC'}</strong> timezone. Counts closed trades of that UTC day.
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-2 bg-black/40 p-3.5 rounded-xl border border-white/5">
+                <div className="flex items-center justify-between">
+                  <label className="text-neutral-200 font-bold">Weekly Report (Friday):</label>
+                  <label className="flex items-center gap-2 cursor-pointer text-xs">
+                    <input
+                      type="checkbox"
+                      checked={formState.weeklyReportEnabled ?? true}
+                      onChange={(e) => setFormState({ ...formState, weeklyReportEnabled: e.target.checked })}
+                      className="accent-[#E8B84A]"
+                    />
+                    <span className={formState.weeklyReportEnabled ? 'text-emerald-400 font-bold' : 'text-neutral-500'}>
+                      {formState.weeklyReportEnabled ? 'Enabled' : 'Disabled'}
+                    </span>
+                  </label>
+                </div>
+                <div className="space-y-1">
+                  <span className="text-[11px] text-neutral-400 block">Friday UTC Time (HH:MM):</span>
+                  <input
+                    type="text"
+                    placeholder="23:00"
+                    value={formState.weeklyReportTimeUtc || '23:00'}
+                    onChange={(e) => setFormState({ ...formState, weeklyReportTimeUtc: e.target.value })}
+                    className="w-full bg-black border border-white/15 rounded-lg px-3 py-1.5 text-white focus:border-[#E8B84A] focus:outline-none font-mono text-xs"
+                  />
+                  <span className="text-[10px] text-neutral-500 block">
+                    Note: Win rate counts <strong>WIN / (WIN + LOSS)</strong> (breakeven excluded).
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Right Column (5 cols): Invariant Rules & Audit History */}

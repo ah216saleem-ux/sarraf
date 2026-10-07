@@ -15,6 +15,7 @@ import {
   writeJsonAtomic,
   recoverCorruptedFileFromLatestBackup,
 } from './deploymentSafety.ts';
+import { getCurrentSettings } from './settingsEngine.ts';
 
 const SIGNALS_FILE = path.resolve(DATA_DIR, 'signals.json');
 const OUTBOX_FILE = path.resolve(DATA_DIR, 'outbox.json');
@@ -655,22 +656,11 @@ export function closeActiveSignal(
     notes || `Closed via ${reason} (${resultClass})`
   );
 
-  // Update loss counters
-  if (resultClass === 'LOSS') {
-    managerState.consecutiveLossesToday += 1;
-    if (managerState.consecutiveLossesToday >= 2) {
-      managerState.dailyLossLimitReached = true;
-      console.warn('[SIGNAL MANAGER] 2 consecutive losses today. Halting signals for remainder of day.');
-    }
-  } else if (resultClass === 'WIN') {
-    managerState.consecutiveLossesToday = 0;
-  }
-
   // Push to persistent history
   managerState.history.unshift({ ...signal });
   managerState.currentSignal = null;
 
-  // Enter random 30-45 min cooldown after trade closes
+  // Enter random 30-45 min cooldown after trade closes (Losses do NOT stop trading; standard cooldown runs then next setup executes automatically)
   enterCooldown();
 }
 
@@ -726,7 +716,8 @@ export function processSignalManagerTick(
 
   // 3. SCANNING STATE: Look for new setup if no pending/active signal exists
   if (managerState.state === 'SCANNING') {
-    if (managerState.dailySignalsCount >= 3 || managerState.dailyLossLimitReached) {
+    const maxSignals = getCurrentSettings().maxSignalsPerDay ?? 3;
+    if (managerState.dailySignalsCount >= maxSignals) {
       return;
     }
 
@@ -1275,8 +1266,8 @@ export function getSignalManagerPublicState(livePrice: number | null) {
     state: managerState.state,
     isPaused: managerState.isPaused,
     todaySignalsCount: managerState.dailySignalsCount,
-    maxDailySignals: 3,
-    dailyLossLimitReached: managerState.dailyLossLimitReached,
+    maxDailySignals: getCurrentSettings().maxSignalsPerDay ?? 3,
+    dailyLossLimitReached: false,
     cooldownEndsAt: managerState.cooldownEndsAt,
     cooldownRemainingSeconds,
     activeSignal: current

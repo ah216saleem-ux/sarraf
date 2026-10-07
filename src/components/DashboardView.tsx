@@ -25,6 +25,8 @@ import {
   RotateCcw,
   Sparkles,
   Sliders,
+  Calendar,
+  FileText,
 } from 'lucide-react';
 import {
   formatNewSignalMessage,
@@ -64,6 +66,7 @@ export const DashboardView: React.FC = () => {
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   // Test Reports
+  const [summaryAlertReport, setSummaryAlertReport] = useState<any>(null);
   const [phase3TestReport, setPhase3TestReport] = useState<any>(null);
   const [phase4TestReport, setPhase4TestReport] = useState<any>(null);
   const [phase5TestReport, setPhase5TestReport] = useState<any>(null);
@@ -207,6 +210,42 @@ export const DashboardView: React.FC = () => {
     }
   };
 
+  const handleSendTestSignal = async () => {
+    setActionLoading(true);
+    try {
+      const res = await fetch('/api/telegram/test-signal', { method: 'POST' });
+      const json = await res.json();
+      setActionMessage(json.message);
+      await fetchAllData();
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleSendTestDailySummary = async () => {
+    setActionLoading(true);
+    try {
+      const res = await fetch('/api/telegram/test-daily-summary', { method: 'POST' });
+      const json = await res.json();
+      setActionMessage(json.message);
+      await fetchAllData();
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleSendTestWeeklyReport = async () => {
+    setActionLoading(true);
+    try {
+      const res = await fetch('/api/telegram/test-weekly-report', { method: 'POST' });
+      const json = await res.json();
+      setActionMessage(json.message);
+      await fetchAllData();
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const handleToggleDryRun = async (targetDryRun: boolean) => {
     setActionLoading(true);
     try {
@@ -244,12 +283,17 @@ export const DashboardView: React.FC = () => {
   const handleRunAllTests = async () => {
     setIsRunningTests(true);
     try {
-      const [p3Res, p4Res, p5Res, p5bRes] = await Promise.all([
+      const [sumRes, p3Res, p4Res, p5Res, p5bRes] = await Promise.all([
+        fetch('/api/tests/summary-alerts'),
         fetch('/api/signal/tests'),
         fetch('/api/phase4/tests'),
         fetch('/api/phase5/tests'),
         fetch('/api/phase5b/tests'),
       ]);
+      if (sumRes.ok) {
+        const sumJson = await sumRes.json();
+        setSummaryAlertReport(sumJson.report);
+      }
       if (p3Res.ok) {
         const p3Json = await p3Res.json();
         setPhase3TestReport(p3Json.report);
@@ -1059,14 +1103,41 @@ export const DashboardView: React.FC = () => {
               </div>
 
               {/* Action Buttons */}
-              <div className="flex items-center gap-3 font-mono text-xs">
+              <div className="flex items-center gap-3 font-mono text-xs flex-wrap">
                 <button
                   onClick={handleSendTestMessage}
                   disabled={actionLoading}
                   className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/15 text-neutral-200 hover:text-white flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <Send className="w-3.5 h-3.5 text-[#29B6F6]" />
-                  <span>SEND TEST MESSAGE</span>
+                  <span>SEND STATUS TEST</span>
+                </button>
+
+                <button
+                  onClick={handleSendTestSignal}
+                  disabled={actionLoading}
+                  className="px-3.5 py-2 rounded-lg bg-[#E8B84A]/15 hover:bg-[#E8B84A]/25 border border-[#E8B84A]/40 text-[#FFD97A] font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Zap className="w-3.5 h-3.5 text-[#FFD97A]" />
+                  <span>SEND TEST SIGNAL</span>
+                </button>
+
+                <button
+                  onClick={handleSendTestDailySummary}
+                  disabled={actionLoading}
+                  className="px-3 py-2 rounded-lg bg-blue-500/15 hover:bg-blue-500/25 border border-blue-500/40 text-blue-300 font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Calendar className="w-3.5 h-3.5 text-blue-300" />
+                  <span>TEST DAILY SUMMARY</span>
+                </button>
+
+                <button
+                  onClick={handleSendTestWeeklyReport}
+                  disabled={actionLoading}
+                  className="px-3 py-2 rounded-lg bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/40 text-purple-300 font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5 text-purple-300" />
+                  <span>TEST WEEKLY REPORT</span>
                 </button>
 
                 <button
@@ -1380,6 +1451,57 @@ export const DashboardView: React.FC = () => {
                 {isRunningTests ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
                 <span>RERUN ALL TEST SUITES</span>
               </button>
+            </div>
+
+            {/* Summaries & Server Alerts Test Table (Phase 6 / Production Delivery) */}
+            <div className="space-y-3 font-mono text-xs pb-4 border-b border-white/10">
+              <div className="flex items-center justify-between pb-1 border-b border-white/10">
+                <span className="font-bold text-white">SUMMARIES, SERVER ALERTS & LOSS STOP REMOVAL (8 TESTS)</span>
+                {summaryAlertReport && (
+                  <span
+                    className={`font-bold px-2 py-0.5 rounded text-[10px] ${
+                      summaryAlertReport.allPassed
+                        ? 'text-emerald-400 bg-emerald-950/60 border border-emerald-700/50'
+                        : 'text-rose-400 bg-rose-950/60 border border-rose-700/50'
+                    }`}
+                  >
+                    {summaryAlertReport.passedCount} / {summaryAlertReport.totalTests} PASSED
+                  </span>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                {summaryAlertReport?.results?.map((t: any) => (
+                  <div
+                    key={t.id}
+                    className={`p-3 rounded-xl border ${
+                      t.passed ? 'bg-emerald-950/20 border-emerald-800/30' : 'bg-rose-950/20 border-rose-800/30'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-[#FFD97A]">[{t.id.toUpperCase()}]</span>
+                        <span className="font-bold text-white">{t.name}</span>
+                      </div>
+                      <span
+                        className={`font-bold px-2 py-0.5 rounded text-[10px] ${
+                          t.passed ? 'text-emerald-400 bg-emerald-950/60' : 'text-rose-400 bg-rose-950/60'
+                        }`}
+                      >
+                        {t.passed ? 'PASS' : 'FAIL'}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-neutral-400">
+                      <span className="text-neutral-500">Expected: </span>
+                      {t.expected}
+                    </div>
+                    <div className="text-[11px] text-neutral-300 mt-0.5">
+                      <span className="text-neutral-500">Result: </span>
+                      {t.actual}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
 
             {/* Phase 5B Test Table */}

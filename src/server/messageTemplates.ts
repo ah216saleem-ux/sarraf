@@ -105,20 +105,106 @@ export function formatCooldownLine(cooldownMins: number): string {
   return `Next setup in about ${roundedMins} min`;
 }
 
-// 4. Admin Alert Messages (Max once per 30m per type)
-export function formatAdminAlert(type: 'FEED_OFFLINE' | 'FEED_BACK' | 'ENGINE_PAUSED' | 'ENGINE_RESUMED' | 'TELEGRAM_FAILING'): string {
+// 4. Admin Alert Messages (Max once per 30m per type, with back to normal)
+export type AdminAlertType =
+  | 'FEED_OFFLINE'
+  | 'FEED_BACK'
+  | 'ENGINE_PAUSED'
+  | 'ENGINE_RESUMED'
+  | 'ENGINE_STALLED'
+  | 'BOT_RESTARTED'
+  | 'NEWS_FEED_DOWN'
+  | 'TELEGRAM_FAILING'
+  | 'TELEGRAM_RECOVERED';
+
+export function formatAdminAlert(type: AdminAlertType): string {
   switch (type) {
     case 'FEED_OFFLINE':
-      return '⚠️ Price feed offline';
+      return '⚠️ Price feed stopped';
     case 'FEED_BACK':
       return '✅ Price feed back';
+    case 'ENGINE_STALLED':
+      return '⚠️ Analysis engine stalled';
+    case 'BOT_RESTARTED':
+      return '⚠️ Bot restarted';
+    case 'NEWS_FEED_DOWN':
+      return '⚠️ News feed down';
+    case 'TELEGRAM_FAILING':
+      return '⚠️ Telegram delivery failing';
+    case 'TELEGRAM_RECOVERED':
+      return '✅ Telegram delivery recovered';
     case 'ENGINE_PAUSED':
       return '⚠️ Engine paused';
     case 'ENGINE_RESUMED':
       return '✅ Engine restarted';
-    case 'TELEGRAM_FAILING':
-      return '⚠️ Telegram delivery failing';
   }
+}
+
+// 4.1 Daily Summary Template
+export interface DailySummaryData {
+  signalsCount: number;
+  tpCount: number;
+  slCount: number;
+  beCount: number;
+  totalDollars: number;
+  totalR: number;
+  isTest?: boolean;
+}
+
+export function formatDailySummary(data: DailySummaryData): string {
+  const prefix = data.isTest ? '⚡ [TEST] ' : '';
+  if (data.signalsCount === 0) {
+    return `${prefix}Daily Summary 📊 No signals today.`;
+  }
+
+  const dSign = data.totalDollars >= 0 ? '+' : '-';
+  const dAbs = Math.abs(data.totalDollars);
+  const dFormatted = dAbs % 1 === 0 ? dAbs.toString() : dAbs.toFixed(2);
+  const rSign = data.totalR >= 0 ? '+' : '-';
+  const rAbs = Math.abs(data.totalR).toFixed(1);
+
+  return [
+    `${prefix}Daily Summary 📊`,
+    `Signals: ${data.signalsCount}`,
+    `TP: ${data.tpCount} | SL: ${data.slCount} | BE: ${data.beCount}`,
+    `Result: ${dSign}$${dFormatted} (${rSign}${rAbs}R)`,
+  ].join('\n');
+}
+
+// 4.2 Weekly Report Template
+export interface WeeklyReportData {
+  signalsCount: number;
+  tpCount: number;
+  slCount: number;
+  beCount: number;
+  winRate: number; // Win rate = WIN / (WIN + LOSS), breakeven excluded
+  totalDollars: number;
+  totalR: number;
+  bestDay: string; // e.g. "Tue"
+  worstDay: string; // e.g. "Thu"
+  isTest?: boolean;
+}
+
+export function formatWeeklyReport(data: WeeklyReportData): string {
+  const prefix = data.isTest ? '⚡ [TEST] ' : '';
+  if (data.signalsCount === 0) {
+    return `${prefix}Weekly Report 📅 No signals this week.`;
+  }
+
+  const dSign = data.totalDollars >= 0 ? '+' : '-';
+  const dAbs = Math.abs(data.totalDollars);
+  const dFormatted = dAbs % 1 === 0 ? dAbs.toString() : dAbs.toFixed(2);
+  const rSign = data.totalR >= 0 ? '+' : '-';
+  const rAbs = Math.abs(data.totalR).toFixed(1);
+
+  return [
+    `${prefix}Weekly Report 📅`,
+    `Signals: ${data.signalsCount}`,
+    `TP: ${data.tpCount} | SL: ${data.slCount} | BE: ${data.beCount}`,
+    `Win rate: ${Math.round(data.winRate)}%`,
+    `Result: ${dSign}$${dFormatted} (${rSign}${rAbs}R)`,
+    `Best day: ${data.bestDay} | Worst day: ${data.worstDay}`,
+  ].join('\n');
 }
 
 // 5. Bot Command Responses (Max 4 lines, concise)
@@ -136,10 +222,25 @@ export function formatCommandResponse(
   }
 ): string {
   switch (command) {
+    case '/start':
+      return [
+        '🔱 SARRAF — Institutional Gold Intelligence',
+        'Real-time XAUUSD algorithmic stream & signals.',
+        '',
+        'Available Commands:',
+        '• /status — Scanner state, signals today & cooldown',
+        '• /test — Dispatch immediate test trade signal',
+        '• /stats — Win rate and net performance in R',
+        '• /last — Most recent executed signal',
+        '• /pause / /resume — Scanner desk toggle',
+        '• /help — Show command reference',
+      ].join('\n');
+
     case '/help':
       return [
         'SARRAF Gold Terminal Commands:',
         '/status - State, signals today, cooldown',
+        '/test - Send realistic sample trade signal',
         '/last - Most recent signal outcome',
         '/stats - Win rate and net R performance',
         '/pause or /resume - Desk toggle',

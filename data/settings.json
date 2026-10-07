@@ -18,5 +18,9 @@
   "displayTz": "UTC",
   "geminiValidatorEnabled": true,
   "newsHeadsUpTelegram": false,
+  "dailySummaryEnabled": true,
+  "dailySummaryTimeUtc": "22:30",
+  "weeklyReportEnabled": true,
+  "weeklyReportTimeUtc": "23:00",
   "oneSignalAtATime": true
 }

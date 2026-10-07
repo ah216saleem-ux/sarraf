@@ -62,17 +62,17 @@ export const LoginModal: React.FC = () => {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-1.5">
             <label className="block text-[11px] font-mono tracking-wider text-neutral-300 uppercase">
-              Terminal Identifier / Email
+              Username / Terminal Email
             </label>
             <div className="relative">
               <Mail className="w-4 h-4 text-[#E8B84A]/70 absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
-                type="email"
+                type="text"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 autoComplete="username"
-                placeholder="account@institution.com"
+                placeholder="gmcf7"
                 className="w-full bg-black/60 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-xs font-mono text-white placeholder-neutral-600 focus:outline-none focus:border-[#FFD97A] transition-colors"
               />
             </div>

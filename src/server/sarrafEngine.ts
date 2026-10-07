@@ -373,6 +373,34 @@ export function isRolloverHour(date: Date = new Date()): boolean {
   return (utcHours === 21) || (utcHours === 22 && utcMins < 15);
 }
 
+// Check if gold/spot market is officially open (Sunday 22:00 UTC through Friday 22:00 UTC, excluding daily 21:00-22:00 UTC maintenance break)
+export function isGoldMarketOpen(date: Date = new Date()): boolean {
+  const day = date.getUTCDay(); // 0 = Sunday, 1 = Monday, ..., 5 = Friday, 6 = Saturday
+  const hours = date.getUTCHours();
+
+  // Saturday: completely closed
+  if (day === 6) return false;
+
+  // Sunday: opens at 22:00 UTC
+  if (day === 0) {
+    return hours >= 22;
+  }
+
+  // Friday: closes at 22:00 UTC
+  if (day === 5) {
+    if (hours >= 22) return false;
+    if (hours === 21) return false;
+    return true;
+  }
+
+  // Monday - Thursday: closed during daily maintenance break (21:00 - 22:00 UTC)
+  if (hours === 21) {
+    return false;
+  }
+
+  return true;
+}
+
 // Check news lock: skip configurable minutes before and after high impact news
 export function isNewsLockActive(timeMs: number = Date.now()): boolean {
   // Check live dynamic news engine state

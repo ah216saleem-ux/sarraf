@@ -81,6 +81,50 @@
       "notes": "Test timeout simulation"
     },
     "createdAt": "2026-10-07T19:54:29.954Z",
+    "status": "SENT",
+    "messageText": "Signal status updated.",
+    "lastAttemptAt": "2026-10-07T20:00:01.449Z",
+    "deliveryMode": "DRY_RUN",
+    "telegramMessageId": 150385
+  },
+  {
+    "eventId": "EVT-1791403433618-e8163f18",
+    "signalId": "SRF-TEST-TIMEOUT-1791403433617",
+    "type": "REVIEW_TIMEOUT",
+    "payload": {
+      "signalId": "SRF-TEST-TIMEOUT-1791403433617",
+      "direction": "BUY",
+      "eventPrice": 4160,
+      "bid": 4160,
+      "ask": 4160,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Test timeout simulation"
+    },
+    "createdAt": "2026-10-07T20:03:53.618Z",
+    "status": "SENT",
+    "messageText": "Signal status updated.",
+    "lastAttemptAt": "2026-10-07T20:03:54.071Z",
+    "deliveryMode": "DRY_RUN",
+    "telegramMessageId": 516446
+  },
+  {
+    "eventId": "EVT-1791406001426-8aad72e5",
+    "signalId": "TEST-SRF-LOSS-001",
+    "type": "SL",
+    "payload": {
+      "signalId": "TEST-SRF-LOSS-001",
+      "direction": "BUY",
+      "eventPrice": 4140,
+      "bid": 4140,
+      "ask": 4140,
+      "spread": 0.3,
+      "slippageDollars": 0,
+      "ambiguous": false,
+      "notes": "Simulated stop hit"
+    },
+    "createdAt": "2026-10-07T20:46:41.426Z",
     "status": "PENDING_DELIVERY"
   }
 ]
