@@ -1,0 +1,22 @@
+{
+  "slDollars": 10,
+  "tp1Dollars": 5,
+  "tp2Dollars": 8,
+  "tp3Dollars": 10,
+  "tp4Dollars": 12,
+  "cooldownMinMinutes": 30,
+  "cooldownMaxMinutes": 45,
+  "minScore": 80,
+  "maxSignalsPerDay": 3,
+  "tier1PreMinutes": 45,
+  "tier1PostMinutes": 30,
+  "tier2PreMinutes": 30,
+  "tier2PostMinutes": 15,
+  "volatilitySettleEnabled": true,
+  "spreadLimit": 0.6,
+  "dryRun": true,
+  "displayTz": "UTC",
+  "geminiValidatorEnabled": true,
+  "newsHeadsUpTelegram": false,
+  "oneSignalAtATime": true
+}

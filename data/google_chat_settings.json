@@ -1,0 +1,8 @@
+{
+  "preReviewRequired": false,
+  "reviewTimeoutMinutes": 3,
+  "autoSendOnReviewTimeout": false,
+  "autoPostUpdates": false,
+  "activeSpaceName": "",
+  "activeSpaceDisplayName": "SARRAF Gold Desk & War Room"
+}

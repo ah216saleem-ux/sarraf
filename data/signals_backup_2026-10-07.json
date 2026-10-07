@@ -1,0 +1,64 @@
+{
+  "state": "COOLDOWN",
+  "isPaused": false,
+  "cooldownEndsAt": "2026-10-07T13:11:48.008Z",
+  "currentSignal": null,
+  "history": [
+    {
+      "id": "SRF-TEST-TIMEOUT-1791378408007",
+      "version": 1,
+      "direction": "BUY",
+      "entryTarget": 4160,
+      "slTarget": 4150,
+      "tp1Target": 4165,
+      "tp2Target": 4168,
+      "tp3Target": 4170,
+      "tp4Target": 4172,
+      "score": 85,
+      "timeframe": "M15",
+      "zone": {
+        "id": "Z-1",
+        "type": "DEMAND",
+        "high": 4162,
+        "low": 4158,
+        "mid50": 4160
+      },
+      "createdAt": "2026-10-07T13:00:08.007Z",
+      "pendingExpiresAt": "2026-10-07T13:40:08.007Z",
+      "reviewExpiresAt": "2026-10-07T13:05:48.007Z",
+      "status": "CLOSED",
+      "highestTPReached": "NONE",
+      "currentSL": 4150,
+      "isBreakevenActive": false,
+      "mfeDollars": 0,
+      "maeDollars": 0,
+      "realizedDollars": 0,
+      "realizedR": 0,
+      "durationSeconds": 400,
+      "newsLockActive": false,
+      "events": [
+        {
+          "id": "EVT-1791378408007-0ed456",
+          "signalId": "SRF-TEST-TIMEOUT-1791378408007",
+          "type": "REVIEW_TIMEOUT",
+          "timestamp": "2026-10-07T13:06:48.008Z",
+          "price": 4160,
+          "bid": 4160,
+          "ask": 4160,
+          "spread": 0.3,
+          "slippageDollars": 0,
+          "notes": "Test timeout simulation"
+        }
+      ],
+      "closeReason": "REVIEW_TIMEOUT",
+      "resultClass": "REVIEW_TIMEOUT",
+      "closedAt": "2026-10-07T13:06:48.007Z"
+    }
+  ],
+  "todayDateStr": "2026-10-07",
+  "dailySignalsCount": 0,
+  "consecutiveLossesToday": 0,
+  "dailyLossLimitReached": false,
+  "lastUpdated": "2026-10-07T13:06:48.077Z",
+  "lastTickTimestamp": 1791378408006
+}

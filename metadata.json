@@ -1,0 +1,6 @@
+{
+  "name": "SARRAF — Gold Intelligence in Real Time",
+  "description": "Cinematic institutional gold intelligence platform with real-time XAUUSD streaming, signals, and macro radar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
