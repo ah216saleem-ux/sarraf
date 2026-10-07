@@ -1,6 +1,6 @@
 {
   "symbol": "XAUUSD",
-  "lastUpdated": "2026-10-06T23:16:23.794Z",
+  "lastUpdated": "2026-10-07T21:08:03.355Z",
   "htfBootstrapMethod": "NATIVE_BIQUOTE_OHLC_INTERVALS (Direct 4h & 1d API bootstrap)",
   "M15": [
     {
@@ -1209,10 +1209,130 @@
       "low": 4165.025,
       "close": 4165.646,
       "volume": 70,
-      "isClosed": false,
-      "usableForZones": true,
+      "isClosed": true,
+      "usableForZones": false,
       "hasGapBefore": false,
       "gapDurationMinutes": 0
+    },
+    {
+      "openTime": "2026-10-07T18:45:00.000Z",
+      "open": 4111.02,
+      "high": 4111.5,
+      "low": 4109.06,
+      "close": 4109.22,
+      "volume": 169,
+      "isClosed": true,
+      "hasGapBefore": true,
+      "gapDurationMinutes": 1170,
+      "usableForZones": false
+    },
+    {
+      "openTime": "2026-10-07T19:00:00.000Z",
+      "open": 4109.21,
+      "high": 4110.66,
+      "low": 4102.93,
+      "close": 4107.13,
+      "volume": 725,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T19:15:00.000Z",
+      "open": 4107.19,
+      "high": 4109.9,
+      "low": 4106.06,
+      "close": 4106.59,
+      "volume": 726,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T19:30:00.000Z",
+      "open": 4106.87,
+      "high": 4107.73,
+      "low": 4104.03,
+      "close": 4104.65,
+      "volume": 726,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T19:45:00.000Z",
+      "open": 4104.72,
+      "high": 4104.72,
+      "low": 4100.43,
+      "close": 4101.19,
+      "volume": 694,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T20:00:00.000Z",
+      "open": 4100.82,
+      "high": 4107,
+      "low": 4100.77,
+      "close": 4106.34,
+      "volume": 697,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T20:15:00.000Z",
+      "open": 4106.39,
+      "high": 4113.17,
+      "low": 4106.02,
+      "close": 4112.3,
+      "volume": 665,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T20:30:00.000Z",
+      "open": 4112.28,
+      "high": 4113.42,
+      "low": 4107.86,
+      "close": 4108.95,
+      "volume": 726,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T20:45:00.000Z",
+      "open": 4109.02,
+      "high": 4110.8,
+      "low": 4105.62,
+      "close": 4109.9,
+      "volume": 705,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T21:00:00.000Z",
+      "open": 4109.9,
+      "high": 4109.9,
+      "low": 4109.9,
+      "close": 4109.9,
+      "volume": 337,
+      "isClosed": false,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
     }
   ],
   "M30": [
@@ -2422,10 +2542,82 @@
       "low": 4162.604,
       "close": 4165.646,
       "volume": 869,
-      "isClosed": false,
-      "usableForZones": true,
+      "isClosed": true,
+      "usableForZones": false,
       "hasGapBefore": false,
       "gapDurationMinutes": 0
+    },
+    {
+      "openTime": "2026-10-07T18:30:00.000Z",
+      "open": 4111.02,
+      "high": 4111.5,
+      "low": 4109.06,
+      "close": 4109.22,
+      "volume": 169,
+      "isClosed": true,
+      "hasGapBefore": true,
+      "gapDurationMinutes": 1170,
+      "usableForZones": false
+    },
+    {
+      "openTime": "2026-10-07T19:00:00.000Z",
+      "open": 4109.21,
+      "high": 4110.66,
+      "low": 4102.93,
+      "close": 4106.59,
+      "volume": 1451,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T19:30:00.000Z",
+      "open": 4106.87,
+      "high": 4107.73,
+      "low": 4100.43,
+      "close": 4101.19,
+      "volume": 1420,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T20:00:00.000Z",
+      "open": 4100.82,
+      "high": 4113.17,
+      "low": 4100.77,
+      "close": 4112.3,
+      "volume": 1362,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T20:30:00.000Z",
+      "open": 4112.28,
+      "high": 4113.42,
+      "low": 4105.62,
+      "close": 4109.9,
+      "volume": 1431,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T21:00:00.000Z",
+      "open": 4109.9,
+      "high": 4109.9,
+      "low": 4109.9,
+      "close": 4109.9,
+      "volume": 337,
+      "isClosed": false,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
     }
   ],
   "H1": [
@@ -3635,10 +3827,58 @@
       "low": 4162.604,
       "close": 4165.646,
       "volume": 869,
-      "isClosed": false,
-      "usableForZones": true,
+      "isClosed": true,
+      "usableForZones": false,
       "hasGapBefore": false,
       "gapDurationMinutes": 0
+    },
+    {
+      "openTime": "2026-10-07T18:00:00.000Z",
+      "open": 4111.02,
+      "high": 4111.5,
+      "low": 4109.06,
+      "close": 4109.22,
+      "volume": 169,
+      "isClosed": true,
+      "hasGapBefore": true,
+      "gapDurationMinutes": 1140,
+      "usableForZones": false
+    },
+    {
+      "openTime": "2026-10-07T19:00:00.000Z",
+      "open": 4109.21,
+      "high": 4110.66,
+      "low": 4100.43,
+      "close": 4101.19,
+      "volume": 2871,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T20:00:00.000Z",
+      "open": 4100.82,
+      "high": 4113.42,
+      "low": 4100.77,
+      "close": 4109.9,
+      "volume": 2793,
+      "isClosed": true,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
+    },
+    {
+      "openTime": "2026-10-07T21:00:00.000Z",
+      "open": 4109.9,
+      "high": 4109.9,
+      "low": 4109.9,
+      "close": 4109.9,
+      "volume": 337,
+      "isClosed": false,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
     }
   ],
   "H4": [
@@ -4848,10 +5088,34 @@
       "low": 4161.54,
       "close": 4165.646,
       "volume": 7388,
-      "isClosed": false,
-      "usableForZones": true,
+      "isClosed": true,
+      "usableForZones": false,
       "hasGapBefore": false,
       "gapDurationMinutes": 0
+    },
+    {
+      "openTime": "2026-10-07T16:00:00.000Z",
+      "open": 4111.02,
+      "high": 4111.5,
+      "low": 4100.43,
+      "close": 4101.19,
+      "volume": 3040,
+      "isClosed": true,
+      "hasGapBefore": true,
+      "gapDurationMinutes": 1200,
+      "usableForZones": false
+    },
+    {
+      "openTime": "2026-10-07T20:00:00.000Z",
+      "open": 4100.82,
+      "high": 4113.42,
+      "low": 4100.77,
+      "close": 4109.9,
+      "volume": 3130,
+      "isClosed": false,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": true
     }
   ],
   "D1": [
@@ -6061,10 +6325,22 @@
       "low": 4104.153,
       "close": 4165.646,
       "volume": 143136,
-      "isClosed": false,
+      "isClosed": true,
       "usableForZones": true,
       "hasGapBefore": false,
       "gapDurationMinutes": 0
+    },
+    {
+      "openTime": "2026-10-07T00:00:00.000Z",
+      "open": 4111.02,
+      "high": 4113.42,
+      "low": 4100.43,
+      "close": 4109.9,
+      "volume": 6170,
+      "isClosed": false,
+      "hasGapBefore": false,
+      "gapDurationMinutes": 0,
+      "usableForZones": false
     }
   ]
 }

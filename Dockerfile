@@ -8,8 +8,8 @@ RUN apk add --no-cache curl
 # Copy package manifests
 COPY package*.json ./
 
-# Install npm dependencies
-RUN npm ci
+# Install dependencies (works with or without lockfile)
+RUN npm install
 
 # Copy full application code
 COPY . .
@@ -22,11 +22,12 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV DATA_DIR=/app/data
 
-# Ensure data directory exists
+# Ensure persistent data directory exists
 RUN mkdir -p /app/data
 
-# Expose server port
+# Expose default port
 EXPOSE 3000
 
 # Start full-stack server
-CMD ["node", "--import", "tsx", "server.ts"]
+CMD ["npm", "start"]
+

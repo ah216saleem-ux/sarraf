@@ -565,18 +565,41 @@ app.get('/api/signal/tests', requireAdminAuth, (_req, res) => {
 // PHASE 4: TELEGRAM, GEMINI VALIDATION & AI CHAT API (Sections 1, 5, 6, 7, 8)
 // -------------------------------------------------------------
 
-// GET /api/health - Comprehensive health & safety status (Section 8)
-app.get('/api/health', requireAdminAuth, (_req, res) => {
+// GET /api/health - Public healthcheck endpoint for Railway, Docker & load balancers (returns full metrics when authenticated)
+app.get(['/api/health', '/health'], (req, res) => {
+  const token = req.cookies?.sarraf_session;
+  const isAuth = Boolean(token && activeSessions.has(token));
+
+  if (!isAuth) {
+    return res.status(200).json({ status: 'ok', uptime: Math.floor(process.uptime()), timestamp: new Date().toISOString() });
+  }
+
+  const health = getSystemHealth();
+  const news = getNewsFeedStatus();
+  const priceAge = latestLiveQuote
+    ? Math.floor((Date.now() - (latestLiveQuote.lastReceivedAt || new Date(latestLiveQuote.timestamp).getTime())) / 1000)
+    : 999;
   const engineStatus = getEngineStatus();
   const workerStatus = getTelegramWorkerStatus();
   const managerState = getFullManagerState();
   const geminiLogs = getValidationLogs();
-
   const geminiConfigured = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY');
 
   return res.json({
-    status: 'HEALTHY',
-    timestamp: new Date().toISOString(),
+    status: health.status,
+    uptimeSeconds: health.uptimeSeconds,
+    instanceId: health.instanceId,
+    leaseHeld: health.isLeaseHolder,
+    priceFeed: {
+      status: priceAge <= 5 ? 'LIVE' : 'STALE',
+      price: latestLiveQuote?.price || null,
+      ageSeconds: priceAge,
+      source: latestLiveQuote?.source || 'biquote.io',
+    },
+    clockDrift: {
+      driftMs: health.clockDriftMs,
+      warning: health.clockDriftWarning,
+    },
     feed: {
       status: latestLiveQuote?.status || 'OFFLINE',
       quoteAgeSeconds: latestLiveQuote?.quoteAgeSeconds || 0,
@@ -585,15 +608,17 @@ app.get('/api/health', requireAdminAuth, (_req, res) => {
     },
     engine: {
       state: engineStatus.engineState,
+      usable: engineStatus.usable,
       h1Count: engineStatus.h1Count,
       m30Count: engineStatus.m30Count,
       m15Count: engineStatus.m15Count,
-      usable: engineStatus.usable,
+      h4Count: engineStatus.h4Count,
+      d1Count: engineStatus.d1Count,
     },
     signalManager: {
       state: managerState.state,
       todaySignalsCount: managerState.dailySignalsCount,
-      dailyLossLimitReached: managerState.dailyLossLimitReached,
+      historyCount: managerState.history.length,
       lastSignalTime: managerState.history[0]?.createdAt || null,
     },
     telegram: {
@@ -611,6 +636,13 @@ app.get('/api/health', requireAdminAuth, (_req, res) => {
       model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
       lastValidation: geminiLogs[0] || null,
     },
+    newsFeed: news.status,
+    dataDir: health.dataDir,
+    isPersistentVolume: health.isPersistentVolume,
+    persistenceWarning: health.persistenceWarning,
+    lastBackupAt: health.lastBackupAt,
+    backupsCount: health.backupsCount,
+    memoryMb: health.memoryUsageMb,
   });
 });
 
@@ -1137,69 +1169,6 @@ app.get('/api/performance/export-csv', requireAdminAuth, (_req, res) => {
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename=sarraf_signals_${Date.now()}.csv`);
   return res.send(csv);
-});
-
-// GET /api/health - Dual mode (Minimal "ok" for public uptime pingers; full diagnostics for authenticated admin)
-app.get('/api/health', (req, res) => {
-  const token = req.cookies?.sarraf_session;
-  const isPublicPing = req.query.public === '1' || !token || !activeSessions.has(token);
-
-  if (isPublicPing) {
-    return res.json({ status: 'ok' });
-  }
-
-  const health = getSystemHealth();
-  const news = getNewsFeedStatus();
-  const priceAge = latestLiveQuote
-    ? Math.floor((Date.now() - (latestLiveQuote.lastReceivedAt || new Date(latestLiveQuote.timestamp).getTime())) / 1000)
-    : 999;
-  const engineStatus = getEngineStatus();
-  const workerStatus = getTelegramWorkerStatus();
-  const managerState = getFullManagerState();
-
-  return res.json({
-    status: health.status,
-    uptimeSeconds: health.uptimeSeconds,
-    instanceId: health.instanceId,
-    leaseHeld: health.isLeaseHolder,
-    priceFeed: {
-      status: priceAge <= 5 ? 'LIVE' : 'STALE',
-      price: latestLiveQuote?.price || null,
-      ageSeconds: priceAge,
-      source: latestLiveQuote?.source || 'biquote.io',
-    },
-    clockDrift: {
-      driftMs: health.clockDriftMs,
-      warning: health.clockDriftWarning,
-    },
-    engine: {
-      state: engineStatus.engineState,
-      usable: engineStatus.usable,
-      h1Count: engineStatus.h1Count,
-      m30Count: engineStatus.m30Count,
-      m15Count: engineStatus.m15Count,
-      h4Count: engineStatus.h4Count,
-      d1Count: engineStatus.d1Count,
-    },
-    signalManager: {
-      state: managerState.state,
-      todaySignalsCount: managerState.dailySignalsCount,
-      historyCount: managerState.history.length,
-    },
-    telegram: {
-      botConnected: workerStatus.botConnected,
-      dryRun: workerStatus.dryRun,
-      pendingOutboxCount: workerStatus.pendingCount,
-      totalDelivered: workerStatus.totalDelivered,
-    },
-    newsFeed: news.status,
-    dataDir: health.dataDir,
-    isPersistentVolume: health.isPersistentVolume,
-    persistenceWarning: health.persistenceWarning,
-    lastBackupAt: health.lastBackupAt,
-    backupsCount: health.backupsCount,
-    memoryMb: health.memoryUsageMb,
-  });
 });
 
 // GET /api/admin/logs - Admin log viewer (last 200 lines with secrets masked)
