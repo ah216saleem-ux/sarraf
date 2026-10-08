@@ -546,6 +546,11 @@ export function triggerAdminTelegramAlert(alertType: string, message: string): b
     // ignore
   }
 
+  // Prevent invalid or self-bot chat IDs
+  if (chatId && (chatId.toLowerCase() === '@sarraftelegrambot' || chatId.toLowerCase() === 'sarraftelegrambot' || chatId === '8737269513')) {
+    chatId = undefined;
+  }
+
   if (!token || !chatId || token === 'MY_TELEGRAM_BOT_TOKEN') {
     console.log(`[ADMIN TELEGRAM ALERT] (${alertType}) [DRY RUN / NO BOT]: ${message}`);
     return false;

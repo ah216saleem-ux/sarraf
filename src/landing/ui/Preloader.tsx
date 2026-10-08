@@ -65,7 +65,7 @@ export const Preloader: React.FC<PreloaderProps> = ({ onLoaded }) => {
     }
 
     // Task 2: Real first price fetch (40%)
-    fetch('/api/price')
+    fetch('/api/price/xauusd')
       .then((res) => {
         if (res.ok) {
           targetProgressRef.current = Math.max(targetProgressRef.current, 75);

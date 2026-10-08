@@ -18,7 +18,7 @@ export const LoginModal: React.FC = () => {
     try {
       await login(email, password);
     } catch (err: any) {
-      setError(err.message || 'Invalid institutional credentials. Please try again.');
+      setError(err.message || 'Invalid credentials. Please try again.');
       setIsLoading(false);
     }
   };
@@ -48,7 +48,7 @@ export const LoginModal: React.FC = () => {
             SARRAF Terminal Login
           </h3>
           <p className="text-xs text-neutral-400">
-            Enter your institutional credentials to authenticate with the server.
+            Enter your terminal credentials to authenticate with the server.
           </p>
         </div>
 

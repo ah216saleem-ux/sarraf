@@ -38,13 +38,40 @@ const DYNAMIC_CHAT_FILE = path.resolve(DATA_DIR, 'telegram_chat.json');
 
 let dynamicChatId: string | null = null;
 
+export function isInvalidTelegramChatId(id?: string | number | null): boolean {
+  if (!id) return true;
+  const str = String(id).trim().toLowerCase();
+  return (
+    str === '' ||
+    str === '@sarraftelegrambot' ||
+    str === 'sarraftelegrambot' ||
+    str === '8737269513' ||
+    str === 'my_telegram_chat_id' ||
+    str === 'your_chat_id' ||
+    str === 'undefined' ||
+    str === 'null'
+  );
+}
+
+export function getEffectiveTelegramChatId(): string | null {
+  const dyn = getDynamicTelegramChatId();
+  if (dyn && !isInvalidTelegramChatId(dyn)) {
+    return dyn;
+  }
+  const envChat = process.env.TELEGRAM_CHAT_ID;
+  if (envChat && !isInvalidTelegramChatId(envChat)) {
+    return envChat;
+  }
+  return null;
+}
+
 export function getDynamicTelegramChatId(): string | null {
-  if (dynamicChatId) return dynamicChatId;
+  if (dynamicChatId && !isInvalidTelegramChatId(dynamicChatId)) return dynamicChatId;
   if (fs.existsSync(DYNAMIC_CHAT_FILE)) {
     try {
       const data = fs.readFileSync(DYNAMIC_CHAT_FILE, 'utf-8');
       const parsed = JSON.parse(data);
-      if (parsed && typeof parsed.chatId === 'string') {
+      if (parsed && typeof parsed.chatId === 'string' && !isInvalidTelegramChatId(parsed.chatId)) {
         dynamicChatId = parsed.chatId;
         return dynamicChatId;
       }
@@ -55,12 +82,47 @@ export function getDynamicTelegramChatId(): string | null {
   return null;
 }
 
-export function setDynamicTelegramChatId(id: string) {
-  dynamicChatId = id;
+export function setDynamicTelegramChatId(id: string | number) {
+  if (isInvalidTelegramChatId(id)) {
+    console.warn(`[TELEGRAM WORKER] Ignored invalid target chat ID: ${id}`);
+    return;
+  }
+  const cleanId = String(id).trim();
+  dynamicChatId = cleanId;
   try {
     ensureDataDir();
-    fs.writeFileSync(DYNAMIC_CHAT_FILE, JSON.stringify({ chatId: id }, null, 2), 'utf-8');
-    console.log(`[TELEGRAM WORKER] Dynamic target chat ID updated to: ${id}`);
+    fs.writeFileSync(
+      DYNAMIC_CHAT_FILE,
+      JSON.stringify({ chatId: cleanId, registeredAt: new Date().toISOString() }, null, 2),
+      'utf-8'
+    );
+    console.log(`[TELEGRAM WORKER] Dynamic target chat ID updated to: ${cleanId}`);
+
+    // Auto-unblock any outbox events that failed due to self-bot or unbound chat ID
+    try {
+      const outbox = readOutbox();
+      let updated = false;
+      for (const item of outbox) {
+        if (
+          item.status === 'FAILED' &&
+          (item.lastError?.includes("Forbidden: the bot can't send messages to the bot") ||
+            item.lastError?.includes('unbound') ||
+            item.lastError?.includes('unconfigured') ||
+            item.lastError?.includes('chat ID'))
+        ) {
+          item.status = 'PENDING_DELIVERY';
+          item.retryCount = 0;
+          item.lastError = undefined;
+          updated = true;
+        }
+      }
+      if (updated) {
+        writeOutbox(outbox);
+        setTimeout(() => triggerOutboxProcessing(), 300);
+      }
+    } catch {
+      // ignore
+    }
   } catch (err: any) {
     console.error('[TELEGRAM WORKER] Failed to save dynamic chat ID:', err.message);
   }
@@ -164,15 +226,22 @@ export async function sendTelegramHttpRequest(
   parseMode?: 'HTML' | 'Markdown'
 ): Promise<{ success: boolean; messageId?: number; error?: string; retryAfterSec?: number }> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = targetChatId || getDynamicTelegramChatId() || process.env.TELEGRAM_CHAT_ID;
+  const effectiveChat = targetChatId ? String(targetChatId) : getEffectiveTelegramChatId();
 
-  if (!token || !chatId || token === '123456789:ABCdefGhIJKlmNoPQRstuVWXyz') {
-    return { success: false, error: 'Telegram bot token or target chat ID unconfigured.' };
+  if (!token || token === '123456789:ABCdefGhIJKlmNoPQRstuVWXyz') {
+    return { success: false, error: 'Telegram bot token unconfigured.' };
+  }
+
+  if (!effectiveChat || isInvalidTelegramChatId(effectiveChat)) {
+    return {
+      success: false,
+      error: "Telegram target chat ID is not registered or is set to the bot's own username (@Sarraftelegrambot). Send /start to @Sarraftelegrambot in Telegram or set your numeric Chat ID in dashboard settings.",
+    };
   }
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const body: Record<string, any> = {
-    chat_id: chatId,
+    chat_id: effectiveChat,
     text,
     disable_web_page_preview: true,
   };
@@ -370,7 +439,14 @@ async function processOutboxItem(item: OutboxRecord): Promise<void> {
   }
 
   // LIVE DISPATCH
-  const result = await sendTelegramHttpRequest(messageText, replyToId);
+  const effectiveChat = getEffectiveTelegramChatId();
+  if (!effectiveChat) {
+    item.lastError = "Waiting for target Telegram chat registration. Open @Sarraftelegrambot and send /start or enter Chat ID in dashboard Settings.";
+    console.warn(`[TELEGRAM WORKER] Holding event ${item.eventId} (${item.type}): awaiting valid Telegram chat registration.`);
+    return;
+  }
+
+  const result = await sendTelegramHttpRequest(messageText, replyToId, effectiveChat);
 
   if (result.success && result.messageId) {
     item.status = 'SENT';
@@ -393,8 +469,14 @@ async function processOutboxItem(item: OutboxRecord): Promise<void> {
     item.retryCount = (item.retryCount || 0) + 1;
     item.lastError = result.error || 'Failed to dispatch';
 
+    if (result.error && result.error.includes("the bot can't send messages to the bot")) {
+      dynamicChatId = null;
+      item.lastError = "Telegram Chat ID was set to bot's own handle (@Sarraftelegrambot). Please send /start in Telegram or enter your numeric Chat ID in settings.";
+      console.warn(`[TELEGRAM WORKER] Event ${item.eventId} held: Bot cannot message itself. Awaiting user /start.`);
+      return;
+    }
+
     const isFatalError = result.error && (
-      result.error.includes('Forbidden:') ||
       result.error.includes('chat not found') ||
       result.error.includes('deactivated')
     );
@@ -402,7 +484,7 @@ async function processOutboxItem(item: OutboxRecord): Promise<void> {
     if (isFatalError) {
       item.status = 'FAILED';
       console.error(`[TELEGRAM WORKER] Fatal delivery error for event ${item.eventId}: ${item.lastError}. Retries aborted.`);
-      console.error(`[TELEGRAM WORKER] ADVICE: If the error is 'Forbidden: the bot can't send messages to the bot', this means TELEGRAM_CHAT_ID is set incorrectly (it might be set to the bot's own ID/username). Please run the '/setchat <username> <password>' command in your target Telegram chat or group to register it dynamically!`);
+      console.error(`[TELEGRAM WORKER] ADVICE: Please run the '/setchat' command or send /start in your target Telegram chat or group to register it!`);
       
       // Prevent infinite alert loop by not sending failure alerts for ALERT/ADMIN events
       if (item.type !== 'ADMIN_ALERT' && !item.eventId.startsWith('ALERT-')) {
@@ -501,15 +583,21 @@ async function executeTelegramAction(
 
   console.log(`[TELEGRAM ADMIN] Executing action "${normAction}" for Chat ID ${chatId} (${fromUser || 'admin'})`);
 
-  if (normAction === 'start' || normAction === 'menu') {
+  if (normAction === 'start' || normAction === 'menu' || normAction === 'bind' || normAction === 'register') {
+    setDynamicTelegramChatId(String(chatId));
+
     const text = [
       '🔱 <b>SARRAF INSTITUTIONAL COMMAND TERMINAL</b>',
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      `✅ <b>CHAT REGISTERED SUCCESSFULLY!</b>`,
       `📡 <b>Target Chat ID:</b> <code>${chatId}</code>`,
       `⚙️ <b>Execution Mode:</b> ${dryRun ? '🟡 DRY RUN (SIMULATION)' : '🟢 LIVE DISPATCH'}`,
       `⚡ <b>Scanner State:</b> ${managerState.isPaused ? '⏸️ PAUSED' : managerState.state}`,
       `📊 <b>Daily Signals:</b> ${managerState.dailySignalsCount} sent today | <b>Max:</b> Unlimited`,
       `⏱️ <b>Cooldown:</b> ${managerState.cooldownEndsAt ? '⏳ Active Cooldown' : '✅ Active Scanning'}`,
+      '',
+      '🚀 <b>Live automatic gold trades are activated for this chat!</b>',
+      '<i>Har automatic trade setup yahan instant alert k sath phonchay ga!</i>',
       '',
       '👇 <b>Quick Control Panel (Tap any button below):</b>',
     ].join('\n');
@@ -898,6 +986,11 @@ async function pollTelegramCommands() {
 
         console.log(`[TELEGRAM BUTTON] Pressed "${callbackData}" by @${fromUser} (Chat: ${chatId})`);
 
+        // Auto-register chat on any interaction
+        if (chatId) {
+          setDynamicTelegramChatId(String(chatId));
+        }
+
         // Acknowledge tap immediately
         await answerTelegramCallbackQuery(callbackId, 'Processing request...');
 
@@ -907,22 +1000,46 @@ async function pollTelegramCommands() {
         continue;
       }
 
-      // 2. Handle Text Commands
+      // 2. Handle Text Commands & Messages
       const msg = update.message;
-      if (!msg || !msg.text) continue;
+      if (!msg) continue;
 
       const incomingChatId = msg.chat?.id;
-      const text = msg.text.trim();
-      if (!text.startsWith('/')) continue;
+      const isPrivateChat = msg.chat?.type === 'private';
+      const text = (msg.text || '').trim();
+      const fromUser = msg.from?.username || msg.from?.first_name || 'admin';
+
+      // Auto-register any incoming message in private chat
+      if (incomingChatId && isPrivateChat) {
+        setDynamicTelegramChatId(String(incomingChatId));
+      }
+
+      if (!text.startsWith('/')) {
+        if (incomingChatId && isPrivateChat) {
+          const welcome = [
+            '🔱 <b>SARRAF INSTITUTIONAL GOLD TERMINAL</b>',
+            '━━━━━━━━━━━━━━━━━━━━━━━━━',
+            `✅ <b>CHAT REGISTERED SUCCESSFULLY!</b>`,
+            `📡 <b>Target Chat ID:</b> <code>${incomingChatId}</code> (@${fromUser})`,
+            '',
+            '🚀 <b>Live automatic XAU/USD gold trade alerts are now active for this chat!</b>',
+            'Jab bhi high-probability setup trigger ho ga, trade signal alerts foran yahan send hongay.',
+            '',
+            '👇 <b>Tap below to test or control the system:</b>',
+          ].join('\n');
+          await sendTelegramHttpRequest(welcome, msg.message_id, incomingChatId, getMainControlKeyboard(), 'HTML');
+        }
+        continue;
+      }
 
       const parts = text.split(' ');
       const rawCmd = parts[0].replace(/@\w+$/, ''); // Remove bot username mention if any (e.g. /status@SarrafBot)
       const args = parts.slice(1);
-      const fromUser = msg.from?.username || msg.from?.first_name || 'admin';
 
       console.log(`[TELEGRAM COMMAND] "${text}" from Chat ID: ${incomingChatId} (@${fromUser})`);
 
       if (incomingChatId) {
+        setDynamicTelegramChatId(String(incomingChatId));
         await executeTelegramAction(rawCmd, incomingChatId, msg.message_id, fromUser, args);
       }
     }
@@ -1130,6 +1247,24 @@ export function checkAndScheduleSummaries() {
   }
 }
 
+// Process all pending items in outbox
+export async function triggerOutboxProcessing() {
+  try {
+    const outbox = readOutbox();
+    const pendingItems = outbox.filter((item) => item.status === 'PENDING_DELIVERY');
+
+    if (pendingItems.length === 0) return;
+
+    for (const item of pendingItems) {
+      await processOutboxItem(item);
+    }
+
+    writeOutbox(outbox);
+  } catch (err: any) {
+    console.error('[TELEGRAM WORKER] Outbox process loop error:', err.message);
+  }
+}
+
 // Background Worker Loop (reads outbox, polls commands, checks summaries & alerts)
 export function startTelegramWorker() {
   if (isWorkerRunning) return;
@@ -1149,20 +1284,7 @@ export function startTelegramWorker() {
 
   // 1. Outbox Queue Processor (Runs every 1.5s)
   setInterval(async () => {
-    try {
-      const outbox = readOutbox();
-      const pendingItems = outbox.filter((item) => item.status === 'PENDING_DELIVERY');
-
-      if (pendingItems.length === 0) return;
-
-      for (const item of pendingItems) {
-        await processOutboxItem(item);
-      }
-
-      writeOutbox(outbox);
-    } catch (err: any) {
-      console.error('[TELEGRAM WORKER] Outbox process loop error:', err.message);
-    }
+    await triggerOutboxProcessing();
   }, 1500);
 
   // 2. Incoming Command & Callback Query Long-Polling Loop (Runs continuously every 2.5s)
@@ -1381,6 +1503,25 @@ export async function retryFailedOutboxItem(eventId: string): Promise<{ success:
   return { success: true, message: `Retried event ${eventId}. Status is now ${item.status}.` };
 }
 
+// Retry all failed outbox items
+export async function retryAllFailedOutboxItems(): Promise<{ count: number; message: string }> {
+  const outbox = readOutbox();
+  let count = 0;
+  for (const item of outbox) {
+    if (item.status === 'FAILED') {
+      item.status = 'PENDING_DELIVERY';
+      item.retryCount = 0;
+      item.lastError = undefined;
+      count++;
+    }
+  }
+  if (count > 0) {
+    writeOutbox(outbox);
+    setTimeout(() => triggerOutboxProcessing(), 300);
+  }
+  return { count, message: `Reset ${count} failed outbox items to PENDING_DELIVERY.` };
+}
+
 // Get comprehensive worker status
 export function getTelegramWorkerStatus(): TelegramWorkerStatus {
   const outbox = readOutbox();
@@ -1391,15 +1532,20 @@ export function getTelegramWorkerStatus(): TelegramWorkerStatus {
   const lastSent = outbox.filter((o) => o.status === 'SENT').pop();
 
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = getDynamicTelegramChatId() || process.env.TELEGRAM_CHAT_ID;
-  const configured = Boolean(token && chatId && token !== '123456789:ABCdefGhIJKlmNoPQRstuVWXyz');
+  const effectiveChat = getEffectiveTelegramChatId();
+  const isRegistered = Boolean(effectiveChat && !isInvalidTelegramChatId(effectiveChat));
+
+  let lastError = outbox.find((o) => o.status === 'FAILED')?.lastError;
+  if (!isRegistered) {
+    lastError = "Telegram Chat ID is not bound yet. Send /start to @Sarraftelegrambot in Telegram or set Chat ID in dashboard settings.";
+  }
 
   return {
-    botConnected: configured,
+    botConnected: Boolean(token && token !== '123456789:ABCdefGhIJKlmNoPQRstuVWXyz'),
     dryRun: getIsDryRun(),
-    targetChatIdMasked: maskIdentifier(chatId),
+    targetChatIdMasked: isRegistered ? maskIdentifier(effectiveChat!) : 'NOT BOUND (Send /start in Telegram)',
     lastMessageSentAt: lastSent?.lastAttemptAt || lastSent?.createdAt,
-    lastError: outbox.find((o) => o.status === 'FAILED')?.lastError,
+    lastError,
     pendingCount: pending,
     sentCount: sent,
     failedCount: failed,

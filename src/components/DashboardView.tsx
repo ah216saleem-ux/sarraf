@@ -37,9 +37,11 @@ import { NewsTab } from './NewsTab';
 import { SettingsTab } from './SettingsTab';
 import { PerformanceTab } from './PerformanceTab';
 import { GoLiveChecklistTab } from './GoLiveChecklistTab';
+import { SarrafCommandView } from '../command/SarrafCommandView';
 
 export const DashboardView: React.FC = () => {
   const { priceData, user, logout, macroEvents } = useMarket();
+  const [sarrafSection, setSarrafSection] = useState<'COMMAND' | 'DECK'>('COMMAND');
   const [activeMainTab, setActiveMainTab] = useState<
     | 'OVERVIEW'
     | 'TELEGRAM'
@@ -64,6 +66,8 @@ export const DashboardView: React.FC = () => {
   const [validations, setValidations] = useState<any[]>([]);
   const [isDryRunModalOpen, setIsDryRunModalOpen] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [customChatId, setCustomChatId] = useState('');
+  const [isUpdatingChatId, setIsUpdatingChatId] = useState(false);
 
   // Test Reports
   const [marketTelegramReport, setMarketTelegramReport] = useState<any>(null);
@@ -280,6 +284,45 @@ export const DashboardView: React.FC = () => {
     }
   };
 
+  const handleSetChatId = async (idToSet?: string) => {
+    const target = idToSet || customChatId;
+    if (!target) return;
+    setIsUpdatingChatId(true);
+    try {
+      const res = await fetch('/api/telegram/set-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatId: target }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setActionMessage(data.message || 'Chat ID registered successfully!');
+        setCustomChatId('');
+        await fetchAllData();
+      } else {
+        setActionMessage(data.error || 'Failed to update Chat ID');
+      }
+    } catch (err: any) {
+      setActionMessage(err.message || 'Error updating Chat ID');
+    } finally {
+      setIsUpdatingChatId(false);
+    }
+  };
+
+  const handleRetryAllFailed = async () => {
+    setActionLoading(true);
+    try {
+      const res = await fetch('/api/telegram/retry-all', { method: 'POST' });
+      const data = await res.json();
+      setActionMessage(data.message || 'Failed events queued for re-delivery!');
+      await fetchAllData();
+    } catch (err: any) {
+      setActionMessage(err.message || 'Error retrying events');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   // Run Test Suites
   const handleRunAllTests = async () => {
     setIsRunningTests(true);
@@ -420,7 +463,7 @@ export const DashboardView: React.FC = () => {
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              OVERVIEW
+              SARRAF
             </button>
             <button
               onClick={() => setActiveMainTab('TELEGRAM')}
@@ -575,9 +618,48 @@ export const DashboardView: React.FC = () => {
 
       {/* Main Terminal View Switcher */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6">
-        {/* TAB 1: OVERVIEW (Main Trading Deck) */}
+        {/* TAB 1: OVERVIEW (Main Trading Deck & SARRAF COMMAND) */}
         {activeMainTab === 'OVERVIEW' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div className="space-y-4">
+            {/* Section Switcher inside Sarraf Tab */}
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2 font-mono text-xs select-none">
+                <button
+                  onClick={() => setSarrafSection('COMMAND')}
+                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                    sarrafSection === 'COMMAND'
+                      ? 'bg-[#E8B84A] text-black font-extrabold border-[#E8B84A] shadow-[0_0_15px_rgba(232,184,74,0.35)]'
+                      : 'bg-black/60 text-neutral-400 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
+                  }`}
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>SARRAF COMMAND</span>
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-black/40 text-black font-bold">
+                    LIVE
+                  </span>
+                </button>
+                <button
+                  onClick={() => setSarrafSection('DECK')}
+                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                    sarrafSection === 'DECK'
+                      ? 'bg-[#E8B84A] text-black font-extrabold border-[#E8B84A] shadow-[0_0_15px_rgba(232,184,74,0.35)]'
+                      : 'bg-black/60 text-neutral-400 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
+                  }`}
+                >
+                  <span>TRADING DECK</span>
+                </button>
+              </div>
+
+              <span className="text-[10px] font-mono text-neutral-500 hidden sm:inline">
+                SECTION: {sarrafSection === 'COMMAND' ? 'SARRAF COMMAND' : 'TRADING DECK'}
+              </span>
+            </div>
+
+            {/* View Render */}
+            {sarrafSection === 'COMMAND' ? (
+              <SarrafCommandView />
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
             {/* Left Column (8 cols): Interactive Chart & Live Signals */}
             <section className="lg:col-span-8 space-y-6">
               {/* Chart Card */}
@@ -1097,6 +1179,8 @@ export const DashboardView: React.FC = () => {
               </div>
             </section>
           </div>
+            )}
+          </div>
         )}
 
         {/* TAB 2: TELEGRAM COMMAND CENTER (Phase 4 Centerpiece) */}
@@ -1184,6 +1268,71 @@ export const DashboardView: React.FC = () => {
                   <ShieldCheck className="w-3.5 h-3.5" />
                   <span>{isDryRun ? 'SWITCH TO LIVE DISPATCH' : 'SWITCH TO DRY RUN'}</span>
                 </button>
+              </div>
+            </div>
+
+            {/* Target Chat Registration & Binding Alert */}
+            <div
+              className={`p-4 rounded-2xl border font-mono ${
+                telegramStatus?.targetChatIdMasked?.includes('NOT BOUND') ||
+                telegramStatus?.lastError?.includes('unbound') ||
+                telegramStatus?.lastError?.includes('unconfigured') ||
+                telegramStatus?.lastError?.includes('bot username')
+                  ? 'bg-rose-950/30 border-rose-600/50 shadow-[0_0_15px_rgba(225,29,72,0.15)]'
+                  : 'bg-black/40 border-white/10'
+              }`}
+            >
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                      <Zap className="w-3.5 h-3.5 text-[#E8B84A]" />
+                      <span>TELEGRAM TARGET CHAT REGISTRATION</span>
+                    </span>
+                    <span className="text-[10px] text-neutral-400">
+                      (Status: <strong className="text-[#FFD97A]">{telegramStatus?.targetChatIdMasked || 'NOT REGISTERED'}</strong>)
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-neutral-300">
+                    Live automatic gold trades send hone k liye apna numeric Chat ID bind karein, ya simply Telegram me <strong>@Sarraftelegrambot</strong> open kar k <strong>START</strong> tap karein (bot khud register kar lega):
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="text"
+                    placeholder="Enter Chat ID (e.g. 123456789)"
+                    value={customChatId}
+                    onChange={(e) => setCustomChatId(e.target.value)}
+                    className="bg-black/80 border border-white/20 rounded-lg px-3 py-1.5 text-xs text-white placeholder-neutral-500 font-mono focus:border-[#E8B84A] focus:outline-none w-56"
+                  />
+                  <button
+                    onClick={() => handleSetChatId()}
+                    disabled={isUpdatingChatId || !customChatId.trim()}
+                    className="px-3 py-1.5 rounded-lg bg-[#E8B84A] hover:bg-[#FFD97A] text-black font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <span>SAVE CHAT ID</span>
+                  </button>
+                  <a
+                    href="https://t.me/Sarraftelegrambot?start=web"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer"
+                  >
+                    <Send className="w-3 h-3" />
+                    <span>OPEN BOT IN TELEGRAM</span>
+                  </a>
+                  {telegramStatus?.failedCount > 0 && (
+                    <button
+                      onClick={handleRetryAllFailed}
+                      disabled={actionLoading}
+                      className="px-3 py-1.5 rounded-lg bg-rose-900/60 hover:bg-rose-800 text-rose-200 border border-rose-500/40 font-bold text-xs flex items-center gap-1 transition-colors cursor-pointer"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>RETRY ALL FAILED ({telegramStatus.failedCount})</span>
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 

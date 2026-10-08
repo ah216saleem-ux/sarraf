@@ -314,9 +314,8 @@
     "createdAt": "2026-10-07T23:00:32.445Z",
     "status": "PENDING_DELIVERY",
     "messageText": "⚠️ Bot restarted",
-    "lastAttemptAt": "2026-10-07T23:00:35.939Z",
-    "retryCount": 3,
-    "lastError": "Forbidden: the bot can't send messages to the bot"
+    "lastAttemptAt": "2026-10-08T11:54:26.395Z",
+    "retryCount": 0
   },
   {
     "eventId": "EVT-1791414037064-c3b81eb8",
@@ -334,7 +333,10 @@
       "notes": "Market session closed. Signal closed at last live price as MARKET_CLOSE."
     },
     "createdAt": "2026-10-07T23:00:37.064Z",
-    "status": "PENDING_DELIVERY"
+    "status": "PENDING_DELIVERY",
+    "messageText": "Trade closed (market close) ⏱ +$0.00",
+    "lastAttemptAt": "2026-10-08T11:54:26.422Z",
+    "retryCount": 0
   },
   {
     "eventId": "EVT-1791414037066-226d593f",
@@ -352,6 +354,35 @@
       "notes": "Market session closed. Pending limit order expired."
     },
     "createdAt": "2026-10-07T23:00:37.066Z",
-    "status": "PENDING_DELIVERY"
+    "status": "PENDING_DELIVERY",
+    "messageText": "Not filled, signal cancelled ⌛",
+    "lastAttemptAt": "2026-10-08T11:54:26.498Z",
+    "retryCount": 0
+  },
+  {
+    "eventId": "ALERT-BOT_RESTARTED-1791460466002",
+    "signalId": "ALERT-BOT_RESTARTED-1791460466002",
+    "type": "ADMIN_ALERT",
+    "payload": {
+      "alertType": "BOT_RESTARTED"
+    },
+    "createdAt": "2026-10-08T11:54:26.003Z",
+    "status": "PENDING_DELIVERY",
+    "messageText": "⚠️ Bot restarted",
+    "lastAttemptAt": "2026-10-08T11:54:26.595Z",
+    "retryCount": 0
+  },
+  {
+    "eventId": "ALERT-BOT_RESTARTED-1791464348994",
+    "signalId": "ALERT-BOT_RESTARTED-1791464348994",
+    "type": "ADMIN_ALERT",
+    "payload": {
+      "alertType": "BOT_RESTARTED"
+    },
+    "createdAt": "2026-10-08T12:59:08.994Z",
+    "status": "PENDING_DELIVERY",
+    "messageText": "⚠️ Bot restarted",
+    "lastAttemptAt": "2026-10-08T12:59:39.002Z",
+    "lastError": "Waiting for target Telegram chat registration. Open @Sarraftelegrambot and send /start or enter Chat ID in dashboard Settings."
   }
 ]

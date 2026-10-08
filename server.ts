@@ -56,7 +56,10 @@ import {
   sendAdminAlert,
   setDryRunMode,
   retryFailedOutboxItem,
+  retryAllFailedOutboxItems,
   getIsDryRun,
+  setDynamicTelegramChatId,
+  getEffectiveTelegramChatId,
 } from './src/server/telegramWorker.ts';
 import {
   getValidationLogs,
@@ -232,6 +235,21 @@ let latestLiveQuote: LiveQuote | null = null;
 let consecutiveFailures = 0;
 let backoffDelayMs = 1200;
 
+// SSE client tracking for SARRAF COMMAND live tick stream
+const commandSseClients = new Set<any>();
+
+function broadcastCommandTick(tick: any) {
+  if (commandSseClients.size === 0 || !tick) return;
+  const payload = `data: ${JSON.stringify(tick)}\n\n`;
+  for (const client of commandSseClients) {
+    try {
+      client.write(payload);
+    } catch {
+      commandSseClients.delete(client);
+    }
+  }
+}
+
 // Resilient background tick fetcher with exponential backoff & raw field logging
 async function fetchBiquoteTick() {
   try {
@@ -341,6 +359,9 @@ async function fetchBiquoteTick() {
       isNewsLockActive(now)
     );
 
+    // Broadcast tick immediately to SARRAF COMMAND clients
+    broadcastCommandTick(latestLiveQuote);
+
     // Reset backoff on success
     consecutiveFailures = 0;
     backoffDelayMs = 1200;
@@ -407,6 +428,23 @@ app.get('/api/candles', (_req, res) => {
   res.json({
     store: getCandleStore(),
     status: getEngineStatus(),
+  });
+});
+
+// GET /api/command/feed-stream - Real-time SSE streaming ticks for SARRAF COMMAND
+app.get('/api/command/feed-stream', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+  });
+  res.write(': connected\n\n');
+  if (latestLiveQuote) {
+    res.write(`data: ${JSON.stringify(latestLiveQuote)}\n\n`);
+  }
+  commandSseClients.add(res);
+  req.on('close', () => {
+    commandSseClients.delete(res);
   });
 });
 
@@ -733,6 +771,40 @@ app.post('/api/telegram/retry-event', requireAdminAuth, async (req, res) => {
 
   const result = await retryFailedOutboxItem(eventId);
   return res.json(result);
+});
+
+// POST /api/telegram/retry-all - Retry all failed events in outbox
+app.post('/api/telegram/retry-all', requireAdminAuth, async (_req, res) => {
+  const result = await retryAllFailedOutboxItems();
+  return res.json({ success: true, ...result });
+});
+
+// POST /api/telegram/set-chat - Set or update target Telegram Chat ID directly
+app.post('/api/telegram/set-chat', requireAdminAuth, (req, res) => {
+  const { chatId } = req.body || {};
+  if (!chatId || (typeof chatId !== 'string' && typeof chatId !== 'number')) {
+    return res.status(400).json({ success: false, error: 'Parameter "chatId" is required.' });
+  }
+
+  const cleanId = String(chatId).trim();
+  if (
+    cleanId.toLowerCase() === '@sarraftelegrambot' ||
+    cleanId.toLowerCase() === 'sarraftelegrambot' ||
+    cleanId === '8737269513'
+  ) {
+    return res.status(400).json({
+      success: false,
+      error:
+        "Cannot use the bot's own username (@Sarraftelegrambot). Please enter your personal Telegram numeric Chat ID (e.g. 123456789) or group ID (e.g. -100...), or simply open @Sarraftelegrambot in Telegram and tap START.",
+    });
+  }
+
+  setDynamicTelegramChatId(cleanId);
+  return res.json({
+    success: true,
+    chatId: cleanId,
+    message: `Target Telegram chat successfully registered as: ${cleanId}. All automatic trade alerts will now be dispatched here.`,
+  });
 });
 
 // GET /api/telegram/validations - Recent AI validation logs
@@ -1471,7 +1543,7 @@ app.post('/api/auth/login', (req, res) => {
     const userPayload = {
       email: email.trim().toLowerCase(),
       accountType: 'Institutional Desk',
-      terminalId: `SRF-${Math.floor(1000 + Math.random() * 9000)}-XAU`,
+      terminalId: `SRF-${crypto.randomInt(1000, 9999)}-XAU`,
     };
 
     activeSessions.set(token, {

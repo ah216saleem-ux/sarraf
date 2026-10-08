@@ -13,6 +13,7 @@ import {
   Sparkles,
   History,
   Activity,
+  Send,
 } from 'lucide-react';
 
 export const SettingsTab: React.FC = () => {
@@ -42,6 +43,45 @@ export const SettingsTab: React.FC = () => {
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [isDryRunModalOpen, setIsDryRunModalOpen] = useState(false);
+  const [telegramStatus, setTelegramStatus] = useState<any>(null);
+  const [customChatId, setCustomChatId] = useState('');
+  const [isUpdatingChat, setIsUpdatingChat] = useState(false);
+
+  const fetchTelegramStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/telegram/status');
+      if (res.ok) {
+        const json = await res.json();
+        setTelegramStatus(json.data);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const handleSaveChatId = async () => {
+    if (!customChatId.trim()) return;
+    setIsUpdatingChat(true);
+    try {
+      const res = await fetch('/api/telegram/set-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chatId: customChatId.trim() }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setActionNotice(data.message || 'Chat ID registered successfully!');
+        setCustomChatId('');
+        fetchTelegramStatus();
+      } else {
+        setValidationErrors([data.error || 'Failed to update Chat ID']);
+      }
+    } catch (err: any) {
+      setValidationErrors([err.message || 'Error updating Chat ID']);
+    } finally {
+      setIsUpdatingChat(false);
+    }
+  };
 
   const fetchSettings = useCallback(async () => {
     try {
@@ -59,7 +99,8 @@ export const SettingsTab: React.FC = () => {
 
   useEffect(() => {
     fetchSettings();
-  }, [fetchSettings]);
+    fetchTelegramStatus();
+  }, [fetchSettings, fetchTelegramStatus]);
 
   const handleSave = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -311,6 +352,50 @@ export const SettingsTab: React.FC = () => {
                   className="w-full bg-black border border-white/15 rounded-lg px-3 py-1.5 text-white focus:border-[#E8B84A] focus:outline-none"
                 />
               </div>
+            </div>
+          </div>
+
+          {/* Telegram Target Chat Binding & Alerts */}
+          <div className="glass-panel p-5 rounded-2xl border border-white/10 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-white/10">
+              <h3 className="text-sm font-bold text-white tracking-wider flex items-center gap-2">
+                <Send className="w-4 h-4 text-[#29B6F6]" />
+                <span>TELEGRAM SIGNAL DISPATCH BINDING</span>
+              </h3>
+              <span className="text-[10px] font-mono text-[#FFD97A]">
+                {telegramStatus?.targetChatIdMasked || 'NOT REGISTERED'}
+              </span>
+            </div>
+
+            <p className="text-xs text-neutral-300">
+              Live automatic gold trades receive krne k liye apna Telegram Chat ID register karein. Agar aapko Chat ID nahi maloom to simply Telegram me <strong>@Sarraftelegrambot</strong> open kar k <strong>START</strong> tap karein (bot automatically apka Chat ID bind kar lega).
+            </p>
+
+            <div className="flex items-center gap-3 flex-wrap">
+              <input
+                type="text"
+                placeholder="Enter Chat ID (e.g. 123456789 or @channel)"
+                value={customChatId}
+                onChange={(e) => setCustomChatId(e.target.value)}
+                className="bg-black border border-white/15 rounded-lg px-3 py-1.5 text-white focus:border-[#E8B84A] focus:outline-none font-mono text-xs w-64"
+              />
+              <button
+                type="button"
+                onClick={handleSaveChatId}
+                disabled={isUpdatingChat || !customChatId.trim()}
+                className="px-3.5 py-1.5 rounded-lg bg-[#E8B84A] hover:bg-[#FFD97A] text-black font-bold text-xs transition-colors cursor-pointer disabled:opacity-50"
+              >
+                SAVE CHAT ID
+              </button>
+              <a
+                href="https://t.me/Sarraftelegrambot?start=web"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Send className="w-3 h-3" />
+                <span>OPEN @Sarraftelegrambot</span>
+              </a>
             </div>
           </div>
 

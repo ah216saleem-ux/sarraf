@@ -461,7 +461,10 @@ export function checkLiquiditySweep(candles: Candle[], direction: 'BULLISH' | 'B
 }
 
 // Master Scan Function: Evaluates all sections (A to G) and computes the 0-100 Score
-export function runSarrafAnalysis(livePrice: number, liveSpread: number): EngineAnalysisResult {
+export function runSarrafAnalysis(livePrice?: number, liveSpread?: number): EngineAnalysisResult {
+  const safePrice = typeof livePrice === 'number' && !isNaN(livePrice) ? livePrice : 0;
+  const safeSpread = typeof liveSpread === 'number' && !isNaN(liveSpread) ? liveSpread : 0.20;
+
   const nowStr = new Date().toISOString();
   const todayDateStr = nowStr.slice(0, 10);
 
@@ -482,7 +485,8 @@ export function runSarrafAnalysis(livePrice: number, liveSpread: number): Engine
   // --- SECTION B: MARKET FILTERS ---
   const m15ATR = calculateATR(m15Candles, 14);
   const atrValid = m15ATR >= 1.0 && m15ATR <= 12.0;
-  const spreadValid = liveSpread <= 0.60;
+  const spreadLimit = getCurrentSettings().spreadLimit || 0.60;
+  const spreadValid = safeSpread <= spreadLimit;
   const newsLockActive = isNewsLockActive();
   const rolloverLockActive = isRolloverHour();
   
@@ -500,7 +504,7 @@ export function runSarrafAnalysis(livePrice: number, liveSpread: number): Engine
 
   let filterRejection = '';
   if (!atrValid) filterRejection = `M15 ATR out of bounds: $${m15ATR.toFixed(2)} (allowed $1.00 - $12.00)`;
-  else if (!spreadValid) filterRejection = `Live spread too wide: $${liveSpread.toFixed(2)} (max $0.60)`;
+  else if (!spreadValid) filterRejection = `Live spread too wide: $${safeSpread.toFixed(2)} (max $${spreadLimit.toFixed(2)})`;
   else if (newsLockActive) filterRejection = 'High-impact USD macro news lockout active (30m pre / 15m post)';
   else if (rolloverLockActive) filterRejection = 'COMEX session rollover window (21:00 - 22:15 UTC)';
   else if (!chopValid) filterRejection = 'H1 market structure in consolidation/chop (no clear trend)';
@@ -510,7 +514,7 @@ export function runSarrafAnalysis(livePrice: number, liveSpread: number): Engine
     atrValid,
     atrValue: m15ATR,
     spreadValid,
-    spreadValue: liveSpread,
+    spreadValue: safeSpread,
     chopValid,
     newsLockActive,
     rolloverLockActive,
