@@ -1,5 +1,6 @@
 import React from 'react';
-import { Lock, Sparkles } from 'lucide-react';
+import { Lock } from 'lucide-react';
+import { QuantumVortex } from '../vortex/QuantumVortex';
 
 interface TopAreaPlaceholdersProps {
   buyRatio: number;
@@ -9,10 +10,7 @@ interface TopAreaPlaceholdersProps {
 }
 
 export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
-  buyRatio,
-  sellRatio,
   isDimmed,
-  freshness,
 }) => {
   const sniperGates = [
     { id: 'g1', name: 'W1/D1 Context' },
@@ -27,52 +25,8 @@ export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
 
   return (
     <div className={`space-y-2 transition-opacity duration-300 ${isDimmed ? 'opacity-40' : 'opacity-100'}`}>
-      {/* Reserved Block for Phase 2 Animation with Live BUY FLOW % & SELL FLOW % */}
-      <div className="relative rounded-lg bg-[#070b14] border border-[#38bdf8]/20 px-3 py-2.5 overflow-hidden">
-        <div className="absolute top-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-[#38bdf8]/40 to-transparent" />
-
-        <div className="flex items-center justify-between gap-2">
-          {/* Left Live Box: BUY FLOW % */}
-          <div className="flex-1 flex flex-col items-start font-mono">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[9px] uppercase tracking-[0.12em] text-[#8a96a8]">
-                BUY FLOW (EST.)
-              </span>
-              <span className="text-[8px] text-[#8a96a8]/70 uppercase">· {freshness}</span>
-            </div>
-            <div className="flex items-baseline gap-1 mt-0.5">
-              <span className="text-lg sm:text-xl font-bold tabular-nums text-[#22e08a]">
-                {buyRatio}%
-              </span>
-              <span className="text-[9px] text-[#8a96a8]">60s</span>
-            </div>
-          </div>
-
-          {/* Center Reserved Animation Slot */}
-          <div className="flex-[1.2] flex items-center justify-center py-1 px-2 rounded bg-[#04060b] border border-dashed border-[#38bdf8]/25 text-center">
-            <div className="flex items-center gap-1 text-[9px] font-mono text-[#38bdf8]">
-              <Sparkles className="w-2.5 h-2.5 text-[#38bdf8]" />
-              <span>PHASE 2 3D CORE</span>
-            </div>
-          </div>
-
-          {/* Right Live Box: SELL FLOW % */}
-          <div className="flex-1 flex flex-col items-end text-right font-mono">
-            <div className="flex items-center gap-1.5 justify-end">
-              <span className="text-[8px] text-[#8a96a8]/70 uppercase">{freshness} ·</span>
-              <span className="text-[9px] uppercase tracking-[0.12em] text-[#8a96a8]">
-                SELL FLOW (EST.)
-              </span>
-            </div>
-            <div className="flex items-baseline gap-1 mt-0.5">
-              <span className="text-[9px] text-[#8a96a8]">60s</span>
-              <span className="text-lg sm:text-xl font-bold tabular-nums text-[#ff3b6b]">
-                {sellRatio}%
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
+      {/* Phase 2 Quantum Vortex 3D Core with Live HUD */}
+      <QuantumVortex />
 
       {/* 2-Column Compact Row: DECISION & AHMED SNIPER CHAIN */}
       <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
