@@ -3,7 +3,7 @@ import App from './App.tsx';
 import './index.css';
 
 // Register PWA service worker for shell caching (APIs remain network-only)
-if ('serviceWorker' in navigator && process.env.NODE_ENV === 'production') {
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch((err) => {
       console.warn('[PWA] Service worker registration ignored:', err);

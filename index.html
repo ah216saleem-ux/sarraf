@@ -22,6 +22,22 @@
     <meta name="twitter:title" content="SARRAF — Gold Intelligence in Real Time" />
     <meta name="twitter:description" content="Real-time XAU/USD gold price tracking and disciplined trade signals delivered directly to Telegram." />
     <meta name="twitter:image" content="/og-image.svg" />
+    <script>
+      // Suppress Vite HMR WebSocket errors in iframe preview environment as per environment constraints
+      window.addEventListener('unhandledrejection', function(event) {
+        if (event && event.reason && (
+          event.reason.message === 'WebSocket closed without opened.' ||
+          (typeof event.reason.message === 'string' && event.reason.message.includes('WebSocket'))
+        )) {
+          event.preventDefault();
+        }
+      });
+      window.addEventListener('error', function(event) {
+        if (event && event.message && typeof event.message === 'string' && event.message.includes('WebSocket')) {
+          event.preventDefault();
+        }
+      });
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
