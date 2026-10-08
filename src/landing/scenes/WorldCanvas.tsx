@@ -15,6 +15,8 @@ interface WorldCanvasProps {
   progress: number;
   isLiteMode?: boolean;
   onFpsUpdate?: (fps: number) => void;
+  onParticleCountUpdate?: (count: number) => void;
+  onDprUpdate?: (dpr: number) => void;
 }
 
 // Inner FPS monitor component running inside Canvas frame loop
@@ -60,6 +62,8 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
   progress,
   isLiteMode = false,
   onFpsUpdate,
+  onParticleCountUpdate,
+  onDprUpdate,
 }) => {
   const [dpr, setDpr] = useState(1);
   const [isMobile, setIsMobile] = useState(false);
@@ -81,13 +85,18 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
     const mobile = window.innerWidth < 768;
     setIsMobile(mobile);
     const pixelRatio = window.devicePixelRatio || 1;
-    setDpr(Math.min(pixelRatio, mobile ? 1.0 : 1.5));
-  }, []);
+    const computedDpr = Math.min(pixelRatio, mobile ? 1.0 : 1.5);
+    setDpr(computedDpr);
+    onDprUpdate?.(computedDpr);
+
+    const baseParticles = (mobile ? 320 : 750) + (mobile ? 400 : 900);
+    onParticleCountUpdate?.(baseParticles);
+  }, [onDprUpdate, onParticleCountUpdate]);
 
   const handleLowFps = () => {
-    // Lower quality automatically when below 45 FPS
     setEnableBloom(false);
     setDpr(1.0);
+    onDprUpdate?.(1.0);
   };
 
   // Lite mode or Tab hidden calm fallback
@@ -104,13 +113,21 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
     return <div className="fixed inset-0 z-0 bg-[#050505]" />;
   }
 
+  // Active scene boundary checks to unmount / pause scenes far from current viewport
+  const showHero = progress < 0.22;
+  const showMarket = progress >= 0.12 && progress < 0.44;
+  const showPrecision = progress >= 0.34 && progress < 0.66;
+  const showNews = progress >= 0.50 && progress < 0.82;
+  const showTelegram = progress >= 0.68 && progress < 0.94;
+  const showFinale = progress >= 0.84;
+
   return (
     <div className="fixed inset-0 z-0 pointer-events-none w-full h-full overflow-hidden bg-[#050505]">
       <Canvas
         camera={{ position: [0, 0, 11.2], fov: 45, near: 0.1, far: 80 }}
         dpr={dpr}
         gl={{
-          antialias: true,
+          antialias: !isMobile,
           alpha: false,
           powerPreference: 'high-performance',
           stencil: false,
@@ -129,40 +146,40 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
         <directionalLight position={[-6, -4, 2]} intensity={0.6} color="#8F6A24" />
         <pointLight position={[0, 0, 6]} intensity={1.2} color="#FFD97A" distance={18} />
 
-        {/* Dynamic camera navigation along scroll */}
+        {/* Dynamic camera navigation along continuous Catmull-Rom spline */}
         <WorldCamera progress={progress} />
 
         <Suspense fallback={null}>
-          {/* Universal Ambient Gold Dust Particles */}
+          {/* Universal Ambient Gold Dust Particles with Velocity Stretch */}
           <AmbientDust />
 
           {/* Scene 1: Vault Slit Opening & Swirling Aurora */}
-          <HeroVaultSlit progress={progress} />
-          <AuroraRibbons intensity={Math.max(0.2, 1 - progress * 1.5)} />
+          {showHero && <HeroVaultSlit progress={progress} />}
+          {showHero && <AuroraRibbons intensity={Math.max(0.2, 1 - progress * 1.5)} />}
 
           {/* Scene 2: Live Market - Particle Gold Bar Assembly */}
-          <GoldBarAssembly progress={progress} />
+          {showMarket && <GoldBarAssembly progress={progress} />}
 
           {/* Scene 3: Precision - Floating 3D Holographic Slabs */}
-          <PrecisionNodes progress={progress} />
+          {showPrecision && <PrecisionNodes progress={progress} />}
 
-          {/* Scene 4: News Radar - 3D Wireframe Globe with Nodes */}
-          <NewsRadarGlobe progress={progress} />
+          {/* Scene 4: News Radar - 3D Wireframe Globe with Nodes & Trailing Glow */}
+          {showNews && <NewsRadarGlobe progress={progress} />}
 
           {/* Scene 5: Telegram - Origami Paper Light Plane & Phone Mock */}
-          <TelegramLightPlane progress={progress} />
+          {showTelegram && <TelegramLightPlane progress={progress} />}
 
           {/* Scene 6: Finale - Massive Rotating Dual-Ring Gold Vault */}
-          <VaultFinaleDoor progress={progress} />
+          {showFinale && <VaultFinaleDoor progress={progress} />}
 
-          {/* Cinematic Bloom Postprocessing (auto disabled if FPS < 45) */}
+          {/* Cinematic Bloom Postprocessing (half-resolution on mobile, disabled if low FPS) */}
           {enableBloom && (
             <EffectComposer multisampling={0}>
               <Bloom
                 luminanceThreshold={0.55}
                 luminanceSmoothing={0.3}
-                intensity={isMobile ? 0.4 : 0.75}
-                radius={isMobile ? 0.35 : 0.6}
+                intensity={isMobile ? 0.35 : 0.7}
+                radius={isMobile ? 0.3 : 0.55}
               />
             </EffectComposer>
           )}

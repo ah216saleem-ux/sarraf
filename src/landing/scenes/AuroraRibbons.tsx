@@ -10,6 +10,7 @@ interface AuroraRibbonsProps {
 export const AuroraRibbons: React.FC<AuroraRibbonsProps> = ({ intensity = 1 }) => {
   const ribbonCount = 5;
   const groupsRef = useRef<THREE.Group>(null);
+  const currentStretch = useRef(1);
 
   // Generate 5 ribbon geometry strips with varying frequency
   const ribbonsData = useMemo(() => {
@@ -30,10 +31,15 @@ export const AuroraRibbons: React.FC<AuroraRibbonsProps> = ({ intensity = 1 }) =
     });
   }, []);
 
-  useFrame((state) => {
+  useFrame((state, delta) => {
     const time = state.clock.elapsedTime;
     const px = globalScrollState.pointer.targetX;
     const py = globalScrollState.pointer.targetY;
+
+    // Scroll-velocity reactive visuals: ribbons stretch slightly with scroll speed and relax when stopped
+    const absVel = Math.abs(globalScrollState.velocity || 0);
+    const targetStretch = 1.0 + Math.min(absVel * 0.15, 0.6);
+    currentStretch.current = THREE.MathUtils.damp(currentStretch.current, targetStretch, 5.0, delta);
 
     if (!groupsRef.current) return;
 
@@ -48,12 +54,12 @@ export const AuroraRibbons: React.FC<AuroraRibbonsProps> = ({ intensity = 1 }) =
       for (let j = 0; j < pos.count; j++) {
         v.fromBufferAttribute(pos, j);
 
-        // Sinusoidal wave propagation influenced by time, pointer, and scroll
-        const wave1 = Math.sin(v.x * data.freq + time * data.speed) * 1.5;
+        // Sinusoidal wave propagation influenced by time, pointer, and velocity stretch
+        const wave1 = Math.sin(v.x * data.freq * currentStretch.current + time * data.speed) * 1.5;
         const wave2 = Math.cos(v.x * 0.15 - time * 0.4) * 0.8;
         const pointerInfluence = (px * 1.2) * Math.sin(v.x * 0.1);
 
-        v.z = wave1 + wave2 + pointerInfluence;
+        v.z = (wave1 + wave2 + pointerInfluence) * currentStretch.current;
         v.y = data.baseY + Math.sin(v.x * 0.25 + time * 0.3) * 0.6 + py * 0.5;
 
         pos.setXYZ(j, v.x, v.y, v.z);

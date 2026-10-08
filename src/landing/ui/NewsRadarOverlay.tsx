@@ -41,7 +41,7 @@ export const NewsRadarOverlay: React.FC<{ opacity: number }> = ({ opacity }) => 
           }
         }
       } catch {
-        // Hide if unavailable
+        // Fallback gracefully
       }
     };
 
@@ -69,35 +69,35 @@ export const NewsRadarOverlay: React.FC<{ opacity: number }> = ({ opacity }) => 
 
   return (
     <div
-      className="min-h-screen w-full flex items-center px-4 sm:px-8 py-20 pointer-events-auto overflow-x-hidden"
+      className="min-h-screen w-full flex items-center px-4 sm:px-8 py-16 pointer-events-auto overflow-x-hidden transition-opacity duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
       style={{ opacity }}
     >
       <div className="max-w-6xl mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-8 sm:gap-12 items-center">
         {/* Left column: Editorial text & Next Event Live Countdown */}
-        <div className="lg:col-span-5 space-y-6">
+        <div className="lg:col-span-5 space-y-5 sm:space-y-6">
           <div className="flex items-center gap-3 text-xs font-mono tracking-[0.25em] text-[#FFD97A]/80 uppercase">
             <Radio className="w-4 h-4 text-[#E8B84A] animate-pulse" />
-            <span>GLOBAL RADAR // MACRO HARVEST</span>
+            <span>HIGH-IMPACT NEWS MONITOR</span>
           </div>
 
           <h2 className="text-3xl sm:text-5xl font-bold tracking-tight text-white leading-tight">
             Anticipate volatility before it{' '}
             <span className="font-serif italic text-[#FFD97A] gold-glow-text">
-              hits the tape.
+              moves price.
             </span>
           </h2>
 
           <p className="text-neutral-300 text-sm sm:text-base leading-relaxed">
-            SARRAF scans tier-one macroeconomic catalysts 24/7. Real-time Forex Factory calendar feeds monitor CPI, Non-Farm Payrolls, and FOMC interest rate meetings to protect institutional bullion execution.
+            Major macroeconomic releases generate sharp price swings in gold. SARRAF monitors the economic calendar for high-impact USD events including CPI, Non-Farm Payrolls, and FOMC announcements.
           </p>
 
-          {/* Next Real High-Impact USD Event Live Countdown Box (B4 requirement) */}
+          {/* Next Real High-Impact USD Event Live Countdown Box */}
           {nextHighImpact && (
             <div className="p-4 sm:p-5 rounded-2xl bg-amber-950/30 border border-[#E8B84A]/40 backdrop-blur-md shadow-[0_0_25px_rgba(232,184,74,0.15)]">
               <div className="flex items-center justify-between text-[10px] font-mono uppercase text-[#FFD97A] mb-1.5">
                 <span className="flex items-center gap-1.5 font-bold">
                   <Clock className="w-3.5 h-3.5 text-[#E8B84A]" />
-                  NEXT HIGH-IMPACT CATALYST
+                  NEXT HIGH-IMPACT EVENT
                 </span>
                 <span className="px-1.5 py-0.5 rounded bg-[#E8B84A]/20 border border-[#E8B84A]/30 font-bold">
                   {nextHighImpact.country || 'USD'}
@@ -120,10 +120,11 @@ export const NewsRadarOverlay: React.FC<{ opacity: number }> = ({ opacity }) => 
             </div>
           )}
 
+          {/* Real Rule Notice (Exact requirement: no minute numbers) */}
           <div className="p-4 rounded-xl bg-black/60 border border-white/10 flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-[#FFD97A] shrink-0 mt-0.5" />
-            <p className="text-xs font-mono text-neutral-300 leading-relaxed">
-              Algorithmic blackouts are automatically triggered 15 minutes before critical CPI and FOMC releases to shield active orders.
+            <p className="text-xs font-mono text-neutral-200 leading-relaxed font-medium">
+              Signals pause before and after high-impact USD news.
             </p>
           </div>
         </div>
@@ -134,46 +135,38 @@ export const NewsRadarOverlay: React.FC<{ opacity: number }> = ({ opacity }) => 
             realEvents.map((event) => (
               <div
                 key={event.id}
-                className="glass-panel p-4 sm:p-5 rounded-xl border border-white/10 hover:border-[#FFD97A]/50 transition-all duration-300 flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#09090c]/80 backdrop-blur-xl"
+                className="p-4 sm:p-5 rounded-xl border border-white/10 hover:border-[#FFD97A]/50 transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#09090c]/85 backdrop-blur-xl"
               >
                 <div className="space-y-1">
                   <div className="flex items-center gap-2.5">
-                    <span className="text-[10px] font-mono font-bold tracking-widest text-[#E8B84A] px-1.5 py-0.5 rounded bg-[#E8B84A]/10 border border-[#E8B84A]/30">
+                    <span className="px-1.5 py-0.5 rounded bg-[#E8B84A]/20 text-[#FFD97A] text-[10px] font-mono font-bold">
                       {event.country || 'USD'}
                     </span>
-                    <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-rose-950/60 text-rose-300 border border-rose-700/50">
+                    <span className="text-[10px] font-mono text-rose-400 uppercase font-semibold">
                       HIGH IMPACT
                     </span>
-                    <h4 className="text-sm sm:text-base font-semibold text-white">
-                      {event.title}
-                    </h4>
-                  </div>
-                  <div className="flex items-center gap-4 text-xs font-mono text-neutral-400">
-                    <span>
-                      Forecast: <strong className="text-neutral-200">{event.forecastStr || '—'}</strong>
-                    </span>
-                    <span>·</span>
-                    <span>
-                      Prev: <strong className="text-neutral-200">{event.previousStr || '—'}</strong>
+                    <span className="text-[10px] font-mono text-neutral-400">
+                      {event.displayTime}
                     </span>
                   </div>
+                  <h4 className="text-sm font-bold text-white tracking-tight">
+                    {event.title}
+                  </h4>
                 </div>
 
-                <div className="flex items-center gap-3 self-end sm:self-center font-mono shrink-0">
-                  <div className="text-right">
-                    <span className="text-[9px] block text-neutral-400 uppercase tracking-widest">
-                      T-MINUS
-                    </span>
-                    <span className="text-xs sm:text-sm font-bold text-white tracking-widest">
-                      {formatCountdown(event.minutesUntil)}
+                <div className="flex items-center gap-4 text-xs font-mono shrink-0">
+                  <div>
+                    <span className="text-[9px] text-neutral-500 block uppercase">STATUS</span>
+                    <span className="text-neutral-300">
+                      {event.minutesUntil < 0 ? 'RELEASED' : formatCountdown(event.minutesUntil)}
                     </span>
                   </div>
                 </div>
               </div>
             ))
           ) : (
-            <div className="p-6 rounded-2xl bg-black/40 border border-white/5 text-center font-mono text-xs text-neutral-400">
-              Syncing live macro calendar feed...
+            <div className="p-6 rounded-xl border border-white/10 bg-[#09090c]/80 text-center font-mono text-xs text-neutral-400">
+              Monitoring economic calendar for upcoming USD releases.
             </div>
           )}
         </div>

@@ -12,7 +12,7 @@ export interface ScrollState {
   velocity: number;
 }
 
-// Global observable scroll state for high frequency Three.js animation frames
+// Global observable scroll state for high-frequency Three.js animation frames
 export const globalScrollState = {
   progress: 0,
   velocity: 0,
@@ -27,11 +27,12 @@ export function initSmoothScroll(): () => void {
   // Check prefers-reduced-motion
   const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+  // Tuned Lenis smoothing: weighty yet responsive, no jank when scrolling fast or reversing
   const lenis = new Lenis({
-    lerp: prefersReducedMotion ? 0.9 : 0.07,
+    lerp: prefersReducedMotion ? 0.95 : 0.08,
     smoothWheel: !prefersReducedMotion,
-    wheelMultiplier: 0.9,
-    touchMultiplier: 1.2,
+    wheelMultiplier: 0.95,
+    touchMultiplier: 1.15,
   });
 
   lenisInstance = lenis;
@@ -49,7 +50,7 @@ export function initSmoothScroll(): () => void {
   gsap.ticker.add(tickerCallback);
   gsap.ticker.lagSmoothing(0);
 
-  // Mouse & Touch parallax tracking
+  // Mouse & Touch parallax tracking with passive listeners
   const handlePointerMove = (e: MouseEvent | TouchEvent) => {
     let clientX = 0;
     let clientY = 0;

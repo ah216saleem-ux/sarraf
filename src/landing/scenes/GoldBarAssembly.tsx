@@ -1,4 +1,4 @@
-import React, { useRef, useMemo } from 'react';
+import React, { useRef, useMemo, useEffect } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useMarket } from '../../context/MarketContext';
@@ -13,29 +13,29 @@ export const GoldBarAssembly: React.FC<GoldBarAssemblyProps> = ({ progress }) =>
   const barMeshRef = useRef<THREE.Mesh>(null);
   const wireframeRef = useRef<THREE.LineSegments>(null);
   const particlesRef = useRef<THREE.Points>(null);
+  const sparksRef = useRef<THREE.Points>(null);
   const pulseFactorRef = useRef(1);
 
   // Scene 2 is active around progress 0.18 -> 0.38
-  const sceneProgress = THREE.MathUtils.smoothstep(progress, 0.18, 0.38);
+  const sceneProgress = THREE.MathUtils.smoothstep(progress, 0.16, 0.40);
 
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
-  const PARTICLE_COUNT = isMobile ? 450 : 1000;
+  const PARTICLE_COUNT = isMobile ? 400 : 900;
+  const SPARK_COUNT = isMobile ? 80 : 180;
 
   // Precompute initial random cloud positions and target positions on gold bar surface
   const [positions, targets, initialData] = useMemo(() => {
     const pos = new Float32Array(PARTICLE_COUNT * 3);
     const trg = new Float32Array(PARTICLE_COUNT * 3);
-    const data = new Float32Array(PARTICLE_COUNT * 3); // initial positions preserved
+    const data = new Float32Array(PARTICLE_COUNT * 3);
 
-    // Dimensions of gold bullion bar
     const width = 3.6;
     const height = 1.2;
     const depth = 1.8;
 
     for (let i = 0; i < PARTICLE_COUNT; i++) {
       const i3 = i * 3;
-      // Dispersed cloud
-      const radius = 6.0 + Math.random() * 5.0;
+      const radius = 5.5 + Math.random() * 4.5;
       const theta = Math.random() * Math.PI * 2;
       const phi = Math.acos(Math.random() * 2 - 1);
 
@@ -47,7 +47,6 @@ export const GoldBarAssembly: React.FC<GoldBarAssemblyProps> = ({ progress }) =>
       data[i3 + 1] = pos[i3 + 1];
       data[i3 + 2] = pos[i3 + 2];
 
-      // Target surface point on box
       const face = Math.floor(Math.random() * 6);
       let tx = (Math.random() - 0.5) * width;
       let ty = (Math.random() - 0.5) * height;
@@ -66,7 +65,24 @@ export const GoldBarAssembly: React.FC<GoldBarAssemblyProps> = ({ progress }) =>
     }
 
     return [pos, trg, data];
-  }, []);
+  }, [PARTICLE_COUNT]);
+
+  // Dynamic spark trails that orbit around the assembling bar
+  const sparkData = useMemo(() => {
+    const pos = new Float32Array(SPARK_COUNT * 3);
+    const vel = new Float32Array(SPARK_COUNT * 3);
+    for (let i = 0; i < SPARK_COUNT; i++) {
+      const i3 = i * 3;
+      pos[i3] = (Math.random() - 0.5) * 4;
+      pos[i3 + 1] = (Math.random() - 0.5) * 2;
+      pos[i3 + 2] = (Math.random() - 0.5) * 2.5;
+
+      vel[i3] = (Math.random() - 0.5) * 2.0;
+      vel[i3 + 1] = 0.5 + Math.random() * 1.5;
+      vel[i3 + 2] = (Math.random() - 0.5) * 2.0;
+    }
+    return { pos, vel };
+  }, [SPARK_COUNT]);
 
   const barGeometry = useMemo(() => {
     return new THREE.BoxGeometry(3.6, 1.2, 1.8);
@@ -76,17 +92,14 @@ export const GoldBarAssembly: React.FC<GoldBarAssemblyProps> = ({ progress }) =>
     return new THREE.EdgesGeometry(barGeometry);
   }, [barGeometry]);
 
-  // Trigger pulse on price tick
-  React.useEffect(() => {
-    pulseFactorRef.current = 2.4;
+  useEffect(() => {
+    pulseFactorRef.current = 2.2;
   }, [priceData.tickPulse]);
 
   useFrame((state, delta) => {
-    // Decay pulse factor smoothly
     pulseFactorRef.current = THREE.MathUtils.damp(pulseFactorRef.current, 1.0, 4.0, delta);
 
     if (groupRef.current) {
-      // Rotation driven by continuous time + scroll
       groupRef.current.rotation.y = state.clock.elapsedTime * 0.35 + sceneProgress * 2.0;
       groupRef.current.rotation.x = Math.sin(state.clock.elapsedTime * 0.2) * 0.2 + 0.15;
       groupRef.current.position.y = Math.sin(state.clock.elapsedTime * 0.8) * 0.15;
@@ -97,7 +110,6 @@ export const GoldBarAssembly: React.FC<GoldBarAssemblyProps> = ({ progress }) =>
       const posAttr = particlesRef.current.geometry.attributes.position as THREE.BufferAttribute;
       const array = posAttr.array as Float32Array;
 
-      // Convergence factor increases with scene progress
       const factor = sceneProgress;
       const pulse = pulseFactorRef.current;
 
@@ -111,13 +123,33 @@ export const GoldBarAssembly: React.FC<GoldBarAssemblyProps> = ({ progress }) =>
         const ty = targets[i3 + 1] * pulse;
         const tz = targets[i3 + 2] * pulse;
 
-        // Linear interpolation
         array[i3] = ix + (tx - ix) * factor;
         array[i3 + 1] = iy + (ty - iy) * factor;
         array[i3 + 2] = iz + (tz - iz) * factor;
       }
 
       posAttr.needsUpdate = true;
+    }
+
+    // Animate spark trails
+    if (sparksRef.current) {
+      const sparkAttr = sparksRef.current.geometry.attributes.position as THREE.BufferAttribute;
+      const sparkArr = sparkAttr.array as Float32Array;
+
+      for (let i = 0; i < SPARK_COUNT; i++) {
+        const i3 = i * 3;
+        sparkArr[i3] += sparkData.vel[i3] * delta * 0.6;
+        sparkArr[i3 + 1] += sparkData.vel[i3 + 1] * delta * 0.8;
+        sparkArr[i3 + 2] += sparkData.vel[i3 + 2] * delta * 0.6;
+
+        // Reset spark when it floats too high
+        if (sparkArr[i3 + 1] > 2.5) {
+          sparkArr[i3] = (Math.random() - 0.5) * 3;
+          sparkArr[i3 + 1] = -1.0;
+          sparkArr[i3 + 2] = (Math.random() - 0.5) * 2;
+        }
+      }
+      sparkAttr.needsUpdate = true;
     }
 
     // Materialize solid bar as assembly progresses
@@ -134,7 +166,6 @@ export const GoldBarAssembly: React.FC<GoldBarAssemblyProps> = ({ progress }) =>
     }
   });
 
-  // Position bar in scene 2 space (around z = -2, y = 0)
   return (
     <group ref={groupRef} position={[1.5, 0, -2]}>
       {/* Assembling particle cloud */}
@@ -146,10 +177,28 @@ export const GoldBarAssembly: React.FC<GoldBarAssemblyProps> = ({ progress }) =>
           />
         </bufferGeometry>
         <pointsMaterial
-          size={0.06}
+          size={isMobile ? 0.045 : 0.055}
           color="#FFD97A"
           transparent
-          opacity={0.8}
+          opacity={0.85}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+        />
+      </points>
+
+      {/* Dynamic spark trails */}
+      <points ref={sparksRef}>
+        <bufferGeometry>
+          <bufferAttribute
+            attach="attributes-position"
+            args={[sparkData.pos, 3]}
+          />
+        </bufferGeometry>
+        <pointsMaterial
+          size={0.035}
+          color="#FFE599"
+          transparent
+          opacity={0.65 * sceneProgress}
           blending={THREE.AdditiveBlending}
           depthWrite={false}
         />
@@ -180,7 +229,7 @@ export const GoldBarAssembly: React.FC<GoldBarAssemblyProps> = ({ progress }) =>
       {/* Inner ambient golden core */}
       <pointLight
         color="#FFD97A"
-        intensity={2.5 * pulseFactorRef.current}
+        intensity={2.2 * pulseFactorRef.current}
         distance={8}
       />
     </group>

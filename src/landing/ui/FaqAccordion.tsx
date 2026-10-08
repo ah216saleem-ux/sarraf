@@ -9,19 +9,19 @@ interface FaqItem {
 const FAQS: FaqItem[] = [
   {
     q: 'What is SARRAF?',
-    a: 'SARRAF is a high-precision institutional analytical engine specifically built for spot gold (XAU/USD). It tracks real-time COMEX and MetaTrader 5 order books, computes multi-timeframe structural zones, and generates disciplined risk-managed trade setups.',
+    a: 'SARRAF is a live market analysis and signal delivery platform for spot gold (XAU/USD). It tracks real-time price feeds, calculates key technical support and resistance levels, and provides structured trade setups.',
   },
   {
     q: 'How do signals arrive?',
-    a: 'Signals are broadcast directly to your private Telegram client via our secure low-latency webhook runner. Each message contains exact numerical entry parameters: Direction (BUY/SELL), Entry Zone, Stop Loss, and 4 Take-Profit targets.',
+    a: 'Signals are delivered directly to the SARRAF Telegram bot. Each message contains exact parameters: Direction (BUY/SELL), Entry Zone, Stop Loss, and Take Profit targets.',
   },
   {
     q: 'How many signals are issued per day?',
-    a: 'SARRAF enforces strict quality over volume. The system targets between 1 to 3 highest-conviction setups per trading day, bounded by an algorithmic daily ceiling and mandatory 30-45 minute cooldowns between trades.',
+    a: 'SARRAF focuses on disciplined execution with one signal active at a time. The system only triggers when market conditions align, with mandatory cooldown between trades.',
   },
   {
     q: 'Is this financial advice?',
-    a: 'No. SARRAF provides computational market research, macro news radar monitoring, and automated execution models for informational purposes. Trading precious metals carries capital risk; past simulation or live performance is never a guarantee of future outcomes.',
+    a: 'No. SARRAF provides computational market research, macro news monitoring, and automated signals for informational purposes only. Trading precious metals carries risk; past performance is no guarantee of future returns.',
   },
 ];
 
@@ -33,8 +33,8 @@ export const FaqAccordion: React.FC = () => {
   };
 
   return (
-    <div className="w-full max-w-4xl mx-auto px-4 py-12">
-      <div className="text-center max-w-xl mx-auto mb-8">
+    <div className="w-full max-w-4xl mx-auto px-4 py-8 sm:py-12">
+      <div className="text-center max-w-xl mx-auto mb-6 sm:mb-8">
         <div className="inline-flex items-center gap-2 text-[10px] font-mono tracking-[0.25em] text-[#FFD97A] uppercase mb-2">
           <HelpCircle className="w-3.5 h-3.5 text-[#E8B84A]" />
           <span>FREQUENTLY ASKED QUESTIONS</span>
@@ -61,7 +61,7 @@ export const FaqAccordion: React.FC = () => {
               >
                 <span>{faq.q}</span>
                 <ChevronDown
-                  className={`w-4 h-4 text-[#E8B84A] transition-transform duration-300 shrink-0 ml-3 ${
+                  className={`w-4 h-4 text-[#E8B84A] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] shrink-0 ml-3 ${
                     isOpen ? 'rotate-180' : 'rotate-0'
                   }`}
                 />

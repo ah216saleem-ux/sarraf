@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useRef } from 'react';
 import { useMarket } from '../../context/MarketContext';
 import { HeroOdometer } from './HeroOdometer';
 import { HeroSparkline } from './HeroSparkline';
@@ -11,19 +11,17 @@ import {
 import {
   TrendingUp,
   TrendingDown,
-  Shield,
-  Activity,
-  ChevronDown,
   Clock,
   AlertTriangle,
+  ChevronDown,
 } from 'lucide-react';
 
 interface HeroOverlayProps {
   opacity: number;
-  onWatchLive: () => void;
+  onWatchLive?: () => void;
 }
 
-export const HeroOverlay: React.FC<HeroOverlayProps> = ({ opacity, onWatchLive }) => {
+export const HeroOverlay: React.FC<HeroOverlayProps> = ({ opacity }) => {
   const { priceData, openLoginModal } = useMarket();
 
   // Unified status checks
@@ -31,6 +29,26 @@ export const HeroOverlay: React.FC<HeroOverlayProps> = ({ opacity, onWatchLive }
   const isClosed = priceData.status === 'MARKET_CLOSED';
   const isStale = priceData.status === 'FEED_STALE';
   const isOffline = priceData.status === 'FEED_OFFLINE';
+
+  // 3D Card Gentle Tilt State
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [tilt, setTilt] = useState({ rx: 0, ry: 0 });
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!cardRef.current) return;
+    const rect = cardRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    const rx = -((y - centerY) / centerY) * 6; // max 6 deg
+    const ry = ((x - centerX) / centerX) * 6;
+    setTilt({ rx, ry });
+  };
+
+  const handleMouseLeave = () => {
+    setTilt({ rx: 0, ry: 0 });
+  };
 
   const reopenCountdown = useMemo(() => {
     return formatReopenCountdown(priceData.nextOpenTime);
@@ -62,82 +80,71 @@ export const HeroOverlay: React.FC<HeroOverlayProps> = ({ opacity, onWatchLive }
 
   if (opacity <= 0.01) return null;
 
+  // Shrink card into sticky mini bar as user scrolls away
+  const cardScale = Math.max(0.85, opacity);
+  const cardTranslateY = (1 - opacity) * 40;
+
   return (
     <div
-      className="min-h-screen w-full flex flex-col justify-between px-4 sm:px-8 pt-20 sm:pt-28 pb-6 sm:pb-12 transition-opacity duration-300 pointer-events-auto overflow-x-hidden"
+      className="min-h-screen w-full flex flex-col justify-between px-3 xs:px-4 sm:px-8 pt-16 sm:pt-24 pb-4 sm:pb-8 transition-opacity duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] pointer-events-auto overflow-x-hidden"
       style={{ opacity }}
     >
-      <div className="max-w-6xl mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-8 sm:gap-12 items-center my-auto">
-        {/* Left Column: Kinetic Editorial Headline & Action CTAs */}
-        <div className="lg:col-span-7 flex flex-col items-start space-y-4 sm:space-y-6">
-          {/* Eyebrow Label */}
-          <div className="flex items-center gap-2.5 text-[11px] sm:text-xs font-mono tracking-[0.25em] text-[#FFD97A]/80 uppercase">
-            <span className="w-5 sm:w-8 h-[1px] bg-[#E8B84A]" />
-            <span>INSTITUTIONAL PRECISION ENGINE</span>
-          </div>
-
-          {/* Kinetic Headline: words rise from a mask line by line */}
+      <div className="max-w-6xl mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-10 items-center my-auto py-2">
+        {/* Left Column: Kinetic Split-Text Headline & Action CTAs */}
+        <div className="lg:col-span-7 flex flex-col items-start space-y-3 sm:space-y-5">
+          {/* Kinetic Headline: words rise with layered depth */}
           <div className="overflow-hidden">
-            <h1 className="text-3xl sm:text-6xl md:text-7xl font-extrabold tracking-tight text-white leading-[1.08]">
-              <span className="inline-block transform animate-in slide-in-from-bottom-8 duration-700 ease-out">
+            <h1 className="text-3xl xs:text-4xl sm:text-6xl md:text-7xl font-extrabold tracking-tight text-white leading-[1.08]">
+              <span className="inline-block transform animate-in slide-in-from-bottom-8 duration-700 ease-[cubic-bezier(0.22,1,0.36,1)]">
                 Gold, moving in
               </span>{' '}
               <br />
-              <span className="font-serif italic font-normal text-[#FFD97A] gold-glow-text inline-block transform animate-in slide-in-from-bottom-12 duration-1000 delay-150 ease-out">
+              <span className="font-serif italic font-normal text-[#FFD97A] gold-glow-text inline-block transform animate-in slide-in-from-bottom-12 duration-900 delay-100 ease-[cubic-bezier(0.22,1,0.36,1)]">
                 real time.
               </span>
             </h1>
           </div>
 
-          {/* Subtext */}
-          <p className="text-sm sm:text-lg text-neutral-300 font-light max-w-xl leading-relaxed">
-            Direct institutional order book feed for XAU/USD. Sub-millisecond tick aggregation, mathematical execution boundaries, and algorithmic macro clarity.
+          {/* Honest Subline */}
+          <p className="text-xs xs:text-sm sm:text-base text-neutral-300 font-light max-w-lg leading-relaxed">
+            Live XAU/USD price tracking and disciplined trade signals delivered directly to Telegram.
           </p>
 
-          {/* Action Buttons: Enter SARRAF + Watch Live + Open Telegram */}
-          <div className="flex flex-wrap items-center gap-3 sm:gap-4 pt-2 w-full xs:w-auto">
+          {/* Action Buttons: Enter SARRAF + Open Telegram Bot */}
+          <div className="flex flex-row flex-wrap items-center gap-2.5 sm:gap-4 pt-1 sm:pt-2 w-full xs:w-auto">
             <button
               onClick={openLoginModal}
-              className="w-full xs:w-auto px-6 sm:px-8 py-3.5 rounded-full bg-gradient-to-r from-[#B88628] via-[#E8B84A] to-[#FFD97A] text-black font-bold text-xs font-mono tracking-widest uppercase hover:brightness-110 active:scale-95 transition-all duration-300 shadow-[0_0_30px_rgba(232,184,74,0.35)] cursor-pointer text-center"
+              className="flex-1 xs:flex-none px-5 sm:px-8 py-3 sm:py-3.5 rounded-full bg-gradient-to-r from-[#B88628] via-[#E8B84A] to-[#FFD97A] text-black font-bold text-xs font-mono tracking-widest uppercase hover:brightness-110 active:scale-95 transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] shadow-[0_0_25px_rgba(232,184,74,0.35)] cursor-pointer text-center"
             >
               Enter SARRAF
             </button>
 
-            {/* Telegram Button (Hero variant with QR code on desktop) */}
-            <TelegramButton variant="hero" label="Open Telegram" />
-
-            <button
-              onClick={onWatchLive}
-              className="w-full xs:w-auto px-5 sm:px-6 py-3.5 rounded-full bg-black/50 backdrop-blur-md border border-[#E8B84A]/30 hover:border-[#FFD97A] text-neutral-200 hover:text-[#FFD97A] text-xs font-mono tracking-widest uppercase transition-all duration-300 flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <span>Watch Live</span>
-              <Activity className="w-3.5 h-3.5 text-[#E8B84A] animate-pulse" />
-            </button>
-          </div>
-
-          {/* Institutional Trust markers */}
-          <div className="pt-3 flex flex-wrap items-center gap-5 text-[11px] font-mono text-neutral-400">
-            <div className="flex items-center gap-2">
-              <Shield className="w-3.5 h-3.5 text-[#E8B84A]" />
-              <span>Zero Slippage Routing</span>
-            </div>
-            <span className="text-neutral-700 hidden sm:inline">/</span>
-            <div className="flex items-center gap-2">
-              <Activity className="w-3.5 h-3.5 text-[#E8B84A]" />
-              <span>Sub-40ms Telegram Relays</span>
-            </div>
-            <span className="text-neutral-700 hidden sm:inline">/</span>
-            <div>
-              <span className="text-neutral-400">Tier-1 Liquidity Depth</span>
-            </div>
+            <TelegramButton
+              variant="hero"
+              label="Open Telegram Bot"
+              className="flex-1 xs:flex-none"
+            />
           </div>
         </div>
 
         {/* Right Column: Floating 3D Glass Hero Price Card */}
         <div className="lg:col-span-5 flex justify-center lg:justify-end w-full">
-          <div className="w-full max-w-md glass-panel-glow rounded-2xl p-5 sm:p-7 relative overflow-hidden transition-all duration-300 hover:border-[#FFD97A]/50 bg-[#09090c]/85 border border-[#E8B84A]/25 backdrop-blur-xl">
+          <div
+            ref={cardRef}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={handleMouseLeave}
+            className="w-full max-w-sm sm:max-w-md rounded-2xl p-4 sm:p-6 relative overflow-hidden transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] bg-[#09090c]/90 border border-[#E8B84A]/30 backdrop-blur-xl shadow-[0_15px_40px_rgba(0,0,0,0.85)] will-change-transform group"
+            style={{
+              transform: `perspective(1000px) rotateX(${tilt.rx}deg) rotateY(${tilt.ry}deg) scale(${cardScale}) translate3d(0, ${cardTranslateY}px, 0)`,
+            }}
+          >
+            {/* Moving light sweep highlight effect */}
+            <div className="absolute inset-0 pointer-events-none overflow-hidden rounded-2xl">
+              <div className="absolute -inset-full bg-gradient-to-r from-transparent via-white/5 to-transparent rotate-45 transform translate-x-[-150%] group-hover:translate-x-[250%] transition-transform duration-1000 ease-[cubic-bezier(0.22,1,0.36,1)]" />
+            </div>
+
             {/* Top metadata & Status Badge */}
-            <div className="flex items-center justify-between border-b border-[#E8B84A]/15 pb-4">
+            <div className="flex items-center justify-between border-b border-[#E8B84A]/15 pb-3">
               <div className="flex items-center gap-2">
                 <span className="font-mono text-xs font-bold tracking-widest text-[#FFD97A]">
                   XAU/USD
@@ -169,10 +176,10 @@ export const HeroOverlay: React.FC<HeroOverlayProps> = ({ opacity, onWatchLive }
             </div>
 
             {/* Price section with Odometer */}
-            <div className="py-5 sm:py-6 flex flex-col items-start">
-              <div className="w-full flex items-center justify-between mb-1.5">
+            <div className="py-3 sm:py-5 flex flex-col items-start">
+              <div className="w-full flex items-center justify-between mb-1">
                 <span className="text-[10px] font-mono uppercase tracking-widest text-neutral-400">
-                  {isLive ? 'INSTITUTIONAL MID MARKET' : 'LAST KNOWN PRICE (DISPLAY ONLY)'}
+                  {isLive ? 'LIVE XAU/USD PRICE' : 'LAST KNOWN PRICE'}
                 </span>
 
                 {/* Status-specific helper readout */}
@@ -188,7 +195,7 @@ export const HeroOverlay: React.FC<HeroOverlayProps> = ({ opacity, onWatchLive }
                 )}
               </div>
 
-              {/* Odometer Price Display: Never blank or OFFLINE, always shows price */}
+              {/* Odometer Price Display */}
               <HeroOdometer
                 price={priceData.price ?? 4165.5}
                 isLive={isLive}
@@ -197,7 +204,7 @@ export const HeroOverlay: React.FC<HeroOverlayProps> = ({ opacity, onWatchLive }
               />
 
               {/* Timestamp & Reopen / Stale notice */}
-              <div className="w-full mt-2 text-[10px] font-mono text-neutral-400 flex flex-wrap items-center justify-between gap-1">
+              <div className="w-full mt-1.5 text-[9px] sm:text-[10px] font-mono text-neutral-400 flex flex-wrap items-center justify-between gap-1">
                 <span>Last tick: {tickTimeFormatted.combined}</span>
                 {isClosed && priceData.nextOpenTime && (
                   <span className="text-[#FFD97A]/80 font-semibold">
@@ -206,11 +213,11 @@ export const HeroOverlay: React.FC<HeroOverlayProps> = ({ opacity, onWatchLive }
                 )}
               </div>
 
-              {/* 24h Delta and Real M15 Sparkline */}
-              <div className="mt-4 w-full flex items-end justify-between border-t border-white/5 pt-3">
+              {/* Today's Change and Sparkline */}
+              <div className="mt-3 w-full flex items-end justify-between border-t border-white/5 pt-2.5">
                 {priceChange ? (
                   <div className="flex flex-col">
-                    <span className="text-[10px] font-mono text-neutral-500">TODAY'S CHANGE</span>
+                    <span className="text-[9px] font-mono text-neutral-500">TODAY'S CHANGE</span>
                     <div
                       className={`flex items-center gap-1 text-xs font-mono font-bold mt-0.5 ${
                         priceChange.diff >= 0 ? 'text-emerald-400' : 'text-rose-400'
@@ -231,33 +238,32 @@ export const HeroOverlay: React.FC<HeroOverlayProps> = ({ opacity, onWatchLive }
                   <div />
                 )}
 
-                {/* Real Server M15 Sparkline (Hides if unavailable) */}
                 <HeroSparkline />
               </div>
             </div>
 
             {/* Bid / Ask & Spread Matrix */}
-            <div className="grid grid-cols-2 gap-3 pt-3 border-t border-[#E8B84A]/15 font-mono text-xs">
-              <div className="p-2.5 rounded-lg bg-black/40 border border-white/5 flex flex-col">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">
+            <div className="grid grid-cols-2 gap-2.5 pt-2.5 border-t border-[#E8B84A]/15 font-mono text-xs">
+              <div className="p-2 sm:p-2.5 rounded-lg bg-black/40 border border-white/5 flex flex-col">
+                <span className="text-[9px] text-neutral-500 uppercase tracking-wider">
                   BID (SELL)
                 </span>
-                <span className="text-sm font-semibold text-neutral-200 mt-0.5">
+                <span className="text-xs sm:text-sm font-semibold text-neutral-200 mt-0.5">
                   {priceData.bid !== null ? `$${priceData.bid.toFixed(2)}` : '—'}
                 </span>
               </div>
-              <div className="p-2.5 rounded-lg bg-black/40 border border-white/5 flex flex-col">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">
+              <div className="p-2 sm:p-2.5 rounded-lg bg-black/40 border border-white/5 flex flex-col">
+                <span className="text-[9px] text-neutral-500 uppercase tracking-wider">
                   ASK (BUY)
                 </span>
-                <span className="text-sm font-semibold text-neutral-200 mt-0.5">
+                <span className="text-xs sm:text-sm font-semibold text-neutral-200 mt-0.5">
                   {priceData.ask !== null ? `$${priceData.ask.toFixed(2)}` : '—'}
                 </span>
               </div>
             </div>
 
             {/* High / Low 24h & Spread ticker */}
-            <div className="mt-3 flex items-center justify-between text-[10px] font-mono text-neutral-400 px-1">
+            <div className="mt-2.5 flex items-center justify-between text-[9px] sm:text-[10px] font-mono text-neutral-400 px-1">
               <span>
                 {priceData.low24h !== null ? `24H L: $${priceData.low24h.toFixed(2)}` : ''}
               </span>
@@ -272,12 +278,12 @@ export const HeroOverlay: React.FC<HeroOverlayProps> = ({ opacity, onWatchLive }
         </div>
       </div>
 
-      {/* Scroll indicator hint */}
-      <div className="flex flex-col items-center justify-center text-center pt-8 pb-2">
-        <span className="font-mono text-[10px] tracking-[0.3em] text-[#FFD97A]/60 uppercase mb-2">
+      {/* Subtle Scroll indicator hint */}
+      <div className="flex flex-col items-center justify-center text-center pt-2 sm:pt-4 pb-1">
+        <span className="font-mono text-[9px] tracking-[0.3em] text-[#FFD97A]/60 uppercase mb-1">
           SCROLL TO EXPLORE SARRAF
         </span>
-        <ChevronDown className="w-4 h-4 text-[#E8B84A] animate-bounce" />
+        <ChevronDown className="w-3.5 h-3.5 text-[#E8B84A] animate-bounce" />
       </div>
     </div>
   );

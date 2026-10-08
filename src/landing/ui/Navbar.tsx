@@ -60,7 +60,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onScrollTo }) => {
             SARRAF
           </span>
           <span className="hidden md:inline-block font-mono text-[9px] tracking-widest text-[#E8B84A]/70 px-1.5 py-0.5 border border-[#E8B84A]/25 rounded">
-            INSTITUTIONAL
+            XAU/USD
           </span>
         </div>
 
@@ -94,8 +94,8 @@ export const Navbar: React.FC<NavbarProps> = ({ onScrollTo }) => {
 
         {/* Right Controls: Telegram Button + Status Pill + Login */}
         <div className="flex items-center gap-2 sm:gap-3">
-          {/* Telegram Button in Navbar (A2 requirement) */}
-          <TelegramButton variant="nav" label="Telegram" />
+          {/* Telegram Button in Navbar */}
+          <TelegramButton variant="nav" label="Telegram Bot" />
 
           {/* Unified Glass status pill (A1 requirement) */}
           <div

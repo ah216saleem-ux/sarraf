@@ -11,22 +11,27 @@ export const NewsRadarGlobe: React.FC<NewsRadarGlobeProps> = ({ progress }) => {
   const { macroEvents } = useMarket();
   const globeGroupRef = useRef<THREE.Group>(null);
   const sweepBeamRef = useRef<THREE.Mesh>(null);
+  const sweepTrailRef = useRef<THREE.Mesh>(null);
   const ringsRef = useRef<THREE.Group>(null);
 
-  // Scene 4 is active around 0.58 -> 0.76
-  const sceneActive = THREE.MathUtils.smoothstep(progress, 0.52, 0.65) * (1 - THREE.MathUtils.smoothstep(progress, 0.74, 0.85));
+  // Scene 4 is active around 0.52 -> 0.80
+  const sceneActive = THREE.MathUtils.smoothstep(progress, 0.50, 0.65) * (1 - THREE.MathUtils.smoothstep(progress, 0.74, 0.84));
 
   useFrame((state) => {
     const time = state.clock.elapsedTime;
 
     if (globeGroupRef.current) {
-      // Orbiting rotation
       globeGroupRef.current.rotation.y = time * 0.25 + progress * 2.5;
       globeGroupRef.current.rotation.x = Math.sin(time * 0.15) * 0.15 + 0.1;
     }
 
     if (sweepBeamRef.current) {
       sweepBeamRef.current.rotation.y = time * 1.4;
+    }
+
+    if (sweepTrailRef.current) {
+      // Trailing glow slightly behind the main radar beam
+      sweepTrailRef.current.rotation.y = time * 1.4 - 0.22;
     }
 
     if (ringsRef.current) {
@@ -85,7 +90,19 @@ export const NewsRadarGlobe: React.FC<NewsRadarGlobeProps> = ({ progress }) => {
           <meshBasicMaterial
             color="#FFD97A"
             transparent
-            opacity={0.25}
+            opacity={0.3}
+            side={THREE.DoubleSide}
+            blending={THREE.AdditiveBlending}
+          />
+        </mesh>
+
+        {/* Radar trailing glow beam with softer attenuation */}
+        <mesh ref={sweepTrailRef} position={[0, 0, 0]}>
+          <coneGeometry args={[2.8, 0.05, 32, 1, false, 0, Math.PI / 2.2]} />
+          <meshBasicMaterial
+            color="#E8B84A"
+            transparent
+            opacity={0.14}
             side={THREE.DoubleSide}
             blending={THREE.AdditiveBlending}
           />

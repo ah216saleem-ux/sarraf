@@ -61,7 +61,7 @@ export const StickyPriceBar: React.FC<StickyPriceBarProps> = ({ progress }) => {
 
         {/* Right: Open Telegram Button */}
         <div className="shrink-0">
-          <TelegramButton variant="stickyBar" label="Telegram" />
+          <TelegramButton variant="stickyBar" label="Open Telegram Bot" />
         </div>
       </div>
     </div>
