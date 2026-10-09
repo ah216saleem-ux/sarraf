@@ -1,12 +1,12 @@
 {
-  "4b1916b84c7f32f8b6e7905da0232e5abd628fd944a2c1fdb2323fc80f7fccbb": {
+  "0cbd02a0db1bbc2762f986eb8e175d294e68fea0faba9e1df1d98a9b5c51517f": {
     "user": {
       "email": "gmcf7",
       "accountType": "Institutional Desk",
-      "terminalId": "SRF-4819-XAU",
+      "terminalId": "SRF-5922-XAU",
       "role": "admin",
       "isAdmin": true
     },
-    "expiresAt": 1791626545764
+    "expiresAt": 1791627087035
   }
 }

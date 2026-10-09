@@ -357,10 +357,51 @@ export function importSettingsJson(
 // -------------------------------------------------------------
 
 function getEnvAdmin(): { username: string; hash: string } | null {
-  const envUser = process.env.ADMIN_USERNAME?.trim();
-  const envHash = process.env.ADMIN_PASSWORD_HASH?.trim();
+  let envUser = process.env.ADMIN_USERNAME?.trim();
+  let envHash = process.env.ADMIN_PASSWORD_HASH?.trim();
+
+  if (!envUser || !envHash) {
+    // Try reading .env files
+    const envPaths = [
+      path.resolve(process.cwd(), '.env'),
+      path.resolve('/app/applet', '.env'),
+      path.resolve('/', '.env')
+    ];
+    for (const envPath of envPaths) {
+      try {
+        if (fs.existsSync(envPath)) {
+          const content = fs.readFileSync(envPath, 'utf8');
+          for (const line of content.split('\n')) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('ADMIN_USERNAME=')) {
+              envUser = trimmed.slice('ADMIN_USERNAME='.length).trim();
+            }
+            if (trimmed.startsWith('ADMIN_PASSWORD_HASH=')) {
+              envHash = trimmed.slice('ADMIN_PASSWORD_HASH='.length).trim();
+            }
+          }
+        }
+      } catch {}
+      if (envUser && envHash) break;
+    }
+  }
+
+  if (!envUser || !envHash) {
+    try {
+      const fallbackPath = path.resolve(DATA_DIR, 'admin_credentials.json');
+      if (fs.existsSync(fallbackPath)) {
+        const data = JSON.parse(fs.readFileSync(fallbackPath, 'utf8'));
+        if (data.username && data.hash) {
+          envUser = String(data.username).trim();
+          envHash = String(data.hash).trim();
+        }
+      }
+    } catch {}
+  }
 
   if (envUser && envHash) {
+    process.env.ADMIN_USERNAME = envUser;
+    process.env.ADMIN_PASSWORD_HASH = envHash;
     return { username: envUser, hash: envHash };
   }
 
