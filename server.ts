@@ -47,6 +47,22 @@ import {
 } from './src/server/signalManager.ts';
 import { runSimulationTestSuite } from './src/server/signalTests.ts';
 import {
+  loadCommandSignalsFromDisk,
+  saveCommandSignalsToDisk,
+  processCommandSignalTick,
+  getCommandSignalState,
+  manualCloseCommandSignal,
+  toggleCommandSignalPaperMode,
+  resetCommandSignalCooldown,
+  triggerSimulatedCommandSignal,
+} from './src/server/commandSignalEngine.ts';
+import {
+  getCommandTelegramStatus,
+  updateCommandTelegramSettings,
+  sendTestMessage,
+  saveTelegramSettings,
+} from './src/server/commandTelegramService.ts';
+import {
   startTelegramWorker,
   getTelegramWorkerStatus,
   sendManualTestMessage,
@@ -359,6 +375,20 @@ async function fetchBiquoteTick() {
       isNewsLockActive(now)
     );
 
+    // Feed tick into the Phase 4 Ahmed Sniper Signal Engine
+    processCommandSignalTick(
+      latestLiveQuote.price,
+      latestLiveQuote.bid,
+      latestLiveQuote.ask,
+      latestLiveQuote.spread,
+      marketEval.isLive,
+      marketEval.isLive ? 'LIVE' : marketEval.status === 'FEED_STALE' ? 'RECONNECTING' : 'OFFLINE',
+      recordedTick.direction === 'UP' ? 58 : recordedTick.direction === 'DOWN' ? 42 : 50,
+      recordedTick.direction === 'DOWN' ? 58 : recordedTick.direction === 'UP' ? 42 : 50,
+      recordedTick.direction === 'UP' ? 1 : 0,
+      recordedTick.direction === 'DOWN' ? 1 : 0
+    );
+
     // Broadcast tick immediately to SARRAF COMMAND clients
     broadcastCommandTick(latestLiveQuote);
 
@@ -446,6 +476,104 @@ app.get('/api/command/feed-stream', (req, res) => {
   req.on('close', () => {
     commandSseClients.delete(res);
   });
+});
+
+// -------------------------------------------------------------
+// PHASE 4 SARRAF COMMAND AHMED SNIPER SIGNAL ENGINE ENDPOINTS
+// -------------------------------------------------------------
+
+// GET /api/command/signal/state - Snapshot of Ahmed Sniper Chain, Active Signal, Cooldown & Log
+app.get('/api/command/signal/state', (_req, res) => {
+  const livePrice = latestLiveQuote?.price ?? 0;
+  const state = getCommandSignalState(livePrice);
+  return res.json(state);
+});
+
+// POST /api/command/signal/close - Manual close active signal at market price
+app.post('/api/command/signal/close', (_req, res) => {
+  const livePrice = latestLiveQuote?.price ?? 0;
+  const result = manualCloseCommandSignal(livePrice);
+  return res.json(result);
+});
+
+// POST /api/command/signal/toggle-paper - Toggle Paper Mode (default ON)
+app.post('/api/command/signal/toggle-paper', (_req, res) => {
+  const result = toggleCommandSignalPaperMode();
+  return res.json(result);
+});
+
+// POST /api/command/signal/reset-cooldown - Reset cooldown to 0
+app.post('/api/command/signal/reset-cooldown', (_req, res) => {
+  const result = resetCommandSignalCooldown();
+  return res.json(result);
+});
+
+// POST /api/command/signal/test-trigger - Trigger simulated test signal for UI & Vortex inspection
+app.post('/api/command/signal/test-trigger', (req, res) => {
+  const { side, price } = req.body || {};
+  const livePrice = price || latestLiveQuote?.price || 4118.50;
+  const result = triggerSimulatedCommandSignal(side || 'BUY', livePrice);
+  return res.json(result);
+});
+
+// -------------------------------------------------------------
+// PHASE 5 SARRAF COMMAND TELEGRAM DISPATCH ENDPOINTS
+// -------------------------------------------------------------
+
+// Helper middleware: validates admin permissions for command telegram control
+function requireCommandAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const token = req.cookies?.sarraf_session;
+  if (token) {
+    const session = activeSessions.get(token);
+    if (!session || Date.now() > session.expiresAt) {
+      return res.status(401).json({ error: 'Session expired. Please log in.' });
+    }
+    if ((session.user as any)?.role && (session.user as any)?.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied: Admin privileges required.' });
+    }
+    (req as any).user = session.user;
+    return next();
+  }
+
+  // If active admin session exists in memory, valid session cookie is required
+  if (activeSessions.size > 0) {
+    return res.status(401).json({ error: 'Unauthorized: Admin authentication required.' });
+  }
+
+  // Default single-user access in development / initial deployment
+  next();
+}
+
+// GET /api/command/telegram/status - Get Telegram configuration & dispatch status
+app.get('/api/command/telegram/status', (req, res) => {
+  const token = req.cookies?.sarraf_session;
+  const isAdmin = token ? activeSessions.has(token) : activeSessions.size === 0;
+  const status = getCommandTelegramStatus(isAdmin);
+  return res.json(status);
+});
+
+// POST /api/command/telegram/toggle - Toggle Telegram master dispatch (default OFF)
+app.post('/api/command/telegram/toggle', requireCommandAdmin, (req, res) => {
+  const { enabled } = req.body || {};
+  const current = getCommandTelegramStatus();
+  const nextEnabled = typeof enabled === 'boolean' ? enabled : !current.enabled;
+  const updated = updateCommandTelegramSettings({ enabled: nextEnabled });
+  return res.json({ success: true, settings: updated });
+});
+
+// POST /api/command/telegram/toggle-paper - Toggle Send Paper Signals (default OFF)
+app.post('/api/command/telegram/toggle-paper', requireCommandAdmin, (req, res) => {
+  const { sendPaperSignals } = req.body || {};
+  const current = getCommandTelegramStatus();
+  const nextVal = typeof sendPaperSignals === 'boolean' ? sendPaperSignals : !current.sendPaperSignals;
+  const updated = updateCommandTelegramSettings({ sendPaperSignals: nextVal });
+  return res.json({ success: true, settings: updated });
+});
+
+// POST /api/command/telegram/test - Send test message ("SARRAF test message OK")
+app.post('/api/command/telegram/test', requireCommandAdmin, async (_req, res) => {
+  const result = await sendTestMessage();
+  return res.json(result);
 });
 
 // GET /api/engine/debug - Admin-only diagnostic endpoint (Section I)
@@ -1649,6 +1777,9 @@ async function startServer() {
   // 7. Load signal manager state, restore cooldown, and perform downtime candle recovery
   loadSignalsFromDisk();
 
+  // 7b. Load Phase 4 Ahmed Sniper command signal state
+  loadCommandSignalsFromDisk();
+
   // 8. Fetch real Forex Factory news calendar and start 15-minute background refresh
   await fetchForexFactoryCalendar();
   setInterval(() => {
@@ -1689,6 +1820,8 @@ function handleGracefulShutdown(signal: string) {
   stopBackupScheduler();
   saveCandlesToDisk();
   saveSignalsToDisk();
+  saveCommandSignalsToDisk();
+  saveTelegramSettings();
   saveLastTickToDisk();
   releaseInstanceLease();
   process.exit(0);

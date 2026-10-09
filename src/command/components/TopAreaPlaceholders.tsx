@@ -1,6 +1,11 @@
 import React from 'react';
-import { Lock } from 'lucide-react';
 import { QuantumVortex } from '../vortex/QuantumVortex';
+import { useCommandFeed } from '../data/useCommandFeed';
+import { useCommandSignal } from '../signal/useCommandSignal';
+import { AhmedDecisionCard } from '../signal/AhmedDecisionCard';
+import { AhmedSniperChainCard } from '../signal/AhmedSniperChainCard';
+import { SignalLogCard } from '../signal/SignalLogCard';
+import { TelegramControlBar } from '../signal/TelegramControlBar';
 
 interface TopAreaPlaceholdersProps {
   buyRatio: number;
@@ -12,78 +17,56 @@ interface TopAreaPlaceholdersProps {
 export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
   isDimmed,
 }) => {
-  const sniperGates = [
-    { id: 'g1', name: 'W1/D1 Context' },
-    { id: 'g2', name: 'H4 Bias' },
-    { id: 'g3', name: 'H1 Confirmation' },
-    { id: 'g4', name: 'M30 Refinement' },
-    { id: 'g5', name: 'M15 Body Close' },
-    { id: 'g6', name: 'M5 Retest' },
-    { id: 'g7', name: 'M5 Confirmation' },
-    { id: 'g8', name: 'Entry' },
-  ];
+  const feed = useCommandFeed();
+  const signalEngine = useCommandSignal();
 
   return (
     <div className={`space-y-2 transition-opacity duration-300 ${isDimmed ? 'opacity-40' : 'opacity-100'}`}>
-      {/* Phase 2 Quantum Vortex 3D Core with Live HUD */}
-      <QuantumVortex />
+      {/* Phase 2 Quantum Vortex 3D Core with Live HUD & Phase 4 Trigger Hooks */}
+      <QuantumVortex onRegisterHooks={signalEngine.registerVortexHooks} />
 
-      {/* 2-Column Compact Row: DECISION & AHMED SNIPER CHAIN */}
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
-        {/* DECISION Card */}
-        <div className="md:col-span-4 relative rounded-lg bg-[#070b14] border border-[#38bdf8]/20 px-3 py-2.5 flex flex-col justify-between overflow-hidden">
-          <div className="absolute top-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-[#38bdf8]/40 to-transparent" />
+      {/* 2-Column Responsive Row: DECISION & AHMED SNIPER CHAIN */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-2">
+        {/* DECISION Card & Telegram Control Bar */}
+        <div className="lg:col-span-5 flex flex-col space-y-2">
+          <AhmedDecisionCard
+            state={signalEngine.state}
+            livePnL={signalEngine.livePnL}
+            currentPrice={feed.currentPrice}
+            isFeedDimmed={isDimmed}
+            onManualClose={signalEngine.manualClose}
+            onTogglePaper={signalEngine.togglePaperMode}
+            onTriggerTest={signalEngine.triggerTestSignal}
+            isLoading={signalEngine.isLoading}
+          />
 
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-mono font-bold tracking-[0.12em] text-[#38bdf8] uppercase">
-              DECISION
-            </span>
-            <span className="text-[9px] font-mono text-[#8a96a8]">PHASE 4 · N/A</span>
-          </div>
-
-          <div className="flex items-center justify-between my-1">
-            <div className="flex items-center gap-1.5 font-mono">
-              <span className="w-2 h-2 rounded-full bg-[#f5a524]" />
-              <span className="text-base font-bold text-[#f5a524] tracking-wider">WAIT</span>
-            </div>
-            <span className="text-[9px] font-mono text-[#8a96a8]">NO SETUP (N/A)</span>
-          </div>
-
-          <span className="text-[10px] font-mono text-[#8a96a8] truncate">
-            Awaiting Phase 4 sniper convergence gates.
-          </span>
+          {/* Phase 5 Telegram Control Bar */}
+          <TelegramControlBar
+            status={signalEngine.telegramStatus}
+            onToggleMaster={signalEngine.toggleTelegramMaster}
+            onTogglePaper={signalEngine.toggleTelegramPaper}
+            onSendTest={signalEngine.sendTelegramTest}
+            isLoading={signalEngine.telegramLoading}
+          />
         </div>
 
-        {/* AHMED SNIPER CHAIN Card */}
-        <div className="md:col-span-8 relative rounded-lg bg-[#070b14] border border-[#38bdf8]/20 px-3 py-2.5 flex flex-col justify-between overflow-hidden">
-          <div className="absolute top-0 left-0 right-0 h-[1px] bg-gradient-to-r from-transparent via-[#38bdf8]/40 to-transparent" />
-
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[10px] font-mono font-bold tracking-[0.12em] text-[#38bdf8] uppercase">
-              AHMED SNIPER CHAIN
-            </span>
-            <span className="text-[9px] font-mono text-[#8a96a8]">PHASE 4 · N/A</span>
-          </div>
-
-          {/* Compact 8 gates grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 font-mono">
-            {sniperGates.map((gate) => (
-              <div
-                key={gate.id}
-                className="flex items-center justify-between px-1.5 py-1 rounded bg-[#04060b] border border-white/5 h-[24px]"
-              >
-                <span className="text-[9px] text-[#8a96a8] truncate max-w-[85px]">
-                  {gate.name}
-                </span>
-                <div className="flex items-center gap-1 text-[8px] text-[#8a96a8] font-bold">
-                  <Lock className="w-2.5 h-2.5 text-[#8a96a8]" />
-                  <span>LOCKED</span>
-                </div>
-              </div>
-            ))}
-          </div>
+        {/* AHMED SNIPER CHAIN Card (8 Gates) */}
+        <div className="lg:col-span-7 flex flex-col">
+          <AhmedSniperChainCard
+            gates={signalEngine.state.gates}
+            confidence={signalEngine.state.confidence}
+            pathClearR={signalEngine.state.pathClearR}
+            isFeedDimmed={isDimmed}
+          />
         </div>
       </div>
+
+      {/* SIGNAL LOG Card (Last 20 exits & live verified stats) */}
+      <SignalLogCard
+        history={signalEngine.state.history}
+        stats={signalEngine.state.stats}
+        paperMode={signalEngine.state.paperMode}
+      />
     </div>
   );
 };
