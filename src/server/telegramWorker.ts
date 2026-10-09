@@ -887,7 +887,7 @@ async function executeTelegramAction(
         '',
         '<code>/setchat [admin_username] [admin_password]</code>',
         '',
-        '💡 <i>Example:</i> <code>/setchat gmcf7 MySecretPassword123</code>',
+        '💡 <i>Example:</i> <code>/setchat admin password</code>',
         '',
         'This secures the terminal and prevents unauthorized configuration.',
       ].join('\n');

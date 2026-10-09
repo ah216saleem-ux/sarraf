@@ -72,6 +72,7 @@ function computeStats(hist: CommandSignalLogEntry[]): SignalEngineStats {
   let sl = 0;
   let manual = 0;
   let nonTestTotal = 0;
+  let tpSlPnL = 0;
 
   for (const s of hist) {
     if (s.isTest) continue;
@@ -81,24 +82,28 @@ function computeStats(hist: CommandSignalLogEntry[]): SignalEngineStats {
     if (s.result === 'TP1') {
       tp1++;
       tpWins++;
+      tpSlPnL += s.pnlDollars;
     } else if (s.result === 'TP2') {
       tp2++;
       tpWins++;
+      tpSlPnL += s.pnlDollars;
     } else if (s.result === 'TP3') {
       tp3++;
       tpWins++;
+      tpSlPnL += s.pnlDollars;
     } else if (s.result === 'SL') {
       sl++;
       slLosses++;
+      tpSlPnL += s.pnlDollars;
     } else if (s.result === 'MANUAL') {
       manual++;
     }
   }
 
-  // Win rate: Exclude MANUAL exits; win rate only from TP / SL
+  // Win rate and averages: Exclude MANUAL exits; win rate and averages use TP/SL only
   const tpSlTotal = tpWins + slLosses;
   const winRate = tpSlTotal > 0 ? Number(((tpWins / tpSlTotal) * 100).toFixed(1)) : 0;
-  const avgResult = nonTestTotal > 0 ? Number((totalPnL / nonTestTotal).toFixed(2)) : 0;
+  const avgResult = tpSlTotal > 0 ? Number((tpSlPnL / tpSlTotal).toFixed(2)) : 0;
 
   return {
     totalSignals: nonTestTotal,

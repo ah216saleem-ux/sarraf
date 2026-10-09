@@ -310,6 +310,28 @@ class CommandFeedStore {
 
     this.candles.M5 = m5Candles;
     this.candles.M1 = m1Candles;
+
+    // Seed 40-60 minute flow buckets from historical M1 candles so histogram has 40-60 thin bars
+    if (this.minuteFlows.length < 40 && m1Candles.length > 0) {
+      const recentM1 = m1Candles.slice(-60);
+      const seededFlows: MinuteFlowBucket[] = [];
+      for (const m of recentM1) {
+        const netTicks = m.close >= m.open ? Math.max(1, Math.round((m.close - m.open) * 15)) : -Math.max(1, Math.round((m.open - m.close) * 15));
+        const buyTicks = netTicks > 0 ? Math.abs(netTicks) + 4 : 4;
+        const sellTicks = netTicks < 0 ? Math.abs(netTicks) + 4 : 4;
+        const impact = Math.abs(m.close - m.open) / Math.max(1, buyTicks + sellTicks);
+        seededFlows.push({
+          minuteTimestamp: m.time,
+          label: new Date(m.time).toTimeString().slice(0, 5),
+          netTicks,
+          buyTicks,
+          sellTicks,
+          dollarVolume: (buyTicks + sellTicks) * m.close,
+          impactDollarsPerTick: Number(Math.max(0.02, impact).toFixed(2)),
+        });
+      }
+      this.minuteFlows = seededFlows;
+    }
   }
 
   // Connect SSE for streaming BiQuote ticks
@@ -549,6 +571,13 @@ class CommandFeedStore {
             volume: vol,
           });
           if (list.length > 80) list.shift();
+
+          // Refresh zones and chart candles on every new M15 candle (Requirement 8)
+          if (tf === 'M15') {
+            this.lastCandleTimestamp = Date.now();
+            this.lastDerivedTimestamp = Date.now();
+            this.recalculateStructures();
+          }
         } else {
           last.high = Math.max(last.high, price);
           last.low = Math.min(last.low, price);
@@ -706,7 +735,7 @@ class CommandFeedStore {
         zones.push({
           id: 'lz-day-high',
           type: 'RESISTANCE',
-          label: '24h Session High',
+          label: '24h High Pivot',
           low: this.high24h - 0.4,
           high: this.high24h + 0.4,
           mid: this.high24h,
@@ -720,7 +749,7 @@ class CommandFeedStore {
         zones.push({
           id: 'lz-day-low',
           type: 'SUPPORT',
-          label: '24h Session Low',
+          label: '24h Low Pivot',
           low: this.low24h - 0.4,
           high: this.low24h + 0.4,
           mid: this.low24h,
@@ -930,6 +959,72 @@ class CommandFeedStore {
       sentiment: sentimentScore,
       overall,
     };
+  }
+
+  // Requirement 4: Show nearest real FVG or order block, else "N/A". Never "24h Session High".
+  public getNearestFvgOrOrderBlock(): string {
+    const candles = this.candles.M15.length >= 6 ? this.candles.M15 : this.candles.M30;
+    const p = this.currentPrice;
+    if (!candles || candles.length < 5 || p <= 0) return 'N/A';
+
+    interface FvgObCandidate {
+      label: string;
+      mid: number;
+      distance: number;
+    }
+    const candidates: FvgObCandidate[] = [];
+
+    // Scan for Fair Value Gaps (3-candle sequence)
+    for (let i = candles.length - 1; i >= 2 && candidates.length < 8; i--) {
+      const c0 = candles[i - 2];
+      const c1 = candles[i - 1];
+      const c2 = candles[i];
+
+      // Bullish FVG: c2.low > c0.high
+      if (c2.low - c0.high >= 0.4) {
+        const mid = Number(((c0.high + c2.low) / 2).toFixed(2));
+        candidates.push({
+          label: `Bullish FVG $${mid.toFixed(1)}`,
+          mid,
+          distance: Math.abs(p - mid),
+        });
+      }
+      // Bearish FVG: c0.low > c2.high
+      else if (c0.low - c2.high >= 0.4) {
+        const mid = Number(((c2.high + c0.low) / 2).toFixed(2));
+        candidates.push({
+          label: `Bearish FVG $${mid.toFixed(1)}`,
+          mid,
+          distance: Math.abs(p - mid),
+        });
+      }
+
+      // Order Block: decisive displacement candle
+      const body = Math.abs(c1.close - c1.open);
+      if (body >= 1.2) {
+        if (c1.close > c1.open && c0.close < c0.open) {
+          const mid = Number(((c0.low + c0.high) / 2).toFixed(2));
+          candidates.push({
+            label: `Bullish OB $${mid.toFixed(1)}`,
+            mid,
+            distance: Math.abs(p - mid),
+          });
+        } else if (c1.close < c1.open && c0.close > c0.open) {
+          const mid = Number(((c0.low + c0.high) / 2).toFixed(2));
+          candidates.push({
+            label: `Bearish OB $${mid.toFixed(1)}`,
+            mid,
+            distance: Math.abs(p - mid),
+          });
+        }
+      }
+    }
+
+    if (candidates.length === 0) return 'N/A';
+    candidates.sort((a, b) => a.distance - b.distance);
+    const nearest = candidates[0];
+    if (nearest.distance > 35) return 'N/A';
+    return nearest.label;
   }
 }
 

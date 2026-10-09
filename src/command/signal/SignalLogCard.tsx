@@ -15,18 +15,20 @@ export const SignalLogCard: React.FC<SignalLogCardProps> = ({
   paperMode,
   telegramStatus,
 }) => {
-  // Requirement 10: Win rate only from TP/SL, exclude MANUAL exits, show "Not enough data" until 20 TP/SL exist
+  // Requirement 10: Win rate and averages only from TP/SL, exclude MANUAL exits, show "Not enough data" until 20 TP/SL exist
   const tpSlCount = stats.winsCount + stats.lossesCount;
   const hasEnoughData = tpSlCount >= 20;
 
   let telegramStatusText = 'Telegram Dispatch: Disabled';
   if (telegramStatus) {
-    if (!telegramStatus.configured) {
-      telegramStatusText = 'Telegram Dispatch: Not configured';
+    if (!telegramStatus.configured || telegramStatus.status === 'NOT_CONFIGURED') {
+      telegramStatusText = 'Telegram Dispatch: Not Configured';
     } else if (telegramStatus.hasFailed || telegramStatus.status === 'FAILED') {
       telegramStatusText = 'Telegram Dispatch: Failed';
-    } else if (telegramStatus.enabled) {
+    } else if (telegramStatus.enabled && telegramStatus.status === 'CONNECTED') {
       telegramStatusText = 'Telegram Dispatch: Connected';
+    } else if (telegramStatus.enabled) {
+      telegramStatusText = 'Telegram Dispatch: Enabled';
     } else {
       telegramStatusText = 'Telegram Dispatch: Disabled';
     }
@@ -52,8 +54,8 @@ export const SignalLogCard: React.FC<SignalLogCardProps> = ({
         </div>
       </div>
 
-      {/* Aggregated Real Stats Bar */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 my-2.5">
+      {/* Aggregated Real Stats Bar: 5-column grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 my-2.5">
         {/* Total Trades */}
         <div className="p-2 rounded bg-[#04060b] border border-white/5 flex items-center gap-2">
           <div className="w-6 h-6 rounded bg-white/5 flex items-center justify-center text-[#8a96a8]">
@@ -73,28 +75,41 @@ export const SignalLogCard: React.FC<SignalLogCardProps> = ({
           <div>
             <span className="text-[8px] text-[#8a96a8] uppercase font-bold">WIN RATE (TP/SL)</span>
             <div className={`text-xs font-bold ${hasEnoughData ? (stats.winRate >= 50 ? 'text-[#22e08a]' : 'text-[#ff3b6b]') : 'text-[#8a96a8]'}`}>
-              {hasEnoughData ? `${stats.winRate.toFixed(1)}%` : `Not enough data (${tpSlCount}/20)`}
+              {hasEnoughData ? `${stats.winRate.toFixed(1)}%` : 'Not enough data'}
             </div>
           </div>
         </div>
 
-        {/* Average Result */}
+        {/* Average Result (TP/SL only) */}
         <div className="p-2 rounded bg-[#04060b] border border-white/5 flex items-center gap-2">
           <div className="w-6 h-6 rounded bg-[#38bdf8]/10 flex items-center justify-center text-[#38bdf8]">
             <TrendingUp className="w-3.5 h-3.5" />
           </div>
           <div>
-            <span className="text-[8px] text-[#8a96a8] uppercase font-bold">AVG RESULT</span>
-            <div className={`text-xs font-bold ${stats.avgResultDollars >= 0 ? 'text-[#22e08a]' : 'text-[#ff3b6b]'}`}>
-              {stats.totalSignals > 0
+            <span className="text-[8px] text-[#8a96a8] uppercase font-bold">AVG (TP/SL)</span>
+            <div className={`text-xs font-bold ${hasEnoughData ? (stats.avgResultDollars >= 0 ? 'text-[#22e08a]' : 'text-[#ff3b6b]') : 'text-[#8a96a8]'}`}>
+              {hasEnoughData
                 ? `${stats.avgResultDollars >= 0 ? '+' : ''}$${stats.avgResultDollars.toFixed(2)}`
-                : '$0.00'}
+                : 'Not enough data'}
+            </div>
+          </div>
+        </div>
+
+        {/* Separate Manual Exits */}
+        <div className="p-2 rounded bg-[#04060b] border border-white/5 flex items-center gap-2">
+          <div className="w-6 h-6 rounded bg-amber-500/10 flex items-center justify-center text-amber-400">
+            <XCircle className="w-3.5 h-3.5" />
+          </div>
+          <div>
+            <span className="text-[8px] text-[#8a96a8] uppercase font-bold">MANUAL</span>
+            <div className="text-xs font-bold text-amber-400">
+              {stats.manualCloses}
             </div>
           </div>
         </div>
 
         {/* Net Realized PnL */}
-        <div className="p-2 rounded bg-[#04060b] border border-white/5 flex items-center gap-2">
+        <div className="p-2 rounded bg-[#04060b] border border-white/5 flex items-center gap-2 col-span-2 sm:col-span-1">
           <div className="w-6 h-6 rounded bg-[#E8B84A]/10 flex items-center justify-center text-[#E8B84A]">
             <DollarSign className="w-3.5 h-3.5" />
           </div>

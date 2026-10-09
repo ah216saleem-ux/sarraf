@@ -12,8 +12,10 @@ export const TickFlowHistogramPanel: React.FC<TickFlowHistogramPanelProps> = ({
   isDimmed,
   freshness,
 }) => {
-  const currentNet = minuteFlows[minuteFlows.length - 1]?.netTicks || 0;
-  const maxNet = Math.max(5, ...minuteFlows.map((b) => Math.abs(b.netTicks)));
+  const displayBuckets = minuteFlows.slice(-60);
+  const currentNet = displayBuckets[displayBuckets.length - 1]?.netTicks || 0;
+  const maxNet = Math.max(5, ...displayBuckets.map((b) => Math.abs(b.netTicks)));
+  const hasEnoughBuckets = displayBuckets.length >= 20;
 
   return (
     <div
@@ -35,9 +37,9 @@ export const TickFlowHistogramPanel: React.FC<TickFlowHistogramPanelProps> = ({
         </div>
       </div>
 
-      {minuteFlows.length < 5 ? (
+      {!hasEnoughBuckets ? (
         <div className="h-[60px] flex items-center justify-center font-mono text-[11px] text-[#8a96a8]">
-          collecting data ({minuteFlows.length}/5 buckets)...
+          collecting data ({displayBuckets.length}/40 buckets)...
         </div>
       ) : (
         <>
@@ -53,30 +55,30 @@ export const TickFlowHistogramPanel: React.FC<TickFlowHistogramPanelProps> = ({
             <span className="text-[10px] text-[#8a96a8]">net ticks</span>
           </div>
 
-          {/* Small bar histogram: height 40px, thin vertical bars, 2px gap */}
-          <div className="relative h-[40px] w-full bg-[#04060b] rounded px-1.5 flex items-center">
+          {/* 40-60 thin per-minute bars: height 40px, 1px-2px thin vertical bars */}
+          <div className="relative h-[40px] w-full bg-[#04060b] rounded px-1 flex items-center">
             {/* Zero center horizontal dashed line */}
             <div className="absolute left-1 right-1 top-1/2 -translate-y-1/2 border-b border-white/10 z-0" />
 
-            <div className="relative z-10 w-full h-full flex items-center justify-between gap-[2px]">
-              {minuteFlows.map((b, idx) => {
+            <div className="relative z-10 w-full h-full flex items-center justify-between gap-[1px]">
+              {displayBuckets.map((b, idx) => {
                 const isPos = b.netTicks >= 0;
                 const hPct = Math.min(100, (Math.abs(b.netTicks) / maxNet) * 95);
                 return (
-                  <div key={idx} className="flex-1 h-full flex flex-col justify-center items-center">
+                  <div key={idx} className="flex-1 h-full flex flex-col justify-center items-center min-w-[2px]">
                     <div className="w-full h-1/2 flex items-end justify-center">
                       {isPos && (
                         <div
-                          className="w-full max-w-[6px] rounded-[1px] bg-[#22e08a]"
-                          style={{ height: `${hPct}%` }}
+                          className="w-full max-w-[4px] rounded-[0.5px] bg-[#22e08a]"
+                          style={{ height: `${Math.max(4, hPct)}%` }}
                         />
                       )}
                     </div>
                     <div className="w-full h-1/2 flex items-start justify-center">
                       {!isPos && (
                         <div
-                          className="w-full max-w-[6px] rounded-[1px] bg-[#ff3b6b]"
-                          style={{ height: `${hPct}%` }}
+                          className="w-full max-w-[4px] rounded-[0.5px] bg-[#ff3b6b]"
+                          style={{ height: `${Math.max(4, hPct)}%` }}
                         />
                       )}
                     </div>

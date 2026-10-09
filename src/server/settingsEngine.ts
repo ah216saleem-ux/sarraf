@@ -353,13 +353,10 @@ export function importSettingsJson(
 // -------------------------------------------------------------
 // 4. ADMIN AUTHENTICATION (ENVIRONMENT VARIABLES WITH PERSISTENT BACKUP)
 // -------------------------------------------------------------
+// 4. ADMIN AUTHENTICATION (ENVIRONMENT VARIABLES ONLY)
+// -------------------------------------------------------------
 
-// Default built-in hash for requested credentials: username "gmc", password "9663059aA@"
-// Generated with bcrypt (cost 12):
-const DEFAULT_ADMIN_USERNAME = 'gmc';
-const DEFAULT_ADMIN_PASSWORD_HASH = '$2b$12$5OFtxGetourV8NFLWKED0OlN0nwy9DmH2NSrvU7NlrhK3AwxNpJFq';
-
-function getStoredOrEnvAdmin(): { username: string; hash: string } {
+function getEnvAdmin(): { username: string; hash: string } | null {
   const envUser = process.env.ADMIN_USERNAME?.trim();
   const envHash = process.env.ADMIN_PASSWORD_HASH?.trim();
 
@@ -367,46 +364,35 @@ function getStoredOrEnvAdmin(): { username: string; hash: string } {
     return { username: envUser, hash: envHash };
   }
 
-  // Check persisted auth file in DATA_DIR
-  try {
-    if (fs.existsSync(AUTH_FILE)) {
-      const data = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'));
-      if (data?.username && data?.hash) {
-        return { username: data.username, hash: data.hash };
-      }
-    }
-  } catch {}
-
-  // Fallback to configured default credentials so terminal login always opens seamlessly
-  return { username: DEFAULT_ADMIN_USERNAME, hash: DEFAULT_ADMIN_PASSWORD_HASH };
+  return null;
 }
 
 /**
- * Checks if admin authentication is configured.
- * Always returns true with active credentials.
+ * Checks if admin authentication is configured via environment variables.
+ * Returns false when ADMIN_USERNAME or ADMIN_PASSWORD_HASH are missing.
  */
 export function isAdminConfigured(): boolean {
-  const { username, hash } = getStoredOrEnvAdmin();
-  return Boolean(username && hash);
+  const admin = getEnvAdmin();
+  return Boolean(admin && admin.username && admin.hash);
 }
 
 /**
- * Returns the configured admin username.
+ * Returns the configured admin username from environment variables.
  */
 export function getAdminUsername(): string | null {
-  const { username } = getStoredOrEnvAdmin();
-  return username || null;
+  const admin = getEnvAdmin();
+  return admin?.username || null;
 }
 
 /**
  * Constant-time username comparison against configured admin.
  */
 export function verifyAdminUsername(username: string): boolean {
-  const { username: configuredUser } = getStoredOrEnvAdmin();
-  if (!configuredUser || !username) return false;
+  const admin = getEnvAdmin();
+  if (!admin || !admin.username || !username) return false;
 
   const inputBuf = Buffer.from(username.trim().toLowerCase());
-  const envBuf = Buffer.from(configuredUser.toLowerCase());
+  const envBuf = Buffer.from(admin.username.toLowerCase());
 
   if (inputBuf.length !== envBuf.length) {
     // Constant-time dummy compare to prevent timing side-channels
@@ -417,27 +403,24 @@ export function verifyAdminUsername(username: string): boolean {
 }
 
 /**
- * Constant-time credential verification using configured credentials.
+ * Constant-time credential verification using configured environment variables.
  * Supports:
  *  - bcrypt ($2a$, $2b$, $2y$)
  *  - scrypt (scrypt:salt:hash or salt:hash)
- * Also accepts 'gmcf7' or 'gmc' if configured as alias.
+ * Strictly matches env ADMIN_USERNAME and ADMIN_PASSWORD_HASH.
  * Never prints or leaks credentials to logs.
  */
 export function verifyAdminCredentials(username: string, password: string): boolean {
-  const { username: configuredUser, hash: configuredHash } = getStoredOrEnvAdmin();
+  const admin = getEnvAdmin();
 
-  if (!configuredUser || !configuredHash || !username || !password) {
+  if (!admin || !admin.username || !admin.hash || !username || !password) {
     return false;
   }
 
   const cleanInputUser = username.trim().toLowerCase();
-  const cleanConfUser = configuredUser.toLowerCase();
+  const cleanConfUser = admin.username.toLowerCase();
 
-  // Allow 'gmc' or 'gmcf7' match for user convenience
-  const isMatchUser = cleanInputUser === cleanConfUser ||
-    (cleanConfUser === 'gmc' && cleanInputUser === 'gmcf7') ||
-    (cleanConfUser === 'gmcf7' && cleanInputUser === 'gmc');
+  const isMatchUser = cleanInputUser === cleanConfUser;
 
   // Constant-time comparison
   const inputUserBuf = Buffer.from(cleanInputUser);
@@ -447,10 +430,12 @@ export function verifyAdminCredentials(username: string, password: string): bool
   if (!isMatchUser) {
     // Constant-time dummy verify to mitigate username enumeration timing
     try {
-      bcrypt.compareSync(password, '$2a$12$e8rP4mFwI2nQ0rKqgA6Zk.Jm7B7l4m8o0p1q2r3s4t5u6v7w8x9y0');
+      crypto.scryptSync(password, 'dummy-salt', 64);
     } catch {}
     return false;
   }
+
+  const configuredHash = admin.hash;
 
   // Password Hash verification
   try {
@@ -515,4 +500,11 @@ export function recordSuccessfulLogin(ip: string): { isNewIp: boolean } {
   }
 
   return { isNewIp: isNew };
+}
+
+export function changeAdminPassword(oldPassword: string, newPassword: string, email: string): { success: boolean; error?: string } {
+  return {
+    success: false,
+    error: 'Password management is disabled in environment mode. Update ADMIN_PASSWORD_HASH in environment variables.',
+  };
 }

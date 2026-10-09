@@ -107,6 +107,7 @@ import {
   verifyAdminPassword,
   verifyAdminUsername,
   recordSuccessfulLogin,
+  changeAdminPassword,
 } from './src/server/settingsEngine.ts';
 import {
   checkDataDirectory,
@@ -227,41 +228,32 @@ const activeSessions = new Map<string, SessionRecord>();
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 const SESSIONS_FILE = path.resolve(DATA_DIR, 'active_sessions.json');
 
-function loadActiveSessions() {
-  try {
-    if (fs.existsSync(SESSIONS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-      const now = Date.now();
-      for (const [token, session] of Object.entries(data)) {
-        const rec = session as SessionRecord;
-        if (rec && rec.expiresAt > now) {
-          activeSessions.set(token, rec);
-        }
-      }
-      console.log(`[AUTH] Restored ${activeSessions.size} active sessions from disk`);
-    }
-  } catch (err) {
-    console.error('[AUTH] Could not restore active sessions from disk');
-  }
-}
-
 function saveActiveSessions() {
   try {
-    const obj: Record<string, SessionRecord> = {};
-    const now = Date.now();
+    const list: Record<string, SessionRecord> = {};
     for (const [token, session] of activeSessions.entries()) {
-      if (session.expiresAt > now) {
-        obj[token] = session;
-      }
+      list[token] = session;
     }
-    writeJsonAtomic(SESSIONS_FILE, obj);
+    writeJsonAtomic(SESSIONS_FILE, list);
   } catch (err) {
-    console.error('[AUTH] Could not persist active sessions to disk');
+    console.error('[AUTH] Could not save active_sessions.json', err);
   }
 }
 
-// Load persisted sessions on startup
-loadActiveSessions();
+function invalidateAndClearSessionsOnStartup() {
+  try {
+    activeSessions.clear();
+    if (fs.existsSync(SESSIONS_FILE)) {
+      fs.unlinkSync(SESSIONS_FILE);
+    }
+    console.log('[AUTH] Invalidated all prior sessions and cleared active_sessions.json on startup.');
+  } catch (err) {
+    console.error('[AUTH] Could not clear active_sessions.json on startup', err);
+  }
+}
+
+// Invalidate all existing sessions on startup once so old logins stop working
+invalidateAndClearSessionsOnStartup();
 
 // Cleanup expired sessions periodically
 setInterval(() => {

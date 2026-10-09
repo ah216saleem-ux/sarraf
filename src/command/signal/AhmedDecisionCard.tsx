@@ -77,20 +77,26 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
           </div>
         </div>
 
-        {/* Paper Mode Toggle & Badge */}
+        {/* Execution Mode Badge: show PAPER MODE while paper mode is on, no LIVE EXEC [ON] badge */}
         <div className="flex items-center gap-1.5">
-          <button
-            onClick={onTogglePaper}
-            disabled={isLoading}
-            title="Click to toggle Paper Mode"
-            className={`text-[9px] font-bold px-2 py-0.5 rounded border transition-colors cursor-pointer ${
-              paperMode
-                ? 'bg-[#E8B84A]/10 text-[#E8B84A] border-[#E8B84A]/30 hover:bg-[#E8B84A]/20'
-                : 'bg-[#22e08a]/10 text-[#22e08a] border-[#22e08a]/30 hover:bg-[#22e08a]/20'
-            }`}
-          >
-            {paperMode ? 'PAPER MODE' : 'LIVE SIGNALS'}
-          </button>
+          {paperMode ? (
+            <span
+              onClick={onTogglePaper}
+              title="Click to toggle Paper Mode"
+              className="text-[9px] font-bold px-2 py-0.5 rounded border transition-colors cursor-pointer bg-[#E8B84A]/10 text-[#E8B84A] border-[#E8B84A]/30 hover:bg-[#E8B84A]/20"
+            >
+              PAPER MODE
+            </span>
+          ) : (
+            <button
+              onClick={onTogglePaper}
+              disabled={isLoading}
+              title="Click to toggle Paper Mode"
+              className="text-[9px] font-bold px-2 py-0.5 rounded border transition-colors cursor-pointer bg-[#22e08a]/10 text-[#22e08a] border-[#22e08a]/30 hover:bg-[#22e08a]/20"
+            >
+              LIVE
+            </button>
+          )}
         </div>
       </div>
 

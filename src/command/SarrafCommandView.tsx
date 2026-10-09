@@ -54,10 +54,19 @@ export const SarrafCommandView: React.FC = () => {
 
   const isDimmed = feed.connection.status === 'RECONNECTING' || feed.connection.status === 'OFFLINE';
 
+  // 1-Second ticker so "updated Xs ago" counts up live every second (Requirement 8)
+  const [, setSecondTicker] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setSecondTicker(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   // Real freshness computed timestamps
   const tickFreshness = formatFreshness(feed.lastTickTimestamp);
   const candleFreshness = formatFreshness(feed.lastCandleTimestamp);
-  const derivedFreshness = formatFreshness(feed.lastDerivedTimestamp || feed.lastTickTimestamp);
+  const derivedFreshness = formatFreshness(feed.lastDerivedTimestamp || feed.lastCandleTimestamp || feed.lastTickTimestamp);
 
   const nearestSup = feed.liquidityZones.find((z) => z.type === 'SUPPORT')?.mid || (feed.currentPrice > 0 ? feed.currentPrice - 3.5 : 0);
   const nearestRes = feed.liquidityZones.find((z) => z.type === 'RESISTANCE')?.mid || (feed.currentPrice > 0 ? feed.currentPrice + 3.5 : 0);

@@ -60,6 +60,7 @@ export interface UseCommandFeedResult {
   sellRatio: number;
   liquidityGrade: 'HIGH' | 'MED' | 'LOW';
   nearestZone: NearestZoneData | null;
+  nearestFvgOrOb: string;
   lastTickTimestamp: number;
   lastCandleTimestamp: number;
   lastNewsTimestamp: number;
@@ -200,6 +201,7 @@ export function useCommandFeed(): UseCommandFeedResult {
     sellRatio,
     liquidityGrade,
     nearestZone,
+    nearestFvgOrOb: commandStore.getNearestFvgOrOrderBlock(),
     lastTickTimestamp: commandStore.lastTickTimestamp,
     lastCandleTimestamp: commandStore.lastCandleTimestamp,
     lastNewsTimestamp: commandStore.lastNewsTimestamp,

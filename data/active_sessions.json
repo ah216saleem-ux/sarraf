@@ -1,42 +1,12 @@
 {
-  "a099973365a5416a5715b6731437eb866e2d8aecc5efa25950d02e29616def46": {
+  "4b1916b84c7f32f8b6e7905da0232e5abd628fd944a2c1fdb2323fc80f7fccbb": {
     "user": {
       "email": "gmcf7",
       "accountType": "Institutional Desk",
-      "terminalId": "SRF-1790-XAU",
+      "terminalId": "SRF-4819-XAU",
       "role": "admin",
       "isAdmin": true
     },
-    "expiresAt": 1791605592249
-  },
-  "442eeb89851b0a2220828b5ba3cfe676a96a3ac14ca3b1d27884342b9c1e9661": {
-    "user": {
-      "email": "gmcf7",
-      "accountType": "Institutional Desk",
-      "terminalId": "SRF-2540-XAU",
-      "role": "admin",
-      "isAdmin": true
-    },
-    "expiresAt": 1791605633830
-  },
-  "326bd70a8096d4e9e80e804c8e560d625ebdbe0fa05b13808ec237efe43b6b7c": {
-    "user": {
-      "email": "gmc",
-      "accountType": "Institutional Desk",
-      "terminalId": "SRF-6011-XAU",
-      "role": "admin",
-      "isAdmin": true
-    },
-    "expiresAt": 1791609081242
-  },
-  "629a51353f3c8a635eb13c8b384cf9fb24215e9a4d177afbac28cfce13af908d": {
-    "user": {
-      "email": "gmcf7",
-      "accountType": "Institutional Desk",
-      "terminalId": "SRF-5776-XAU",
-      "role": "admin",
-      "isAdmin": true
-    },
-    "expiresAt": 1791609081687
+    "expiresAt": 1791626545764
   }
 }

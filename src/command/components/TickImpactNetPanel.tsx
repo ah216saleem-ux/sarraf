@@ -16,10 +16,12 @@ export const TickImpactNetPanel: React.FC<TickImpactNetPanelProps> = ({
   isDimmed,
   freshness,
 }) => {
-  const currentBucket = minuteFlows[minuteFlows.length - 1];
-  const hasData = Boolean(minuteFlows.length >= 5 && currentBucket && (currentBucket.buyTicks + currentBucket.sellTicks > 0));
+  const displayBuckets = minuteFlows.slice(-60);
+  const currentBucket = displayBuckets[displayBuckets.length - 1];
+  const hasEnoughBuckets = displayBuckets.length >= 20;
+  const hasData = Boolean(hasEnoughBuckets && currentBucket && (currentBucket.buyTicks + currentBucket.sellTicks > 0));
   const currentImpact = currentBucket?.impactDollarsPerTick ?? 0;
-  const maxImpact = Math.max(0.5, ...minuteFlows.map((b) => b.impactDollarsPerTick));
+  const maxImpact = Math.max(0.5, ...displayBuckets.map((b) => b.impactDollarsPerTick));
 
   const net60s = buyTicks60s - sellTicks60s;
   const isNetBullish = net60s >= 0;
@@ -51,7 +53,7 @@ export const TickImpactNetPanel: React.FC<TickImpactNetPanelProps> = ({
           <span className="text-[9px] text-[#8a96a8] uppercase block">
             TICK IMPACT
           </span>
-          {/* Large number above: real dollar price delta per tick, no hardcoded fallbacks */}
+          {/* Large number above */}
           <div className="flex items-baseline gap-1 mt-0.5 mb-1.5">
             {hasData ? (
               <>
@@ -67,20 +69,20 @@ export const TickImpactNetPanel: React.FC<TickImpactNetPanelProps> = ({
             )}
           </div>
 
-          {/* 40px height bar histogram */}
-          <div className="h-[40px] w-full bg-[#04060b] rounded px-1.5 flex items-end justify-between gap-[2px]">
-            {minuteFlows.length < 5 ? (
+          {/* 40-60 thin per-minute bars: height 40px */}
+          <div className="h-[40px] w-full bg-[#04060b] rounded px-1 flex items-end justify-between gap-[1px]">
+            {!hasEnoughBuckets ? (
               <div className="w-full h-full flex items-center justify-center text-[9px] text-[#8a96a8]">
-                collecting data ({minuteFlows.length}/5)...
+                collecting data ({displayBuckets.length}/40)...
               </div>
             ) : (
-              minuteFlows.map((b, idx) => {
+              displayBuckets.map((b, idx) => {
                 const hPct = Math.min(100, (b.impactDollarsPerTick / maxImpact) * 90);
                 return (
                   <div
                     key={idx}
-                    className="flex-1 bg-[#38bdf8] rounded-t-[1px]"
-                    style={{ height: `${Math.max(2, hPct)}%` }}
+                    className="flex-1 max-w-[4px] bg-[#38bdf8] rounded-t-[0.5px] min-w-[2px]"
+                    style={{ height: `${Math.max(4, hPct)}%` }}
                   />
                 );
               })
