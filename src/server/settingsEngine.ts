@@ -396,7 +396,13 @@ export function verifyAdminUsername(username: string): boolean {
   const input = username.trim().toLowerCase();
   const current = getAdminUsername().trim().toLowerCase();
   const envUser = (process.env.ADMIN_USER || '').trim().toLowerCase();
-  return input === current || input === 'gmcf7' || input === 'admin@sarraf.gold' || (Boolean(envUser) && input === envUser);
+  return (
+    input === current ||
+    input === 'gmcf7' ||
+    input === 'admin@sarraf.gold' ||
+    input === 'a.h216saleem@gmail.com' ||
+    (Boolean(envUser) && input === envUser)
+  );
 }
 
 export function verifyAdminPassword(password: string): boolean {

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { SignalEnginePublicState, SignalSide, TelegramCommandStatus } from './types';
+import { SignalEnginePublicState, SignalSide, TelegramCommandStatus, TelegramReasonCode } from './types';
 import { useCommandFeed } from '../data/useCommandFeed';
 import { QuantumVortexHooks } from '../vortex/types';
 
@@ -52,7 +52,14 @@ const INITIAL_TELEGRAM_STATUS: TelegramCommandStatus = {
   lastError: null,
   hasFailed: false,
   isAdmin: true,
+  reasonCode: 'OK',
+  reasonMessage: 'Initializing Telegram dispatch status...',
 };
+
+function getAuthHeaders(): Record<string, string> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('sarraf_session_token') : null;
+  return token ? { 'x-sarraf-session': token } : {};
+}
 
 export interface UseCommandSignalReturn {
   state: SignalEnginePublicState;
@@ -65,6 +72,10 @@ export interface UseCommandSignalReturn {
   toggleTelegramMaster: (enabled?: boolean) => Promise<void>;
   toggleTelegramPaper: (sendPaper?: boolean) => Promise<void>;
   sendTelegramTest: () => Promise<{ success: boolean; message: string }>;
+  startSignals: () => Promise<{ success: boolean; message: string; reasonCode?: TelegramReasonCode }>;
+  stopSignals: () => Promise<{ success: boolean; message: string }>;
+  telegramError: string | null;
+  clearTelegramError: () => void;
   registerVortexHooks: (hooks: QuantumVortexHooks) => void;
   isLoading: boolean;
   telegramLoading: boolean;
@@ -76,6 +87,7 @@ export function useCommandSignal(): UseCommandSignalReturn {
   const [telegramStatus, setTelegramStatus] = useState<TelegramCommandStatus>(INITIAL_TELEGRAM_STATUS);
   const [isLoading, setIsLoading] = useState(false);
   const [telegramLoading, setTelegramLoading] = useState(false);
+  const [telegramError, setTelegramError] = useState<string | null>(null);
 
   // Vortex Hooks reference
   const vortexHooksRef = useRef<QuantumVortexHooks | null>(null);
@@ -89,10 +101,17 @@ export function useCommandSignal(): UseCommandSignalReturn {
     vortexHooksRef.current = hooks;
   }, []);
 
+  const clearTelegramError = useCallback(() => {
+    setTelegramError(null);
+  }, []);
+
   // Fetch signal state from server
   const fetchState = useCallback(async () => {
     try {
-      const res = await fetch('/api/command/signal/state');
+      const res = await fetch('/api/command/signal/state', {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       if (!res.ok) return;
       const data: SignalEnginePublicState = await res.json();
       setState(data);
@@ -133,7 +152,10 @@ export function useCommandSignal(): UseCommandSignalReturn {
   // Fetch Telegram status from server
   const fetchTelegramStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/command/telegram/status');
+      const res = await fetch('/api/command/telegram/status', {
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       if (!res.ok) return;
       const data: TelegramCommandStatus = await res.json();
       setTelegramStatus(data);
@@ -164,7 +186,11 @@ export function useCommandSignal(): UseCommandSignalReturn {
   const manualClose = useCallback(async () => {
     try {
       setIsLoading(true);
-      await fetch('/api/command/signal/close', { method: 'POST' });
+      await fetch('/api/command/signal/close', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       await fetchState();
     } finally {
       setIsLoading(false);
@@ -174,7 +200,11 @@ export function useCommandSignal(): UseCommandSignalReturn {
   const togglePaperMode = useCallback(async () => {
     try {
       setIsLoading(true);
-      await fetch('/api/command/signal/toggle-paper', { method: 'POST' });
+      await fetch('/api/command/signal/toggle-paper', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       await fetchState();
     } finally {
       setIsLoading(false);
@@ -184,7 +214,11 @@ export function useCommandSignal(): UseCommandSignalReturn {
   const resetCooldown = useCallback(async () => {
     try {
       setIsLoading(true);
-      await fetch('/api/command/signal/reset-cooldown', { method: 'POST' });
+      await fetch('/api/command/signal/reset-cooldown', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        credentials: 'include',
+      });
       await fetchState();
     } finally {
       setIsLoading(false);
@@ -196,7 +230,8 @@ export function useCommandSignal(): UseCommandSignalReturn {
       setIsLoading(true);
       await fetch('/api/command/signal/test-trigger', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
         body: JSON.stringify({ side }),
       });
       await fetchState();
@@ -209,15 +244,22 @@ export function useCommandSignal(): UseCommandSignalReturn {
   const toggleTelegramMaster = useCallback(async (enabled?: boolean) => {
     try {
       setTelegramLoading(true);
+      setTelegramError(null);
       const res = await fetch('/api/command/telegram/toggle', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
         body: JSON.stringify(typeof enabled === 'boolean' ? { enabled } : {}),
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.settings) setTelegramStatus(data.settings);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const errText = `HTTP ${res.status}: ${data.error || res.statusText}`;
+        setTelegramError(errText);
+        return;
       }
+      if (data.settings) setTelegramStatus(data.settings);
+    } catch (err: any) {
+      setTelegramError(err.message || 'Network error');
     } finally {
       setTelegramLoading(false);
       fetchTelegramStatus();
@@ -227,15 +269,22 @@ export function useCommandSignal(): UseCommandSignalReturn {
   const toggleTelegramPaper = useCallback(async (sendPaper?: boolean) => {
     try {
       setTelegramLoading(true);
+      setTelegramError(null);
       const res = await fetch('/api/command/telegram/toggle-paper', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
         body: JSON.stringify(typeof sendPaper === 'boolean' ? { sendPaperSignals: sendPaper } : {}),
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.settings) setTelegramStatus(data.settings);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const errText = `HTTP ${res.status}: ${data.error || res.statusText}`;
+        setTelegramError(errText);
+        return;
       }
+      if (data.settings) setTelegramStatus(data.settings);
+    } catch (err: any) {
+      setTelegramError(err.message || 'Network error');
     } finally {
       setTelegramLoading(false);
       fetchTelegramStatus();
@@ -245,18 +294,94 @@ export function useCommandSignal(): UseCommandSignalReturn {
   const sendTelegramTest = useCallback(async (): Promise<{ success: boolean; message: string }> => {
     try {
       setTelegramLoading(true);
-      const res = await fetch('/api/command/telegram/test', { method: 'POST' });
-      const data = await res.json();
-      await fetchTelegramStatus();
+      setTelegramError(null);
+      const res = await fetch('/api/command/telegram/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const errText = `HTTP ${res.status}: ${data.error || data.message || res.statusText}`;
+        setTelegramError(errText);
+        return { success: false, message: data.message || errText };
+      }
       return {
         success: Boolean(data.success),
         message: data.message || (data.success ? 'Message sent' : 'Dispatch failed'),
       };
     } catch (err: any) {
-      await fetchTelegramStatus();
-      return { success: false, message: err.message || 'Network error' };
+      const msg = err.message || 'Network error';
+      setTelegramError(msg);
+      return { success: false, message: msg };
     } finally {
       setTelegramLoading(false);
+      fetchTelegramStatus();
+    }
+  }, [fetchTelegramStatus]);
+
+  // One-tap START SIGNALS
+  const startSignals = useCallback(async (): Promise<{ success: boolean; message: string; reasonCode?: TelegramReasonCode }> => {
+    try {
+      setTelegramLoading(true);
+      setTelegramError(null);
+      const res = await fetch('/api/command/telegram/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const errText = `HTTP ${res.status}: ${data.error || data.message || res.statusText}`;
+        setTelegramError(errText);
+        if (data.status) setTelegramStatus(data.status);
+        return { success: false, message: data.message || errText, reasonCode: data.reasonCode };
+      }
+      if (data.status) {
+        setTelegramStatus(data.status);
+      }
+      return {
+        success: true,
+        message: data.message || 'Telegram message delivered. SARRAF signals are LIVE.',
+        reasonCode: 'OK',
+      };
+    } catch (err: any) {
+      const msg = err.message || 'Network request failed';
+      setTelegramError(msg);
+      return { success: false, message: msg };
+    } finally {
+      setTelegramLoading(false);
+      fetchTelegramStatus();
+    }
+  }, [fetchTelegramStatus]);
+
+  // One-tap STOP SIGNALS
+  const stopSignals = useCallback(async (): Promise<{ success: boolean; message: string }> => {
+    try {
+      setTelegramLoading(true);
+      setTelegramError(null);
+      const res = await fetch('/api/command/telegram/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const errText = `HTTP ${res.status}: ${data.error || data.message || res.statusText}`;
+        setTelegramError(errText);
+        return { success: false, message: errText };
+      }
+      if (data.status) {
+        setTelegramStatus(data.status);
+      }
+      return { success: true, message: data.message || 'Telegram dispatch stopped.' };
+    } catch (err: any) {
+      const msg = err.message || 'Network request failed';
+      setTelegramError(msg);
+      return { success: false, message: msg };
+    } finally {
+      setTelegramLoading(false);
+      fetchTelegramStatus();
     }
   }, [fetchTelegramStatus]);
 
@@ -271,6 +396,10 @@ export function useCommandSignal(): UseCommandSignalReturn {
     toggleTelegramMaster,
     toggleTelegramPaper,
     sendTelegramTest,
+    startSignals,
+    stopSignals,
+    telegramError,
+    clearTelegramError,
     registerVortexHooks,
     isLoading,
     telegramLoading,

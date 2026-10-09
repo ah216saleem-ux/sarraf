@@ -104,6 +104,15 @@ export interface SignalEnginePublicState {
 
 export type TelegramConnectionState = 'CONNECTED' | 'NOT_CONFIGURED' | 'FAILED' | 'DISABLED';
 
+export type TelegramReasonCode =
+  | 'OK'
+  | 'MISSING_TOKEN'
+  | 'MISSING_CHAT_ID'
+  | 'NOT_ADMIN'
+  | 'BOT_NOT_IN_CHAT'
+  | 'CHAT_NOT_FOUND'
+  | 'SEND_FAILED';
+
 export interface TelegramCommandStatus {
   configured: boolean;
   enabled: boolean;
@@ -113,6 +122,8 @@ export interface TelegramCommandStatus {
   lastMessageTimeStr: string | null;
   lastError: string | null;
   hasFailed: boolean;
-  isAdmin?: boolean;
+  isAdmin: boolean;
+  reasonCode: TelegramReasonCode;
+  reasonMessage: string;
 }
 

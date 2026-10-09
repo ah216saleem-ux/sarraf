@@ -159,16 +159,21 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isTunnelActive, setIsTunnelActive] = useState(false);
 
-  // Requirement 1: Verify persistent httpOnly cookie session on mount (survives page refresh)
+  // Requirement 1: Verify persistent session on mount (survives page refresh & iframe cookie blocking)
   useEffect(() => {
     const checkSession = async () => {
       try {
-        const res = await fetch('/api/auth/me');
+        const savedToken = typeof window !== 'undefined' ? localStorage.getItem('sarraf_session_token') : null;
+        const headers: Record<string, string> = savedToken ? { 'x-sarraf-session': savedToken } : {};
+        const res = await fetch('/api/auth/me', { headers, credentials: 'include' });
         if (res.ok) {
           const data = await res.json();
           if (data.authenticated && data.user) {
             setUser(data.user);
             setIsLoggedIn(true);
+            if (data.token && typeof window !== 'undefined') {
+              localStorage.setItem('sarraf_session_token', data.token);
+            }
           }
         }
       } catch {
@@ -277,12 +282,13 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setIsLoginModalOpen(false);
   }, []);
 
-  // Strict server-side login with httpOnly cookie storage
+  // Strict server-side login with httpOnly cookie storage and token fallback
   const login = useCallback(async (email: string, pass: string): Promise<boolean> => {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password: pass }),
+      credentials: 'include',
     });
 
     if (!res.ok) {
@@ -291,6 +297,9 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     const data = await res.json();
+    if (data.token && typeof window !== 'undefined') {
+      localStorage.setItem('sarraf_session_token', data.token);
+    }
 
     setIsLoginModalOpen(false);
     setIsTunnelActive(true);
@@ -302,12 +311,17 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return true;
   }, []);
 
-  // Logout clears httpOnly cookie on server
+  // Logout clears session on server and client
   const logout = useCallback(async () => {
     try {
-      await fetch('/api/auth/logout', { method: 'POST' });
+      const savedToken = typeof window !== 'undefined' ? localStorage.getItem('sarraf_session_token') : null;
+      const headers: Record<string, string> = savedToken ? { 'x-sarraf-session': savedToken } : {};
+      await fetch('/api/auth/logout', { method: 'POST', headers, credentials: 'include' });
     } catch {
       // Ignore network errors on logout
+    }
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('sarraf_session_token');
     }
     setIsLoggedIn(false);
     setUser(null);

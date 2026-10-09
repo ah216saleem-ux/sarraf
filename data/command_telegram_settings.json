@@ -1,7 +1,7 @@
 {
-  "enabled": false,
-  "sendPaperSignals": false,
-  "lastMessageTime": 1791504294830,
-  "lastMessageStatus": "NONE",
+  "enabled": true,
+  "sendPaperSignals": true,
+  "lastMessageTime": 1791506067164,
+  "lastMessageStatus": "OK",
   "lastErrorMessage": null
 }

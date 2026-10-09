@@ -61,6 +61,8 @@ import {
   updateCommandTelegramSettings,
   sendTestMessage,
   saveTelegramSettings,
+  startTelegramSignals,
+  stopTelegramSignals,
 } from './src/server/commandTelegramService.ts';
 import {
   startTelegramWorker,
@@ -119,6 +121,7 @@ import {
   listBackups,
   restoreBackupSnapshot,
   DATA_DIR,
+  writeJsonAtomic,
 } from './src/server/deploymentSafety.ts';
 import { runPhase5BTestSuite } from './src/server/phase5bTests.ts';
 import { runSummaryAlertTestSuite } from './src/server/sarrafSummaryAlertTests.ts';
@@ -207,26 +210,68 @@ function checkLoginRateLimit(ip: string): { allowed: boolean; remaining: number;
   return { allowed: true, remaining: MAX_LOGIN_ATTEMPTS - entry.attempts };
 }
 
-// In-memory active session tokens (24 hour lifetime)
+// In-memory active session tokens (24 hour lifetime) with atomic file backup
 interface SessionRecord {
   user: {
     email: string;
     accountType: string;
     terminalId: string;
+    role?: string;
+    isAdmin?: boolean;
   };
   expiresAt: number;
 }
 const activeSessions = new Map<string, SessionRecord>();
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const SESSIONS_FILE = path.resolve(DATA_DIR, 'active_sessions.json');
+
+function loadActiveSessions() {
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+      const now = Date.now();
+      for (const [token, session] of Object.entries(data)) {
+        const rec = session as SessionRecord;
+        if (rec && rec.expiresAt > now) {
+          activeSessions.set(token, rec);
+        }
+      }
+      console.log(`[AUTH] Restored ${activeSessions.size} active sessions from disk`);
+    }
+  } catch (err) {
+    console.error('[AUTH] Could not restore active sessions from disk');
+  }
+}
+
+function saveActiveSessions() {
+  try {
+    const obj: Record<string, SessionRecord> = {};
+    const now = Date.now();
+    for (const [token, session] of activeSessions.entries()) {
+      if (session.expiresAt > now) {
+        obj[token] = session;
+      }
+    }
+    writeJsonAtomic(SESSIONS_FILE, obj);
+  } catch (err) {
+    console.error('[AUTH] Could not persist active sessions to disk');
+  }
+}
+
+// Load persisted sessions on startup
+loadActiveSessions();
 
 // Cleanup expired sessions periodically
 setInterval(() => {
   const now = Date.now();
+  let changed = false;
   for (const [token, session] of activeSessions.entries()) {
     if (now > session.expiresAt) {
       activeSessions.delete(token);
+      changed = true;
     }
   }
+  if (changed) saveActiveSessions();
 }, 60 * 60 * 1000);
 
 // Global live quote storage & feed state
@@ -520,12 +565,32 @@ app.post('/api/command/signal/test-trigger', (req, res) => {
 // PHASE 5 SARRAF COMMAND TELEGRAM DISPATCH ENDPOINTS
 // -------------------------------------------------------------
 
+// Helper to extract session token from cookies or authorization headers
+function getSessionToken(req: express.Request): string | null {
+  const cookieToken = req.cookies?.sarraf_session;
+  if (cookieToken) return cookieToken;
+
+  const headerToken = req.headers['x-sarraf-session'];
+  if (typeof headerToken === 'string' && headerToken) return headerToken.trim();
+
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return authHeader.slice(7).trim();
+  }
+
+  return null;
+}
+
 // Helper middleware: validates admin permissions for command telegram control
 function requireCommandAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const token = req.cookies?.sarraf_session;
+  const token = getSessionToken(req);
   if (token) {
     const session = activeSessions.get(token);
     if (!session || Date.now() > session.expiresAt) {
+      if (session) {
+        activeSessions.delete(token);
+        saveActiveSessions();
+      }
       return res.status(401).json({ error: 'Session expired. Please log in.' });
     }
     if ((session.user as any)?.role && (session.user as any)?.role !== 'admin') {
@@ -535,27 +600,38 @@ function requireCommandAdmin(req: express.Request, res: express.Response, next: 
     return next();
   }
 
-  // If active admin session exists in memory, valid session cookie is required
-  if (activeSessions.size > 0) {
-    return res.status(401).json({ error: 'Unauthorized: Admin authentication required.' });
-  }
-
-  // Default single-user access in development / initial deployment
-  next();
+  // Reject unauthenticated/logged-out visitors
+  return res.status(401).json({ error: 'Unauthorized: Admin authentication required.' });
 }
 
 // GET /api/command/telegram/status - Get Telegram configuration & dispatch status
 app.get('/api/command/telegram/status', (req, res) => {
-  const token = req.cookies?.sarraf_session;
-  const isAdmin = token ? activeSessions.has(token) : activeSessions.size === 0;
+  const token = getSessionToken(req);
+  const session = token ? activeSessions.get(token) : null;
+  const isAdmin = Boolean(session && Date.now() <= session.expiresAt);
   const status = getCommandTelegramStatus(isAdmin);
   return res.json(status);
+});
+
+// POST /api/command/telegram/start - One-tap START SIGNALS flow
+app.post('/api/command/telegram/start', requireCommandAdmin, async (_req, res) => {
+  const result = await startTelegramSignals();
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
+  return res.json(result);
+});
+
+// POST /api/command/telegram/stop - One-tap STOP SIGNALS flow
+app.post('/api/command/telegram/stop', requireCommandAdmin, (_req, res) => {
+  const result = stopTelegramSignals();
+  return res.json(result);
 });
 
 // POST /api/command/telegram/toggle - Toggle Telegram master dispatch (default OFF)
 app.post('/api/command/telegram/toggle', requireCommandAdmin, (req, res) => {
   const { enabled } = req.body || {};
-  const current = getCommandTelegramStatus();
+  const current = getCommandTelegramStatus(true);
   const nextEnabled = typeof enabled === 'boolean' ? enabled : !current.enabled;
   const updated = updateCommandTelegramSettings({ enabled: nextEnabled });
   return res.json({ success: true, settings: updated });
@@ -564,7 +640,7 @@ app.post('/api/command/telegram/toggle', requireCommandAdmin, (req, res) => {
 // POST /api/command/telegram/toggle-paper - Toggle Send Paper Signals (default OFF)
 app.post('/api/command/telegram/toggle-paper', requireCommandAdmin, (req, res) => {
   const { sendPaperSignals } = req.body || {};
-  const current = getCommandTelegramStatus();
+  const current = getCommandTelegramStatus(true);
   const nextVal = typeof sendPaperSignals === 'boolean' ? sendPaperSignals : !current.sendPaperSignals;
   const updated = updateCommandTelegramSettings({ sendPaperSignals: nextVal });
   return res.json({ success: true, settings: updated });
@@ -573,6 +649,9 @@ app.post('/api/command/telegram/toggle-paper', requireCommandAdmin, (req, res) =
 // POST /api/command/telegram/test - Send test message ("SARRAF test message OK")
 app.post('/api/command/telegram/test', requireCommandAdmin, async (_req, res) => {
   const result = await sendTestMessage();
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
   return res.json(result);
 });
 
@@ -1672,17 +1751,20 @@ app.post('/api/auth/login', (req, res) => {
       email: email.trim().toLowerCase(),
       accountType: 'Institutional Desk',
       terminalId: `SRF-${crypto.randomInt(1000, 9999)}-XAU`,
+      role: 'admin',
+      isAdmin: true,
     };
 
     activeSessions.set(token, {
       user: userPayload,
       expiresAt: Date.now() + SESSION_TTL_MS,
     });
+    saveActiveSessions();
 
-    // Store login session in httpOnly, SameSite=Strict cookie with 24h expiry
+    // Store login session in httpOnly cookie with 24h expiry
     res.cookie('sarraf_session', token, {
       httpOnly: true,
-      sameSite: 'strict',
+      sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
       maxAge: SESSION_TTL_MS,
       path: '/',
@@ -1691,6 +1773,7 @@ app.post('/api/auth/login', (req, res) => {
     return res.json({
       success: true,
       user: userPayload,
+      token,
       isNewIp,
     });
   }
@@ -1701,36 +1784,41 @@ app.post('/api/auth/login', (req, res) => {
   });
 });
 
-// GET /api/auth/me - Read httpOnly cookie session
+// GET /api/auth/me - Read session from cookie or header
 app.get('/api/auth/me', (req, res) => {
-  const token = req.cookies?.sarraf_session;
+  const token = getSessionToken(req);
   if (!token) {
     return res.json({ authenticated: false, user: null });
   }
 
   const session = activeSessions.get(token);
   if (!session || Date.now() > session.expiresAt) {
-    if (session) activeSessions.delete(token);
-    res.clearCookie('sarraf_session', { httpOnly: true, sameSite: 'strict', path: '/' });
+    if (session) {
+      activeSessions.delete(token);
+      saveActiveSessions();
+    }
+    res.clearCookie('sarraf_session', { httpOnly: true, sameSite: 'lax', path: '/' });
     return res.json({ authenticated: false, user: null });
   }
 
   return res.json({
     authenticated: true,
     user: session.user,
+    token,
   });
 });
 
-// POST /api/auth/logout - Clear httpOnly cookie
+// POST /api/auth/logout - Clear session
 app.post('/api/auth/logout', (req, res) => {
-  const token = req.cookies?.sarraf_session;
+  const token = getSessionToken(req);
   if (token) {
     activeSessions.delete(token);
+    saveActiveSessions();
   }
 
   res.clearCookie('sarraf_session', {
     httpOnly: true,
-    sameSite: 'strict',
+    sameSite: 'lax',
     path: '/',
   });
 

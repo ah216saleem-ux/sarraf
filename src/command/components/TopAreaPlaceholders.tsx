@@ -46,6 +46,10 @@ export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
             onToggleMaster={signalEngine.toggleTelegramMaster}
             onTogglePaper={signalEngine.toggleTelegramPaper}
             onSendTest={signalEngine.sendTelegramTest}
+            onStartSignals={signalEngine.startSignals}
+            onStopSignals={signalEngine.stopSignals}
+            httpError={signalEngine.telegramError}
+            onClearHttpError={signalEngine.clearTelegramError}
             isLoading={signalEngine.telegramLoading}
           />
         </div>

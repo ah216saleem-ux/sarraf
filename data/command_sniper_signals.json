@@ -2,8 +2,19 @@
   "lifecycle": "WAIT",
   "activeSignal": null,
   "cooldownEndsAt": null,
-  "paperMode": true,
+  "paperMode": false,
   "history": [
+    {
+      "id": "SIG-1791503721944",
+      "timestamp": 1791506046086,
+      "timeStr": "00:34:06",
+      "side": "BUY",
+      "entry": 4144.67,
+      "closePrice": 4148.23,
+      "result": "MANUAL",
+      "pnlDollars": 3.56,
+      "isPaper": false
+    },
     {
       "id": "SIG-1791503552875",
       "timestamp": 1791503584578,
@@ -16,5 +27,5 @@
       "isPaper": true
     }
   ],
-  "lastEvaluatedAt": 1791503604854
+  "lastEvaluatedAt": 1791506045699
 }
