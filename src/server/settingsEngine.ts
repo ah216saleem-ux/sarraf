@@ -402,6 +402,19 @@ function getEnvAdmin(): { username: string; hash: string } | null {
   if (envUser && envHash) {
     process.env.ADMIN_USERNAME = envUser;
     process.env.ADMIN_PASSWORD_HASH = envHash;
+
+    // Auto-heal missing .env and admin_credentials.json
+    try {
+      const envPath = path.resolve(process.cwd(), '.env');
+      if (!fs.existsSync(envPath)) {
+        fs.writeFileSync(envPath, `PORT=3000\nNODE_ENV=production\nDATA_DIR=./data\nADMIN_USERNAME=${envUser}\nADMIN_PASSWORD_HASH=${envHash}\n`);
+      }
+      const credPath = path.resolve(DATA_DIR, 'admin_credentials.json');
+      if (!fs.existsSync(credPath)) {
+        fs.writeFileSync(credPath, JSON.stringify({ username: envUser, hash: envHash }, null, 2));
+      }
+    } catch {}
+
     return { username: envUser, hash: envHash };
   }
 
