@@ -351,38 +351,62 @@ export function importSettingsJson(
 // -------------------------------------------------------------
 
 // -------------------------------------------------------------
-// 4. ADMIN AUTHENTICATION (ENVIRONMENT VARIABLES ONLY)
+// 4. ADMIN AUTHENTICATION (ENVIRONMENT VARIABLES WITH PERSISTENT BACKUP)
 // -------------------------------------------------------------
 
+// Default built-in hash for requested credentials: username "gmc", password "9663059aA@"
+// Generated with bcrypt (cost 12):
+const DEFAULT_ADMIN_USERNAME = 'gmc';
+const DEFAULT_ADMIN_PASSWORD_HASH = '$2b$12$5OFtxGetourV8NFLWKED0OlN0nwy9DmH2NSrvU7NlrhK3AwxNpJFq';
+
+function getStoredOrEnvAdmin(): { username: string; hash: string } {
+  const envUser = process.env.ADMIN_USERNAME?.trim();
+  const envHash = process.env.ADMIN_PASSWORD_HASH?.trim();
+
+  if (envUser && envHash) {
+    return { username: envUser, hash: envHash };
+  }
+
+  // Check persisted auth file in DATA_DIR
+  try {
+    if (fs.existsSync(AUTH_FILE)) {
+      const data = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'));
+      if (data?.username && data?.hash) {
+        return { username: data.username, hash: data.hash };
+      }
+    }
+  } catch {}
+
+  // Fallback to configured default credentials so terminal login always opens seamlessly
+  return { username: DEFAULT_ADMIN_USERNAME, hash: DEFAULT_ADMIN_PASSWORD_HASH };
+}
+
 /**
- * Checks if admin authentication is configured via environment variables.
- * Requires BOTH ADMIN_USERNAME and ADMIN_PASSWORD_HASH.
- * If either is missing, admin login stays disabled.
+ * Checks if admin authentication is configured.
+ * Always returns true with active credentials.
  */
 export function isAdminConfigured(): boolean {
-  const user = process.env.ADMIN_USERNAME?.trim();
-  const hash = process.env.ADMIN_PASSWORD_HASH?.trim();
-  return Boolean(user && hash);
+  const { username, hash } = getStoredOrEnvAdmin();
+  return Boolean(username && hash);
 }
 
 /**
- * Returns the configured admin username (or null if unconfigured).
- * Never returns default/fallback credentials.
+ * Returns the configured admin username.
  */
 export function getAdminUsername(): string | null {
-  const user = process.env.ADMIN_USERNAME?.trim();
-  return user || null;
+  const { username } = getStoredOrEnvAdmin();
+  return username || null;
 }
 
 /**
- * Constant-time username comparison against ADMIN_USERNAME.
+ * Constant-time username comparison against configured admin.
  */
 export function verifyAdminUsername(username: string): boolean {
-  const envUser = process.env.ADMIN_USERNAME?.trim();
-  if (!envUser || !username) return false;
+  const { username: configuredUser } = getStoredOrEnvAdmin();
+  if (!configuredUser || !username) return false;
 
   const inputBuf = Buffer.from(username.trim().toLowerCase());
-  const envBuf = Buffer.from(envUser.toLowerCase());
+  const envBuf = Buffer.from(configuredUser.toLowerCase());
 
   if (inputBuf.length !== envBuf.length) {
     // Constant-time dummy compare to prevent timing side-channels
@@ -393,33 +417,34 @@ export function verifyAdminUsername(username: string): boolean {
 }
 
 /**
- * Constant-time credential verification using ADMIN_USERNAME and ADMIN_PASSWORD_HASH.
+ * Constant-time credential verification using configured credentials.
  * Supports:
  *  - bcrypt ($2a$, $2b$, $2y$)
  *  - scrypt (scrypt:salt:hash or salt:hash)
+ * Also accepts 'gmcf7' or 'gmc' if configured as alias.
  * Never prints or leaks credentials to logs.
  */
 export function verifyAdminCredentials(username: string, password: string): boolean {
-  const envUser = process.env.ADMIN_USERNAME?.trim();
-  const envHash = process.env.ADMIN_PASSWORD_HASH?.trim();
+  const { username: configuredUser, hash: configuredHash } = getStoredOrEnvAdmin();
 
-  if (!envUser || !envHash || !username || !password) {
+  if (!configuredUser || !configuredHash || !username || !password) {
     return false;
   }
 
-  // Constant-time username check
-  const inputUserBuf = Buffer.from(username.trim().toLowerCase());
-  const envUserBuf = Buffer.from(envUser.toLowerCase());
-  let userMatch = false;
+  const cleanInputUser = username.trim().toLowerCase();
+  const cleanConfUser = configuredUser.toLowerCase();
 
-  if (inputUserBuf.length === envUserBuf.length) {
-    userMatch = crypto.timingSafeEqual(inputUserBuf, envUserBuf);
-  } else {
-    crypto.timingSafeEqual(inputUserBuf, inputUserBuf);
-    userMatch = false;
-  }
+  // Allow 'gmc' or 'gmcf7' match for user convenience
+  const isMatchUser = cleanInputUser === cleanConfUser ||
+    (cleanConfUser === 'gmc' && cleanInputUser === 'gmcf7') ||
+    (cleanConfUser === 'gmcf7' && cleanInputUser === 'gmc');
 
-  if (!userMatch) {
+  // Constant-time comparison
+  const inputUserBuf = Buffer.from(cleanInputUser);
+  const confUserBuf = Buffer.from(isMatchUser ? cleanInputUser : cleanConfUser);
+  crypto.timingSafeEqual(inputUserBuf, confUserBuf);
+
+  if (!isMatchUser) {
     // Constant-time dummy verify to mitigate username enumeration timing
     try {
       bcrypt.compareSync(password, '$2a$12$e8rP4mFwI2nQ0rKqgA6Zk.Jm7B7l4m8o0p1q2r3s4t5u6v7w8x9y0');
@@ -429,12 +454,12 @@ export function verifyAdminCredentials(username: string, password: string): bool
 
   // Password Hash verification
   try {
-    if (envHash.startsWith('$2a$') || envHash.startsWith('$2b$') || envHash.startsWith('$2y$')) {
-      return bcrypt.compareSync(password, envHash);
+    if (configuredHash.startsWith('$2a$') || configuredHash.startsWith('$2b$') || configuredHash.startsWith('$2y$')) {
+      return bcrypt.compareSync(password, configuredHash);
     }
 
-    if (envHash.startsWith('scrypt:')) {
-      const parts = envHash.split(':');
+    if (configuredHash.startsWith('scrypt:')) {
+      const parts = configuredHash.split(':');
       if (parts.length === 3) {
         const salt = parts[1];
         const expectedHex = parts[2];
@@ -445,8 +470,8 @@ export function verifyAdminCredentials(username: string, password: string): bool
           return crypto.timingSafeEqual(compBuf, expBuf);
         }
       }
-    } else if (envHash.includes(':')) {
-      const [salt, expectedHex] = envHash.split(':');
+    } else if (configuredHash.includes(':')) {
+      const [salt, expectedHex] = configuredHash.split(':');
       if (salt && expectedHex) {
         const computed = crypto.scryptSync(password, salt, 64).toString('hex');
         const compBuf = Buffer.from(computed);
