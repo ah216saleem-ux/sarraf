@@ -245,6 +245,7 @@ export const SarrafCommandView: React.FC = () => {
               currentPrice={feed.currentPrice}
               supportLevel={nearestSup}
               resistanceLevel={nearestRes}
+              zones={feed.liquidityZones}
               isDimmed={isDimmed}
               freshness={candleFreshness}
             />
@@ -262,7 +263,7 @@ export const SarrafCommandView: React.FC = () => {
               sellZones={feed.absorptionSellZones}
               currentPrice={feed.currentPrice}
               isDimmed={isDimmed}
-              freshness={candleFreshness}
+              freshness={derivedFreshness}
             />
           </div>
 

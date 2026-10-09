@@ -35,9 +35,9 @@ export const TickFlowHistogramPanel: React.FC<TickFlowHistogramPanelProps> = ({
         </div>
       </div>
 
-      {minuteFlows.length === 0 ? (
+      {minuteFlows.length < 5 ? (
         <div className="h-[60px] flex items-center justify-center font-mono text-[11px] text-[#8a96a8]">
-          collecting data...
+          collecting data ({minuteFlows.length}/5 buckets)...
         </div>
       ) : (
         <>

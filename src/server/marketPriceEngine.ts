@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { DATA_DIR, writeJsonAtomic } from './deploymentSafety.ts';
+import { getCandleStore } from './candleEngine.ts';
 
 export const LAST_TICK_FILE = path.resolve(DATA_DIR, 'lastTick.json');
 
@@ -225,6 +226,51 @@ export function saveLastTickToDisk(): void {
   }
 }
 
+function getComputedPreviousClose(): number {
+  try {
+    const store = getCandleStore();
+    if (store && Array.isArray(store.D1) && store.D1.length >= 2) {
+      // Completed previous D1 candle close
+      const prevD1 = store.D1[store.D1.length - 2];
+      if (prevD1 && typeof prevD1.close === 'number' && prevD1.close > 0) {
+        return Number(prevD1.close.toFixed(2));
+      }
+    } else if (store && Array.isArray(store.D1) && store.D1.length === 1) {
+      const d1 = store.D1[0];
+      if (d1 && typeof d1.open === 'number' && d1.open > 0) {
+        return Number(d1.open.toFixed(2));
+      }
+    }
+  } catch {}
+  return lastValidTick.previousClose && lastValidTick.previousClose > 0
+    ? lastValidTick.previousClose
+    : Number((lastValidTick.price - 5.0).toFixed(2));
+}
+
+function getRolling24hHighLow(currentPrice: number): { high: number; low: number } {
+  let rollingHigh = currentPrice;
+  let rollingLow = currentPrice;
+
+  try {
+    const store = getCandleStore();
+    if (store && Array.isArray(store.H1) && store.H1.length > 0) {
+      const recent24 = store.H1.slice(-24);
+      if (recent24.length > 0) {
+        const highs = recent24.map((c) => c.high).filter((h) => typeof h === 'number' && h > 0);
+        const lows = recent24.map((c) => c.low).filter((l) => typeof l === 'number' && l > 0);
+        if (highs.length > 0) rollingHigh = Math.max(...highs);
+        if (lows.length > 0) rollingLow = Math.min(...lows);
+      }
+    }
+  } catch {}
+
+  // Price must ALWAYS be between Low and High (expand them dynamically if price breaks out)
+  const finalHigh = Number(Math.max(rollingHigh, currentPrice, lastValidTick.high > 0 ? lastValidTick.high : currentPrice).toFixed(2));
+  const finalLow = Number(Math.min(rollingLow, currentPrice, lastValidTick.low > 0 ? lastValidTick.low : currentPrice).toFixed(2));
+
+  return { high: finalHigh, low: finalLow };
+}
+
 // Record an incoming real tick from feed
 export function recordLiveTick(tick: {
   symbol?: string;
@@ -249,17 +295,23 @@ export function recordLiveTick(tick: {
     tick.direction ||
     (tick.price > prevPrice ? 'UP' : tick.price < prevPrice ? 'DOWN' : 'FLAT');
 
+  const computedPrevClose = getComputedPreviousClose();
+  const { high: rollingHigh, low: rollingLow } = getRolling24hHighLow(tick.price);
+  const dayDiffPercent = computedPrevClose > 0
+    ? Number((((tick.price - computedPrevClose) / computedPrevClose) * 100).toFixed(2))
+    : 0;
+
   lastValidTick = {
     symbol: tick.symbol || 'XAUUSD',
     price: Number(tick.price.toFixed(2)),
     bid: Number(tick.bid.toFixed(2)),
     ask: Number(tick.ask.toFixed(2)),
-    high: Number((tick.high ?? Math.max(lastValidTick.high, tick.price)).toFixed(2)),
-    low: Number((tick.low ?? Math.min(lastValidTick.low, tick.price)).toFixed(2)),
-    open: Number((tick.open ?? lastValidTick.open ?? (tick.price - 5.0)).toFixed(2)),
-    previousClose: Number((tick.previousClose ?? lastValidTick.previousClose ?? 4155.0).toFixed(2)),
+    high: Math.max(rollingHigh, tick.high ?? rollingHigh),
+    low: Math.min(rollingLow, tick.low ?? rollingLow),
+    open: Number((tick.open ?? lastValidTick.open ?? computedPrevClose).toFixed(2)),
+    previousClose: computedPrevClose,
     spread: Number((tick.spread ?? (tick.ask - tick.bid)).toFixed(2)),
-    dayDiffPercent: Number((tick.dayDiffPercent ?? 0).toFixed(2)),
+    dayDiffPercent,
     direction,
     timestamp: tick.timestamp || new Date().toISOString(),
     lastReceivedAt: now,

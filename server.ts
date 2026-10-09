@@ -101,9 +101,11 @@ import {
   loadAuditLog,
   exportSettingsJson,
   importSettingsJson,
+  isAdminConfigured,
+  getAdminUsername,
+  verifyAdminCredentials,
   verifyAdminPassword,
   verifyAdminUsername,
-  changeAdminPassword,
   recordSuccessfulLogin,
 } from './src/server/settingsEngine.ts';
 import {
@@ -189,7 +191,7 @@ interface RateLimitEntry {
   resetTime: number;
 }
 const loginRateLimitMap = new Map<string, RateLimitEntry>();
-const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_LOGIN_ATTEMPTS = 5;
 
 function checkLoginRateLimit(ip: string): { allowed: boolean; remaining: number; retryAfterSec?: number } {
@@ -222,7 +224,7 @@ interface SessionRecord {
   expiresAt: number;
 }
 const activeSessions = new Map<string, SessionRecord>();
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 const SESSIONS_FILE = path.resolve(DATA_DIR, 'active_sessions.json');
 
 function loadActiveSessions() {
@@ -1710,11 +1712,31 @@ app.post('/api/admin/go-live/override', requireAdminAuth, (req, res) => {
   });
 });
 
-// POST /api/auth/login - Strict httpOnly, SameSite=Strict, 24h expiry, rate-limited
+// GET /api/auth/status - Public configuration check for admin auth
+app.get('/api/auth/status', (req, res) => {
+  const token = getSessionToken(req);
+  const session = token ? activeSessions.get(token) : null;
+  const authenticated = Boolean(session && Date.now() <= session.expiresAt);
+  return res.json({
+    configured: isAdminConfigured(),
+    authenticated,
+  });
+});
+
+// POST /api/auth/login - Strict httpOnly, SameSite=Lax, 12h expiry, rate-limited (max 5 attempts per 15 min per IP)
 app.post('/api/auth/login', (req, res) => {
   const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
 
-  // 1) Rate limit check: 5 attempts per 10 minutes per IP
+  // 1) Verify admin login is configured via environment variables
+  if (!isAdminConfigured()) {
+    return res.status(503).json({
+      success: false,
+      configured: false,
+      error: 'Admin login is not configured on the server. Please set ADMIN_USERNAME and ADMIN_PASSWORD_HASH in environment variables.',
+    });
+  }
+
+  // 2) Rate limit check: max 5 attempts per 15 minutes per IP
   const rateLimitResult = checkLoginRateLimit(clientIp);
   if (!rateLimitResult.allowed) {
     return res.status(429).json({
@@ -1724,19 +1746,18 @@ app.post('/api/auth/login', (req, res) => {
   }
 
   const { email, password } = req.body || {};
-  const configuredAdminUser = process.env.ADMIN_USER || 'admin@sarraf.gold';
 
   if (!email || !password) {
     return res.status(400).json({
       success: false,
-      error: 'Email and password are required.',
+      error: 'Username/email and password are required.',
     });
   }
 
-  const isUserValid = verifyAdminUsername(email);
-  const isPassValid = verifyAdminPassword(password);
+  // 3) Constant-time credentials check (never prints credentials)
+  const isValid = verifyAdminCredentials(email, password);
 
-  if (isUserValid && isPassValid) {
+  if (isValid) {
     // Reset rate limit on successful authentication
     loginRateLimitMap.delete(clientIp);
 
@@ -1761,7 +1782,7 @@ app.post('/api/auth/login', (req, res) => {
     });
     saveActiveSessions();
 
-    // Store login session in httpOnly cookie with 24h expiry
+    // Store login session in httpOnly cookie with 12h expiry
     res.cookie('sarraf_session', token, {
       httpOnly: true,
       sameSite: 'lax',
@@ -1772,6 +1793,7 @@ app.post('/api/auth/login', (req, res) => {
 
     return res.json({
       success: true,
+      configured: true,
       user: userPayload,
       token,
       isNewIp,
@@ -1780,15 +1802,17 @@ app.post('/api/auth/login', (req, res) => {
 
   return res.status(401).json({
     success: false,
-    error: `Invalid institutional credentials. (${rateLimitResult.remaining} attempts remaining)`,
+    configured: true,
+    error: `Invalid credentials. (${rateLimitResult.remaining} attempts remaining)`,
   });
 });
 
 // GET /api/auth/me - Read session from cookie or header
 app.get('/api/auth/me', (req, res) => {
+  const configured = isAdminConfigured();
   const token = getSessionToken(req);
   if (!token) {
-    return res.json({ authenticated: false, user: null });
+    return res.json({ authenticated: false, configured, user: null });
   }
 
   const session = activeSessions.get(token);
@@ -1798,17 +1822,18 @@ app.get('/api/auth/me', (req, res) => {
       saveActiveSessions();
     }
     res.clearCookie('sarraf_session', { httpOnly: true, sameSite: 'lax', path: '/' });
-    return res.json({ authenticated: false, user: null });
+    return res.json({ authenticated: false, configured, user: null });
   }
 
   return res.json({
     authenticated: true,
+    configured,
     user: session.user,
     token,
   });
 });
 
-// POST /api/auth/logout - Clear session
+// POST /api/auth/logout - Clear session from memory, disk, and cookie
 app.post('/api/auth/logout', (req, res) => {
   const token = getSessionToken(req);
   if (token) {
@@ -1822,7 +1847,7 @@ app.post('/api/auth/logout', (req, res) => {
     path: '/',
   });
 
-  return res.json({ success: true, message: 'Session terminated.' });
+  return res.json({ success: true, message: 'Session invalidated on server.' });
 });
 
 async function startServer() {

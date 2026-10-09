@@ -7,6 +7,7 @@ interface CandlestickChartPanelProps {
   currentPrice: number;
   supportLevel: number;
   resistanceLevel: number;
+  zones?: { id: string; mid: number; type: string; label: string }[];
   isDimmed: boolean;
   freshness: string;
 }
@@ -17,12 +18,23 @@ export const CandlestickChartPanel: React.FC<CandlestickChartPanelProps> = ({
   currentPrice,
   supportLevel,
   resistanceLevel,
+  zones = [],
   isDimmed,
   freshness,
 }) => {
+  // Show last 60 candles with live candle updated on every tick
   const visibleCandles = useMemo(() => {
-    return candles.slice(-40);
-  }, [candles]);
+    const raw = candles.slice(-60);
+    if (raw.length === 0) return [];
+    if (currentPrice <= 0) return raw;
+
+    const list = raw.map((c) => ({ ...c }));
+    const last = list[list.length - 1];
+    last.close = currentPrice;
+    last.high = Math.max(last.high, currentPrice);
+    last.low = Math.min(last.low, currentPrice);
+    return list;
+  }, [candles, currentPrice]);
 
   const chartData = useMemo(() => {
     if (visibleCandles.length === 0) return null;
@@ -185,6 +197,38 @@ export const CandlestickChartPanel: React.FC<CandlestickChartPanelProps> = ({
               </text>
             </g>
           )}
+
+          {/* Overlaid Nearest Buy/Sell Zones */}
+          {zones.slice(0, 3).map((z) => {
+            const zY = getY(z.mid);
+            if (zY < paddingTop || zY > paddingTop + chartHeight) return null;
+            const isBuy = z.mid < currentPrice;
+            const zColor = isBuy ? '#22e08a' : '#ff3b6b';
+            return (
+              <g key={z.id}>
+                <line
+                  x1={paddingLeft}
+                  y1={zY}
+                  x2={svgWidth - paddingRight}
+                  y2={zY}
+                  stroke={zColor}
+                  strokeWidth="0.8"
+                  strokeDasharray="2 3"
+                  opacity="0.45"
+                />
+                <text
+                  x={paddingLeft + 4}
+                  y={zY - 2}
+                  fill={zColor}
+                  fontSize="7.5"
+                  fontFamily="monospace"
+                  opacity="0.8"
+                >
+                  {isBuy ? 'DEMAND' : 'SUPPLY'} ${z.mid.toFixed(1)}
+                </text>
+              </g>
+            );
+          })}
 
           {/* Thin Wicks & Candle Bodies */}
           {visibleCandles.map((c, i) => {

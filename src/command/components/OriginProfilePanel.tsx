@@ -51,8 +51,8 @@ export const OriginProfilePanel: React.FC<OriginProfilePanelProps> = ({
             </span>
             <div className="space-y-1.5 relative">
               {originLevels.length === 0 ? (
-                <div className="text-[10px] text-[#8a96a8] h-[22px] flex items-center">
-                  collecting data...
+                <div className="text-[10px] text-[#8a96a8] h-[22px] flex items-center italic">
+                  N/A (insufficient impulses)
                 </div>
               ) : (
                 originLevels.map((lvl, idx) => {

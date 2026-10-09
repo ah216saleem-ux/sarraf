@@ -63,37 +63,50 @@ function computeStats(hist: CommandSignalLogEntry[]): SignalEngineStats {
     };
   }
 
-  let wins = 0;
-  let losses = 0;
+  let tpWins = 0;
+  let slLosses = 0;
   let totalPnL = 0;
   let tp1 = 0;
   let tp2 = 0;
   let tp3 = 0;
   let sl = 0;
   let manual = 0;
+  let nonTestTotal = 0;
 
   for (const s of hist) {
+    if (s.isTest) continue;
+    nonTestTotal++;
     totalPnL += s.pnlDollars;
-    if (s.pnlDollars > 0) wins++;
-    else if (s.pnlDollars < 0) losses++;
 
-    if (s.result === 'TP1') tp1++;
-    else if (s.result === 'TP2') tp2++;
-    else if (s.result === 'TP3') tp3++;
-    else if (s.result === 'SL') sl++;
-    else if (s.result === 'MANUAL') manual++;
+    if (s.result === 'TP1') {
+      tp1++;
+      tpWins++;
+    } else if (s.result === 'TP2') {
+      tp2++;
+      tpWins++;
+    } else if (s.result === 'TP3') {
+      tp3++;
+      tpWins++;
+    } else if (s.result === 'SL') {
+      sl++;
+      slLosses++;
+    } else if (s.result === 'MANUAL') {
+      manual++;
+    }
   }
 
-  const winRate = total > 0 ? Number(((wins / total) * 100).toFixed(1)) : 0;
-  const avgResult = total > 0 ? Number((totalPnL / total).toFixed(2)) : 0;
+  // Win rate: Exclude MANUAL exits; win rate only from TP / SL
+  const tpSlTotal = tpWins + slLosses;
+  const winRate = tpSlTotal > 0 ? Number(((tpWins / tpSlTotal) * 100).toFixed(1)) : 0;
+  const avgResult = nonTestTotal > 0 ? Number((totalPnL / nonTestTotal).toFixed(2)) : 0;
 
   return {
-    totalSignals: total,
+    totalSignals: nonTestTotal,
     winRate,
     avgResultDollars: avgResult,
     totalPnLDollars: Number(totalPnL.toFixed(2)),
-    winsCount: wins,
-    lossesCount: losses,
+    winsCount: tpWins,
+    lossesCount: slLosses,
     tp1Hits: tp1,
     tp2Hits: tp2,
     tp3Hits: tp3,
@@ -109,7 +122,7 @@ export function saveCommandSignalsToDisk() {
       activeSignal,
       cooldownEndsAt,
       paperMode,
-      history: history.slice(0, SNIPER_CONFIG.maxHistoryEntries),
+      history: history.filter((h) => !h.isTest).slice(0, SNIPER_CONFIG.maxHistoryEntries),
       lastEvaluatedAt,
     };
     writeJsonAtomic(SIGNALS_FILE, payload);
@@ -129,8 +142,35 @@ export function loadCommandSignalsFromDisk() {
     const data: Partial<PersistedState> = JSON.parse(raw);
 
     if (data.paperMode !== undefined) paperMode = Boolean(data.paperMode);
-    if (Array.isArray(data.history)) history = data.history.slice(0, SNIPER_CONFIG.maxHistoryEntries);
-    if (data.activeSignal) {
+
+    // Data Migration & Integrity Verification
+    if (Array.isArray(data.history)) {
+      history = data.history.filter((rec) => {
+        if (!rec || typeof rec.entry !== 'number' || typeof rec.closePrice !== 'number') return false;
+        if (rec.isTest) return false;
+
+        const isBuy = rec.side === 'BUY';
+        const expectedPnL = isBuy
+          ? Number((rec.closePrice - rec.entry).toFixed(2))
+          : Number((rec.entry - rec.closePrice).toFixed(2));
+
+        // Result integrity: Reject records where exit and entry disagree with pnlDollars
+        if (Math.abs(rec.pnlDollars - expectedPnL) > 0.05) {
+          console.warn(`[DATA INTEGRITY] Removed corrupted record ${rec.id}: recorded pnl=${rec.pnlDollars}, computed=${expectedPnL}`);
+          return false;
+        }
+
+        // Result integrity: Reject records where TP/SL label disagrees with exit price
+        if (rec.result === 'TP1' && Math.abs(expectedPnL - 5.0) > 1.0) return false;
+        if (rec.result === 'TP2' && Math.abs(expectedPnL - 8.0) > 1.0) return false;
+        if (rec.result === 'TP3' && Math.abs(expectedPnL - 12.0) > 1.0) return false;
+        if (rec.result === 'SL' && Math.abs(expectedPnL - (-10.0)) > 1.0) return false;
+
+        return true;
+      }).slice(0, SNIPER_CONFIG.maxHistoryEntries);
+    }
+
+    if (data.activeSignal && !data.activeSignal.isTest) {
       activeSignal = data.activeSignal;
       lifecycle = 'ACTIVE';
     } else if (data.cooldownEndsAt && Date.now() < data.cooldownEndsAt) {
@@ -227,7 +267,7 @@ export function processCommandSignalTick(
     // Check TP3 (Full win closure)
     let shouldClose = false;
     let closeReason: SignalCloseReason = 'TP3';
-    let realizedDollars = 0;
+    let closeTargetPrice = price;
 
     const hitTP3 = isBuy ? price >= activeSignal.tp3 : price <= activeSignal.tp3;
     if (hitTP3) {
@@ -235,7 +275,7 @@ export function processCommandSignalTick(
       if (!activeSignal.hitTargets.includes('TP3')) activeSignal.hitTargets.push('TP3');
       shouldClose = true;
       closeReason = 'TP3';
-      realizedDollars = SNIPER_CONFIG.tp3OffsetDollars; // +$12.00
+      closeTargetPrice = activeSignal.tp3; // Exit price equals TP level
     }
 
     // Check Stop Loss
@@ -245,11 +285,11 @@ export function processCommandSignalTick(
       if (!activeSignal.hitTargets.includes('SL')) activeSignal.hitTargets.push('SL');
       shouldClose = true;
       closeReason = 'SL';
-      realizedDollars = -SNIPER_CONFIG.slOffsetDollars; // -$10.00
+      closeTargetPrice = activeSignal.sl; // Exit price equals SL level
     }
 
     if (shouldClose) {
-      finalizeClosedSignal(closeReason, price, realizedDollars);
+      finalizeClosedSignal(closeReason, closeTargetPrice);
       return;
     }
   }
@@ -373,7 +413,7 @@ function evaluateGatesWithCurrentMarket(
   }
 }
 
-function issueNewSignal(side: SignalSide, entryPrice: number) {
+function issueNewSignal(side: SignalSide, entryPrice: number, isTest = false) {
   const entry = Number(entryPrice.toFixed(2));
   const isBuy = side === 'BUY';
 
@@ -399,6 +439,7 @@ function issueNewSignal(side: SignalSide, entryPrice: number) {
     createdAt: Date.now(),
     livePnL: 0,
     isPaper: paperMode,
+    isTest,
     confidence: lastConfidence,
     gatesPassedCount: 8,
     entryReason: `8/8 Ahmed Sniper Chain alignment (${side}) · Entry $${entry} · Path +$${lastPathClearDollars.toFixed(1)} clear`,
@@ -416,41 +457,52 @@ function issueNewSignal(side: SignalSide, entryPrice: number) {
   activeSignal = newSignal;
   lifecycle = 'ACTIVE';
 
-  console.log(`[COMMAND SIGNAL ENGINE] Issued NEW ${side} Signal: Entry=$${entry}, SL=$${sl}, TP1=$${tp1}, TP2=$${tp2}, TP3=$${tp3} (Paper=${paperMode})`);
+  console.log(`[COMMAND SIGNAL ENGINE] Issued NEW ${side} Signal: Entry=$${entry}, SL=$${sl}, TP1=$${tp1}, TP2=$${tp2}, TP3=$${tp3} (Paper=${paperMode}, isTest=${isTest})`);
   saveCommandSignalsToDisk();
 
-  // Telegram notification for new signal (send exactly once)
-  if (lastFeedStatus === 'LIVE') {
+  // Telegram notification for real signals only (never send test signals to public Telegram chat)
+  if (!isTest && lastFeedStatus === 'LIVE') {
     notifyNewSignal(newSignal).catch(() => {});
   }
 }
 
-function finalizeClosedSignal(reason: SignalCloseReason, closePrice: number, pnlDollars: number) {
+function finalizeClosedSignal(reason: SignalCloseReason, closePrice: number) {
   if (!activeSignal) return;
 
   const closedSignal = activeSignal;
+  const isBuy = closedSignal.side === 'BUY';
+
+  // Result integrity: Always dynamically compute PnL = (exit - entry) for BUY, (entry - exit) for SELL
+  const computedPnL = isBuy
+    ? Number((closePrice - closedSignal.entry).toFixed(2))
+    : Number((closedSignal.entry - closePrice).toFixed(2));
+
   closedSignal.closedAt = Date.now();
   closedSignal.closePrice = Number(closePrice.toFixed(2));
   closedSignal.closeReason = reason;
-  closedSignal.realizedPnL = Number(pnlDollars.toFixed(2));
-  closedSignal.livePnL = Number(pnlDollars.toFixed(2));
+  closedSignal.realizedPnL = computedPnL;
+  closedSignal.livePnL = computedPnL;
 
-  const logEntry: CommandSignalLogEntry = {
-    id: closedSignal.id,
-    timestamp: closedSignal.closedAt,
-    timeStr: new Date(closedSignal.closedAt).toLocaleTimeString('en-US', { hour12: false }),
-    side: closedSignal.side,
-    entry: closedSignal.entry,
-    closePrice: closedSignal.closePrice,
-    result: reason,
-    pnlDollars: Number(pnlDollars.toFixed(2)),
-    isPaper: closedSignal.isPaper,
-  };
+  // Test signals NEVER enter the log or the stats
+  if (!closedSignal.isTest) {
+    const logEntry: CommandSignalLogEntry = {
+      id: closedSignal.id,
+      timestamp: closedSignal.closedAt,
+      timeStr: new Date(closedSignal.closedAt).toLocaleTimeString('en-US', { hour12: false }),
+      side: closedSignal.side,
+      entry: closedSignal.entry,
+      closePrice: closedSignal.closePrice,
+      result: reason,
+      pnlDollars: computedPnL,
+      isPaper: closedSignal.isPaper,
+      isTest: false,
+    };
 
-  // Add to beginning of history, keep last 20
-  history.unshift(logEntry);
-  if (history.length > SNIPER_CONFIG.maxHistoryEntries) {
-    history = history.slice(0, SNIPER_CONFIG.maxHistoryEntries);
+    // Add to beginning of history, keep last 20
+    history.unshift(logEntry);
+    if (history.length > SNIPER_CONFIG.maxHistoryEntries) {
+      history = history.slice(0, SNIPER_CONFIG.maxHistoryEntries);
+    }
   }
 
   // 30-minute cooldown
@@ -458,24 +510,26 @@ function finalizeClosedSignal(reason: SignalCloseReason, closePrice: number, pnl
   cooldownEndsAt = Date.now() + SNIPER_CONFIG.cooldownDurationSeconds * 1000;
   activeSignal = null;
 
-  console.log(`[COMMAND SIGNAL ENGINE] Signal ${closedSignal.id} CLOSED (${reason}): PnL=$${pnlDollars}. Entering 30-minute cooldown.`);
+  console.log(`[COMMAND SIGNAL ENGINE] Signal ${closedSignal.id} CLOSED (${reason}): PnL=$${computedPnL} (isTest=${Boolean(closedSignal.isTest)}). Entering 30-minute cooldown.`);
   saveCommandSignalsToDisk();
 
-  // Telegram notification for closed trade & cooldown (send exactly once per event)
-  if (!closedSignal.sentMessageFlags) closedSignal.sentMessageFlags = {};
-  const alreadyNotified =
-    (reason === 'TP3' && closedSignal.sentMessageFlags.tp3) ||
-    (reason === 'SL' && closedSignal.sentMessageFlags.sl) ||
-    (reason === 'MANUAL' && closedSignal.sentMessageFlags.manual);
+  // Telegram notification for real trades only (send exactly once per event)
+  if (!closedSignal.isTest) {
+    if (!closedSignal.sentMessageFlags) closedSignal.sentMessageFlags = {};
+    const alreadyNotified =
+      (reason === 'TP3' && closedSignal.sentMessageFlags.tp3) ||
+      (reason === 'SL' && closedSignal.sentMessageFlags.sl) ||
+      (reason === 'MANUAL' && closedSignal.sentMessageFlags.manual);
 
-  if (!alreadyNotified) {
-    if (reason === 'TP3') closedSignal.sentMessageFlags.tp3 = true;
-    else if (reason === 'SL') closedSignal.sentMessageFlags.sl = true;
-    else if (reason === 'MANUAL') closedSignal.sentMessageFlags.manual = true;
-    closedSignal.sentMessageFlags.cooldown = true;
-    saveCommandSignalsToDisk();
+    if (!alreadyNotified) {
+      if (reason === 'TP3') closedSignal.sentMessageFlags.tp3 = true;
+      else if (reason === 'SL') closedSignal.sentMessageFlags.sl = true;
+      else if (reason === 'MANUAL') closedSignal.sentMessageFlags.manual = true;
+      closedSignal.sentMessageFlags.cooldown = true;
+      saveCommandSignalsToDisk();
 
-    notifySignalClosed(reason, pnlDollars, closePrice, closedSignal).catch(() => {});
+      notifySignalClosed(reason, computedPnL, closePrice, closedSignal).catch(() => {});
+    }
   }
 }
 
@@ -491,7 +545,7 @@ export function manualCloseCommandSignal(marketPrice: number): { success: boolea
   const pnl = isBuy ? marketPrice - activeSignal.entry : activeSignal.entry - marketPrice;
   const reason: SignalCloseReason = 'MANUAL';
 
-  finalizeClosedSignal(reason, marketPrice, Number(pnl.toFixed(2)));
+  finalizeClosedSignal(reason, marketPrice);
   return {
     success: true,
     message: `Active signal manually closed @ $${marketPrice.toFixed(2)} (PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}). 30-min cooldown started.`,
@@ -523,6 +577,7 @@ export function resetCommandSignalCooldown(): { success: boolean; message: strin
 
 /**
  * Trigger simulated test signal (e.g. for user inspection)
+ * Marked with isTest = true so test signals never enter the signal log or stats!
  */
 export function triggerSimulatedCommandSignal(side: SignalSide = 'BUY', customPrice?: number): { success: boolean; signal?: CommandSignal; message: string } {
   if (lifecycle === 'ACTIVE') {
@@ -530,8 +585,8 @@ export function triggerSimulatedCommandSignal(side: SignalSide = 'BUY', customPr
   }
 
   const price = customPrice && customPrice > 0 ? customPrice : 4118.50;
-  issueNewSignal(side, price);
-  return { success: true, signal: activeSignal || undefined, message: `Issued ${side} signal @ $${price} (Paper Mode: ${paperMode}).` };
+  issueNewSignal(side, price, true); // isTest = true
+  return { success: true, signal: activeSignal || undefined, message: `Issued ${side} test signal @ $${price} (Paper Mode: ${paperMode}).` };
 }
 
 /**
@@ -556,6 +611,22 @@ export function getCommandSignalState(currentTickPrice?: number): SignalEnginePu
       ? Number((currentTickPrice - activeSignal.entry).toFixed(2))
       : Number((activeSignal.entry - currentTickPrice).toFixed(2));
   }
+
+  // Strict sanitize history: remove test signals and any inconsistent records (e.g. exit - entry != pnlDollars)
+  history = history.filter((rec) => {
+    if (!rec || typeof rec.entry !== 'number' || typeof rec.closePrice !== 'number') return false;
+    if (rec.isTest) return false;
+    const isBuy = rec.side === 'BUY';
+    const expectedPnL = isBuy
+      ? Number((rec.closePrice - rec.entry).toFixed(2))
+      : Number((rec.entry - rec.closePrice).toFixed(2));
+    if (Math.abs(rec.pnlDollars - expectedPnL) > 0.05) return false;
+    if (rec.result === 'TP1' && Math.abs(expectedPnL - 5.0) > 1.0) return false;
+    if (rec.result === 'TP2' && Math.abs(expectedPnL - 8.0) > 1.0) return false;
+    if (rec.result === 'TP3' && Math.abs(expectedPnL - 12.0) > 1.0) return false;
+    if (rec.result === 'SL' && Math.abs(expectedPnL - (-10.0)) > 1.0) return false;
+    return true;
+  });
 
   const stats = computeStats(history);
 

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import bcrypt from 'bcryptjs';
 import {
   DATA_DIR,
   writeJsonAtomic,
@@ -89,9 +90,6 @@ function ensureDataDir() {
 
 export function loadSettingsFromDisk(): EngineSettings {
   ensureDataDir();
-  if (!fs.existsSync(AUTH_FILE)) {
-    setAdminCredentials('gmcf7', 'gmcf7');
-  }
   if (fs.existsSync(SETTINGS_FILE)) {
     try {
       const data = fs.readFileSync(SETTINGS_FILE, 'utf-8');
@@ -352,129 +350,123 @@ export function importSettingsJson(
 // 4. ADMIN PASSWORD MANAGEMENT & IP TRACKING
 // -------------------------------------------------------------
 
-function hashPassword(password: string, salt: string): string {
-  return crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha256').toString('hex');
+// -------------------------------------------------------------
+// 4. ADMIN AUTHENTICATION (ENVIRONMENT VARIABLES ONLY)
+// -------------------------------------------------------------
+
+/**
+ * Checks if admin authentication is configured via environment variables.
+ * Requires BOTH ADMIN_USERNAME and ADMIN_PASSWORD_HASH.
+ * If either is missing, admin login stays disabled.
+ */
+export function isAdminConfigured(): boolean {
+  const user = process.env.ADMIN_USERNAME?.trim();
+  const hash = process.env.ADMIN_PASSWORD_HASH?.trim();
+  return Boolean(user && hash);
 }
 
-export function setAdminCredentials(username: string = 'gmcf7', password: string = 'gmcf7') {
-  ensureDataDir();
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = hashPassword(password, salt);
-  try {
-    fs.writeFileSync(
-      AUTH_FILE,
-      JSON.stringify(
-        {
-          username: username.trim(),
-          updatedAt: new Date().toISOString(),
-          salt,
-          hash,
-        },
-        null,
-        2
-      ),
-      'utf-8'
-    );
-  } catch (err: any) {
-    console.error('[SETTINGS ENGINE] Failed to save admin credentials:', err.message);
-  }
+/**
+ * Returns the configured admin username (or null if unconfigured).
+ * Never returns default/fallback credentials.
+ */
+export function getAdminUsername(): string | null {
+  const user = process.env.ADMIN_USERNAME?.trim();
+  return user || null;
 }
 
-export function getAdminUsername(): string {
-  ensureDataDir();
-  if (fs.existsSync(AUTH_FILE)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf-8'));
-      if (data.username) return data.username;
-    } catch {}
-  }
-  return process.env.ADMIN_USER || 'gmcf7';
-}
-
+/**
+ * Constant-time username comparison against ADMIN_USERNAME.
+ */
 export function verifyAdminUsername(username: string): boolean {
-  if (!username) return false;
-  const input = username.trim().toLowerCase();
-  const current = getAdminUsername().trim().toLowerCase();
-  const envUser = (process.env.ADMIN_USER || '').trim().toLowerCase();
-  return (
-    input === current ||
-    input === 'gmcf7' ||
-    input === 'admin@sarraf.gold' ||
-    input === 'a.h216saleem@gmail.com' ||
-    (Boolean(envUser) && input === envUser)
-  );
+  const envUser = process.env.ADMIN_USERNAME?.trim();
+  if (!envUser || !username) return false;
+
+  const inputBuf = Buffer.from(username.trim().toLowerCase());
+  const envBuf = Buffer.from(envUser.toLowerCase());
+
+  if (inputBuf.length !== envBuf.length) {
+    // Constant-time dummy compare to prevent timing side-channels
+    crypto.timingSafeEqual(inputBuf, inputBuf);
+    return false;
+  }
+  return crypto.timingSafeEqual(inputBuf, envBuf);
+}
+
+/**
+ * Constant-time credential verification using ADMIN_USERNAME and ADMIN_PASSWORD_HASH.
+ * Supports:
+ *  - bcrypt ($2a$, $2b$, $2y$)
+ *  - scrypt (scrypt:salt:hash or salt:hash)
+ * Never prints or leaks credentials to logs.
+ */
+export function verifyAdminCredentials(username: string, password: string): boolean {
+  const envUser = process.env.ADMIN_USERNAME?.trim();
+  const envHash = process.env.ADMIN_PASSWORD_HASH?.trim();
+
+  if (!envUser || !envHash || !username || !password) {
+    return false;
+  }
+
+  // Constant-time username check
+  const inputUserBuf = Buffer.from(username.trim().toLowerCase());
+  const envUserBuf = Buffer.from(envUser.toLowerCase());
+  let userMatch = false;
+
+  if (inputUserBuf.length === envUserBuf.length) {
+    userMatch = crypto.timingSafeEqual(inputUserBuf, envUserBuf);
+  } else {
+    crypto.timingSafeEqual(inputUserBuf, inputUserBuf);
+    userMatch = false;
+  }
+
+  if (!userMatch) {
+    // Constant-time dummy verify to mitigate username enumeration timing
+    try {
+      bcrypt.compareSync(password, '$2a$12$e8rP4mFwI2nQ0rKqgA6Zk.Jm7B7l4m8o0p1q2r3s4t5u6v7w8x9y0');
+    } catch {}
+    return false;
+  }
+
+  // Password Hash verification
+  try {
+    if (envHash.startsWith('$2a$') || envHash.startsWith('$2b$') || envHash.startsWith('$2y$')) {
+      return bcrypt.compareSync(password, envHash);
+    }
+
+    if (envHash.startsWith('scrypt:')) {
+      const parts = envHash.split(':');
+      if (parts.length === 3) {
+        const salt = parts[1];
+        const expectedHex = parts[2];
+        const computed = crypto.scryptSync(password, salt, 64).toString('hex');
+        const compBuf = Buffer.from(computed);
+        const expBuf = Buffer.from(expectedHex);
+        if (compBuf.length === expBuf.length) {
+          return crypto.timingSafeEqual(compBuf, expBuf);
+        }
+      }
+    } else if (envHash.includes(':')) {
+      const [salt, expectedHex] = envHash.split(':');
+      if (salt && expectedHex) {
+        const computed = crypto.scryptSync(password, salt, 64).toString('hex');
+        const compBuf = Buffer.from(computed);
+        const expBuf = Buffer.from(expectedHex);
+        if (compBuf.length === expBuf.length) {
+          return crypto.timingSafeEqual(compBuf, expBuf);
+        }
+      }
+    }
+  } catch {
+    // Ignore error safely, return false
+  }
+
+  return false;
 }
 
 export function verifyAdminPassword(password: string): boolean {
-  ensureDataDir();
-  if (!password) return false;
-
-  // Direct check for new credential
-  if (password === 'gmcf7') {
-    return true;
-  }
-
-  if (fs.existsSync(AUTH_FILE)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf-8'));
-      if (data.salt && data.hash) {
-        const computed = hashPassword(password, data.salt);
-        if (crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(data.hash))) {
-          return true;
-        }
-      }
-    } catch {}
-  }
-
-  // Fallback to initial ENV password
-  const envPass = process.env.ADMIN_PASS || 'SarrafAdmin2026!';
-  return password === envPass;
-}
-
-export function changeAdminPassword(
-  oldPassword: string,
-  newPassword: string,
-  adminEmail: string
-): { success: boolean; error?: string } {
-  if (!verifyAdminPassword(oldPassword)) {
-    return { success: false, error: 'Current password is incorrect.' };
-  }
-
-  if (!newPassword || newPassword.length < 12) {
-    return { success: false, error: 'New password must be at least 12 characters long.' };
-  }
-
-  ensureDataDir();
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = hashPassword(newPassword, salt);
-
-  try {
-    fs.writeFileSync(
-      AUTH_FILE,
-      JSON.stringify(
-        {
-          updatedAt: new Date().toISOString(),
-          updatedBy: adminEmail,
-          salt,
-          hash,
-        },
-        null,
-        2
-      ),
-      'utf-8'
-    );
-
-    logAuditEntry({
-      adminEmail,
-      field: 'ADMIN_PASSWORD',
-      oldValue: '[PROTECTED_HASH]',
-      newValue: '[UPDATED_HASH]',
-    });
-
-    return { success: true };
-  } catch (err: any) {
-    return { success: false, error: `Failed to persist password: ${err.message}` };
-  }
+  const envUser = process.env.ADMIN_USERNAME?.trim();
+  if (!envUser) return false;
+  return verifyAdminCredentials(envUser, password);
 }
 
 export function recordSuccessfulLogin(ip: string): { isNewIp: boolean } {

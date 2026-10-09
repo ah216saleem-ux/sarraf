@@ -575,7 +575,7 @@ class CommandFeedStore {
         impactDollarsPerTick: 0,
       };
       this.minuteFlows.push(bucket);
-      if (this.minuteFlows.length > 15) {
+      if (this.minuteFlows.length > 60) {
         this.minuteFlows.shift();
       }
     }
@@ -838,8 +838,19 @@ class CommandFeedStore {
         }
       }
 
-      this.absorptionBuyZones = buyZones.slice(-3);
-      this.absorptionSellZones = sellZones.slice(-3);
+      // Filter and sort:
+      // - BUY (demand) zones strictly below current price and within $25
+      // - SELL (supply) zones strictly above current price and within $25
+      // - Show nearest first, max 3
+      this.absorptionBuyZones = buyZones
+        .filter((z) => z.mid < p && Math.abs(p - z.mid) <= 25.0)
+        .sort((a, b) => Math.abs(p - a.mid) - Math.abs(p - b.mid))
+        .slice(0, 3);
+
+      this.absorptionSellZones = sellZones
+        .filter((z) => z.mid > p && Math.abs(z.mid - p) <= 25.0)
+        .sort((a, b) => Math.abs(a.mid - p) - Math.abs(b.mid - p))
+        .slice(0, 3);
     }
 
     // --- 7. REAL ORIGIN PROFILE & DISPLACEMENTS (from real candle impulse moves) ---
@@ -881,16 +892,20 @@ class CommandFeedStore {
 
       this.originDisplacements = displacements.slice(0, 4);
 
-      // Convert levelsMap to OriginLevel array
-      const maxVol = Math.max(1, ...Array.from(levelsMap.values()).map((v) => v.volume));
-      this.originLevels = Array.from(levelsMap.entries())
-        .map(([priceLevel, data]) => ({
-          priceLevel,
-          volumeWeight: Math.min(100, Math.max(20, Math.round((data.volume / maxVol) * 100))),
-          displacementsCount: data.count,
-        }))
-        .sort((a, b) => a.priceLevel - b.priceLevel)
-        .slice(0, 6);
+      if (displacements.length < 2 || levelsMap.size === 0) {
+        this.originLevels = [];
+      } else {
+        // Convert levelsMap to OriginLevel array: strongest volume = exactly 100%
+        const maxVol = Math.max(1, ...Array.from(levelsMap.values()).map((v) => v.volume));
+        this.originLevels = Array.from(levelsMap.entries())
+          .map(([priceLevel, data]) => ({
+            priceLevel,
+            volumeWeight: Math.min(100, Math.round((data.volume / maxVol) * 100)),
+            displacementsCount: data.count,
+          }))
+          .sort((a, b) => a.priceLevel - b.priceLevel)
+          .slice(0, 6);
+      }
     }
 
     // --- 8. REAL CONFIDENCE MATRIX (computed from live components) ---

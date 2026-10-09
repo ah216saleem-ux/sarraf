@@ -89,7 +89,7 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
                 : 'bg-[#22e08a]/10 text-[#22e08a] border-[#22e08a]/30 hover:bg-[#22e08a]/20'
             }`}
           >
-            {paperMode ? 'PAPER MODE [ON]' : 'LIVE EXEC [ON]'}
+            {paperMode ? 'PAPER MODE' : 'LIVE SIGNALS'}
           </button>
         </div>
       </div>

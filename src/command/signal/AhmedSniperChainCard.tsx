@@ -160,7 +160,7 @@ export const AhmedSniperChainCard: React.FC<AhmedSniperChainCardProps> = ({
       <div className="pt-2 border-t border-white/5 flex flex-wrap items-center justify-between text-[8px] text-[#8a96a8] gap-2">
         <div className="flex items-center gap-3">
           <span>
-            CONFIDENCE: <strong className={confidence >= 65 ? 'text-[#22e08a]' : 'text-[#8a96a8]'}>{confidence.toFixed(0)}%</strong> (Min 65%)
+            SIGNAL CONFIDENCE: <strong className={confidence >= 65 ? 'text-[#22e08a]' : 'text-[#8a96a8]'}>{confidence.toFixed(0)}%</strong> (Min 65%)
           </span>
           <span>
             OPPOSING PATH: <strong className={pathClearR >= 10 ? 'text-[#22e08a]' : 'text-[#8a96a8]'}>+${pathClearR.toFixed(1)}</strong> (Min 1R / $10)

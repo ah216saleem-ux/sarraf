@@ -3,7 +3,7 @@ import { useMarket } from '../context/MarketContext';
 import { X, Lock, Mail, ShieldCheck, ArrowRight } from 'lucide-react';
 
 export const LoginModal: React.FC = () => {
-  const { isLoginModalOpen, closeLoginModal, login } = useMarket();
+  const { isLoginModalOpen, closeLoginModal, login, adminConfigured } = useMarket();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -13,6 +13,10 @@ export const LoginModal: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!adminConfigured) {
+      setError('Admin login is not configured on the server. Please set ADMIN_USERNAME and ADMIN_PASSWORD_HASH.');
+      return;
+    }
     setIsLoading(true);
     setError(null);
     try {
@@ -52,6 +56,12 @@ export const LoginModal: React.FC = () => {
           </p>
         </div>
 
+        {!adminConfigured && (
+          <div className="mb-4 p-3 rounded-lg bg-amber-950/60 border border-amber-800/60 text-xs font-mono text-amber-300">
+            ⚠️ Admin login is not configured. Set <code className="bg-black/40 px-1 py-0.5 rounded">ADMIN_USERNAME</code> and <code className="bg-black/40 px-1 py-0.5 rounded">ADMIN_PASSWORD_HASH</code> in server environment variables.
+          </div>
+        )}
+
         {error && (
           <div className="mb-4 p-3 rounded-lg bg-rose-950/60 border border-rose-800/60 text-xs font-mono text-rose-300">
             {error}
@@ -71,9 +81,10 @@ export const LoginModal: React.FC = () => {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
+                disabled={!adminConfigured}
                 autoComplete="username"
-                placeholder="gmcf7"
-                className="w-full bg-black/60 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-xs font-mono text-white placeholder-neutral-600 focus:outline-none focus:border-[#FFD97A] transition-colors"
+                placeholder="Enter username"
+                className="w-full bg-black/60 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-xs font-mono text-white placeholder-neutral-600 focus:outline-none focus:border-[#FFD97A] transition-colors disabled:opacity-50"
               />
             </div>
           </div>
@@ -89,9 +100,10 @@ export const LoginModal: React.FC = () => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
+                disabled={!adminConfigured}
                 autoComplete="current-password"
                 placeholder="Enter passkey"
-                className="w-full bg-black/60 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-xs font-mono text-white placeholder-neutral-600 focus:outline-none focus:border-[#FFD97A] transition-colors"
+                className="w-full bg-black/60 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-xs font-mono text-white placeholder-neutral-600 focus:outline-none focus:border-[#FFD97A] transition-colors disabled:opacity-50"
               />
             </div>
           </div>

@@ -70,6 +70,7 @@ export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
         history={signalEngine.state.history}
         stats={signalEngine.state.stats}
         paperMode={signalEngine.state.paperMode}
+        telegramStatus={signalEngine.telegramStatus}
       />
     </div>
   );

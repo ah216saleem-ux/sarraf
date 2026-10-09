@@ -1,12 +1,10 @@
 import React, { useEffect, useRef, useState, useImperativeHandle, forwardRef, useCallback } from 'react';
 import * as THREE from 'three';
 import { useCommandFeed } from '../data/useCommandFeed';
-import { vortexVertexShader, vortexFragmentShader } from './vortexShaders';
-import { TickBurstPool } from './TickBurstPool';
 import { CandleRing } from './CandleRing';
-import { CoreMesh } from './CoreMesh';
+import { AurumCrystalCore } from './AurumCrystalCore';
 import { QuantumVortexProps, QuantumVortexHooks, Phase4State } from './types';
-import { Zap, Activity, ShieldAlert, Sparkles, AlertCircle, RefreshCw } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 
 export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(({
   className = '',
@@ -26,10 +24,10 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
     : false;
 
-  // Intro state (2.5s once per tab session)
+  // Intro state (2.0s once per tab session)
   const [introActive, setIntroActive] = useState<boolean>(() => {
     if (typeof window === 'undefined' || prefersReducedMotion) return false;
-    const played = sessionStorage.getItem('sarraf_quantum_vortex_intro');
+    const played = sessionStorage.getItem('sarraf_aurum_core_intro');
     return !played;
   });
   const [introProgress, setIntroProgress] = useState<number>(prefersReducedMotion ? 1.0 : 0.0);
@@ -58,11 +56,8 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     scene: THREE.Scene;
     camera: THREE.PerspectiveCamera;
     renderer: THREE.WebGLRenderer;
-    vortexPoints: THREE.Points;
-    vortexMaterial: THREE.ShaderMaterial;
-    coreMesh: CoreMesh;
+    core: AurumCrystalCore;
     candleRing: CandleRing;
-    tickBursts: TickBurstPool;
     animFrameId: number;
     clock: THREE.Clock;
     isDragging: boolean;
@@ -72,9 +67,6 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     rotVelY: number;
     targetDistance: number;
     currentDistance: number;
-    buyRatioSmoothed: number;
-    speedSmoothed: number;
-    tiltSmoothed: number;
     introStartTime: number;
   } | null>(null);
 
@@ -86,7 +78,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
       shockwaveTime: performance.now(),
       shockwaveSide: side,
     }));
-    threeRef.current?.coreMesh.triggerSignal(side);
+    threeRef.current?.core.triggerSignal(side);
   }, []);
 
   const triggerResult = useCallback((result: 'TP' | 'SL') => {
@@ -96,7 +88,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
       resultTime: performance.now(),
       resultType: result,
     }));
-    threeRef.current?.coreMesh.triggerResult(result);
+    threeRef.current?.core.triggerResult(result);
   }, []);
 
   const setCooldown = useCallback((secondsLeft: number) => {
@@ -104,7 +96,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
       ...prev,
       cooldownSeconds: secondsLeft,
     }));
-    threeRef.current?.coreMesh.setCooldown(secondsLeft);
+    threeRef.current?.core.setCooldown(secondsLeft);
   }, []);
 
   // Expose imperative hooks
@@ -124,18 +116,18 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
   const handleSkipIntro = () => {
     setIntroActive(false);
     setIntroProgress(1.0);
-    sessionStorage.setItem('sarraf_quantum_vortex_intro', 'true');
+    sessionStorage.setItem('sarraf_aurum_core_intro', 'true');
   };
 
-  // Price Flash Trigger on Live Ticks
+  // Price Flash Trigger & Tick Ripple on Live Ticks
   useEffect(() => {
     if (feed.currentPrice > 0 && prevPriceRef.current > 0 && feed.currentPrice !== prevPriceRef.current) {
       const isUp = feed.currentPrice > prevPriceRef.current || feed.tickDirection === 'BUY';
       setPriceFlash(isUp ? 'UP' : 'DOWN');
 
-      // Emit tick burst into 3D pool
+      // Trigger tick ripple pulse from crystal to shell nodes
       const delta = feed.currentPrice - prevPriceRef.current;
-      threeRef.current?.tickBursts.emit({
+      threeRef.current?.core.triggerTickRipple({
         direction: feed.tickDirection,
         delta,
       });
@@ -174,6 +166,13 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     }
   }, [feed.candles]);
 
+  // Update Core color based on live buy ratio
+  useEffect(() => {
+    if (threeRef.current) {
+      threeRef.current.core.updateColor(feed.buyRatio);
+    }
+  }, [feed.buyRatio]);
+
   // Main Three.js Lifecycle
   useEffect(() => {
     const container = containerRef.current;
@@ -197,18 +196,18 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     const height = container.clientHeight || 280;
 
     const isMobile = window.innerWidth <= 768 || 'ontouchstart' in window;
-    const particleCount = isMobile ? 4000 : 12000;
-    const maxDpr = isMobile ? 1.5 : Math.min(window.devicePixelRatio || 1, 2.0);
+    // Cap DPR to 1.5 as per performance specification
+    const maxDpr = Math.min(window.devicePixelRatio || 1, 1.5);
 
     // 1. Scene & Camera
     const scene = new THREE.Scene();
     scene.background = new THREE.Color('#04060b');
 
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
-    camera.position.set(0, 1.2, 6.8);
+    const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 100);
+    camera.position.set(0, 0.9, 6.2);
     camera.lookAt(0, 0, 0);
 
-    // 2. Renderer
+    // 2. Renderer with ACESFilmic tone mapping, 0.9 exposure, sRGB encoding
     const renderer = new THREE.WebGLRenderer({
       canvas,
       antialias: !isMobile,
@@ -217,68 +216,18 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     });
     renderer.setSize(width, height);
     renderer.setPixelRatio(maxDpr);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.9;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-    // 3. Vortex Particles Geometry & Shader
-    const positions = new Float32Array(particleCount * 3);
-    const seeds = new Float32Array(particleCount * 4);
-    const types = new Float32Array(particleCount);
+    // 3. Aurum Crystal Core (faceted icosahedron crystal detail 1, network shell, 3 rings)
+    const core = new AurumCrystalCore(isMobile);
+    scene.add(core.group);
+    scene.add(core.lightsGroup);
 
-    for (let i = 0; i < particleCount; i++) {
-      positions[i * 3 + 0] = (Math.random() - 0.5) * 0.1;
-      positions[i * 3 + 1] = (Math.random() - 0.5) * 0.1;
-      positions[i * 3 + 2] = (Math.random() - 0.5) * 0.1;
-
-      // Seed attributes for individual spiral flow
-      seeds[i * 4 + 0] = Math.random(); // radius offset
-      seeds[i * 4 + 1] = Math.random() * Math.PI * 2; // initial theta
-      seeds[i * 4 + 2] = 0.5 + Math.random() * 0.8; // speed multiplier
-      seeds[i * 4 + 3] = Math.random(); // stream offset / phase
-
-      types[i] = Math.random(); // 0.0 to 1.0 selector
-    }
-
-    const vortexGeometry = new THREE.BufferGeometry();
-    vortexGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    vortexGeometry.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 4));
-    vortexGeometry.setAttribute('aType', new THREE.BufferAttribute(types, 1));
-
-    const vortexMaterial = new THREE.ShaderMaterial({
-      vertexShader: vortexVertexShader,
-      fragmentShader: vortexFragmentShader,
-      uniforms: {
-        uTime: { value: 0 },
-        uBuyRatio: { value: 0.5 },
-        uDominance: { value: 0.0 },
-        uSpeed: { value: 1.0 },
-        uTilt: { value: 0.0 },
-        uBreathe: { value: 1.0 },
-        uIntroProgress: { value: prefersReducedMotion ? 1.0 : 0.0 },
-        uPixelRatio: { value: maxDpr },
-        uGlitch: { value: 0.0 },
-        uShockwave: { value: 0.0 },
-        uColorGold: { value: new THREE.Color('#f5c451') },
-        uColorBuy: { value: new THREE.Color('#22e08a') },
-        uColorSell: { value: new THREE.Color('#ff3b6b') },
-      },
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-
-    const vortexPoints = new THREE.Points(vortexGeometry, vortexMaterial);
-    scene.add(vortexPoints);
-
-    // 4. Central Core Mesh
-    const coreMesh = new CoreMesh();
-    scene.add(coreMesh.group);
-
-    // 5. Candlestick Ring
+    // 4. Candlestick Ring (last 30 candles + S/R rings)
     const candleRing = new CandleRing();
     scene.add(candleRing.group);
-
-    // 6. Tick Burst Pool
-    const tickBursts = new TickBurstPool();
-    scene.add(tickBursts.mesh);
 
     // State container
     const clock = new THREE.Clock();
@@ -286,11 +235,8 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
       scene,
       camera,
       renderer,
-      vortexPoints,
-      vortexMaterial,
-      coreMesh,
+      core,
       candleRing,
-      tickBursts,
       animFrameId: 0,
       clock,
       isDragging: false,
@@ -298,11 +244,8 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
       dragStartY: 0,
       rotVelX: 0,
       rotVelY: 0,
-      targetDistance: 6.8,
-      currentDistance: 6.8,
-      buyRatioSmoothed: 0.5,
-      speedSmoothed: 1.0,
-      tiltSmoothed: 0.0,
+      targetDistance: 6.2,
+      currentDistance: 6.2,
       introStartTime: performance.now(),
     };
     threeRef.current = inst;
@@ -311,8 +254,9 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     if (feed.candles.length > 0) {
       candleRing.updateCandles(feed.candles);
     }
+    core.updateColor(feed.buyRatio);
 
-    // 7. Mouse & Touch Interaction (Drag with Inertia & Zoom)
+    // 5. Mouse & Touch Interaction
     const onMouseDown = (e: MouseEvent) => {
       inst.isDragging = true;
       inst.dragStartX = e.clientX;
@@ -336,7 +280,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      inst.targetDistance = Math.max(4.8, Math.min(8.8, inst.targetDistance + e.deltaY * 0.004));
+      inst.targetDistance = Math.max(4.5, Math.min(8.0, inst.targetDistance + e.deltaY * 0.0035));
     };
 
     // Touch handlers for mobile
@@ -368,7 +312,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
         const dy = e.touches[0].clientY - e.touches[1].clientY;
         const dist = Math.sqrt(dx * dx + dy * dy);
         const diff = touchStartDist - dist;
-        inst.targetDistance = Math.max(4.8, Math.min(8.8, inst.targetDistance + diff * 0.01));
+        inst.targetDistance = Math.max(4.5, Math.min(8.0, inst.targetDistance + diff * 0.01));
         touchStartDist = dist;
       }
     };
@@ -385,7 +329,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     canvas.addEventListener('touchmove', onTouchMove, { passive: true });
     window.addEventListener('touchend', onTouchEnd);
 
-    // 8. Resize Observer
+    // 6. Resize Observer
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const w = entry.contentRect.width;
@@ -399,14 +343,14 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     });
     resizeObserver.observe(container);
 
-    // 9. Intersection Observer (pause rendering when scrolled out of view)
+    // 7. Intersection Observer (pause rendering when scrolled out of view)
     let isIntersecting = true;
     const intersectionObserver = new IntersectionObserver((entries) => {
       isIntersecting = entries[0].isIntersecting;
     });
     intersectionObserver.observe(container);
 
-    // 10. Animation Render Loop
+    // 8. Animation Render Loop
     let introDone = prefersReducedMotion;
     const renderLoop = () => {
       inst.animFrameId = requestAnimationFrame(renderLoop);
@@ -417,18 +361,17 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
       }
 
       const delta = Math.min(clock.getDelta(), 0.1);
-      const elapsedTime = clock.getElapsedTime();
 
-      // Intro progress calculation (2.5 seconds)
+      // Intro progress calculation (2.0 seconds)
       let curIntro = 1.0;
       if (!introDone) {
-        const elapsedIntro = (performance.now() - inst.introStartTime) / 2500;
+        const elapsedIntro = (performance.now() - inst.introStartTime) / 2000;
         curIntro = Math.min(1.0, elapsedIntro);
         setIntroProgress(curIntro);
         if (curIntro >= 1.0) {
           introDone = true;
           setIntroActive(false);
-          sessionStorage.setItem('sarraf_quantum_vortex_intro', 'true');
+          sessionStorage.setItem('sarraf_aurum_core_intro', 'true');
         }
       }
 
@@ -445,55 +388,16 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
       inst.rotVelX *= 0.92;
       inst.rotVelY *= 0.92;
 
-      // Smooth buy/sell ratio uniform
-      const targetRatio = feed.buyRatio / 100;
-      inst.buyRatioSmoothed += (targetRatio - inst.buyRatioSmoothed) * 0.08;
-
-      // Balanced logic (45-55%): breathe slowly
-      const dominance = Math.abs(inst.buyRatioSmoothed - 0.5) * 2.0; // 0.0 to 1.0
-      const targetSpeed = 1.0 + dominance * 0.8; // Up to 1.8x
-      inst.speedSmoothed += (targetSpeed - inst.speedSmoothed) * 0.05;
-
-      const targetTilt = (inst.buyRatioSmoothed > 0.5 ? 1 : -1) * dominance * 0.1396; // Max 8 degrees
-      inst.tiltSmoothed += (targetTilt - inst.tiltSmoothed) * 0.05;
-
-      const breathe = 1.0 + Math.sin(elapsedTime * 1.5) * (0.04 * (1.0 - dominance * 0.7));
-
-      // Update Vortex Uniforms
-      vortexMaterial.uniforms.uTime.value = elapsedTime;
-      vortexMaterial.uniforms.uBuyRatio.value = inst.buyRatioSmoothed;
-      vortexMaterial.uniforms.uDominance.value = dominance;
-      vortexMaterial.uniforms.uSpeed.value = inst.speedSmoothed;
-      vortexMaterial.uniforms.uTilt.value = inst.tiltSmoothed;
-      vortexMaterial.uniforms.uBreathe.value = breathe;
-      vortexMaterial.uniforms.uIntroProgress.value = curIntro;
-
-      // Update Phase 4 hooks in uniforms
-      if (phase4State.shockwaveActive) {
-        const waveProgress = (performance.now() - phase4State.shockwaveTime) / 1000;
-        vortexMaterial.uniforms.uShockwave.value = Math.min(1.0, waveProgress);
-      } else {
-        vortexMaterial.uniforms.uShockwave.value = 0.0;
-      }
-
-      if (phase4State.resultActive && phase4State.resultType === 'SL') {
-        const glitchProgress = (performance.now() - phase4State.resultTime) / 800;
-        vortexMaterial.uniforms.uGlitch.value = Math.max(0.0, 1.0 - glitchProgress);
-      } else {
-        vortexMaterial.uniforms.uGlitch.value = 0.0;
-      }
-
       // Update Subsystems
-      coreMesh.update(delta, curIntro, phase4State);
+      core.update(delta, curIntro, phase4State);
       candleRing.update(delta, curIntro);
-      tickBursts.update(delta);
 
       renderer.render(scene, camera);
     };
 
     renderLoop();
 
-    // 11. Cleanup on Unmount
+    // 9. Cleanup on Unmount
     return () => {
       cancelAnimationFrame(inst.animFrameId);
       resizeObserver.disconnect();
@@ -507,11 +411,8 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
       canvas.removeEventListener('touchmove', onTouchMove);
       window.removeEventListener('touchend', onTouchEnd);
 
-      vortexGeometry.dispose();
-      vortexMaterial.dispose();
-      coreMesh.dispose();
+      core.dispose();
       candleRing.dispose();
-      tickBursts.dispose();
       renderer.dispose();
       threeRef.current = null;
     };
@@ -577,7 +478,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
             <span className="text-xl font-bold text-[#22e08a]">{displayBuyRatio}%</span>
           </div>
           <div className="flex flex-col items-center">
-            <span className="text-[10px] text-[#f5c451]">XAU/USD CORE</span>
+            <span className="text-[10px] text-[#f5c451]">AURUM CRYSTAL CORE</span>
             <span className="text-2xl font-bold text-white">${feed.currentPrice.toFixed(2)}</span>
           </div>
           <div className="flex flex-col items-end">
@@ -610,7 +511,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
         </div>
       )}
 
-      {/* Intro Overlay with Tap to Skip (2.5s once per tab session) */}
+      {/* Intro Overlay with Tap to Skip (2.0s once per tab session) */}
       {introActive && (
         <div
           onClick={handleSkipIntro}
@@ -622,7 +523,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
             </div>
             <div className="space-y-0.5">
               <span className="text-[10px] font-mono tracking-[0.16em] uppercase text-[#f5c451] font-bold">
-                QUANTUM VORTEX INITIALIZING
+                AURUM CRYSTAL CORE INITIALIZING
               </span>
               <div className="text-xs font-mono text-[#8a96a8]">
                 Tap anywhere to skip
@@ -660,7 +561,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/50 backdrop-blur-md border border-[#f5c451]/30">
             <span className="w-1.5 h-1.5 rounded-full bg-[#f5c451] animate-pulse" />
             <span className="text-[9px] font-mono font-bold uppercase tracking-[0.14em] text-[#f5c451]">
-              QUANTUM VORTEX 3D
+              AURUM CRYSTAL CORE 3D
             </span>
           </div>
 
@@ -701,7 +602,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
           </div>
         </div>
 
-        {/* BOTTOM HUD: 6 CAMERA-FACING LABELS FROM REAL PANELS */}
+        {/* BOTTOM HUD: 6 CAMERA-FACING LABELS */}
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 sm:gap-1.5 pt-1">
           {hudBadges.map((badge) => (
             <div

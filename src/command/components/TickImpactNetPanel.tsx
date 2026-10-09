@@ -17,7 +17,7 @@ export const TickImpactNetPanel: React.FC<TickImpactNetPanelProps> = ({
   freshness,
 }) => {
   const currentBucket = minuteFlows[minuteFlows.length - 1];
-  const hasData = Boolean(currentBucket && (currentBucket.buyTicks + currentBucket.sellTicks > 0));
+  const hasData = Boolean(minuteFlows.length >= 5 && currentBucket && (currentBucket.buyTicks + currentBucket.sellTicks > 0));
   const currentImpact = currentBucket?.impactDollarsPerTick ?? 0;
   const maxImpact = Math.max(0.5, ...minuteFlows.map((b) => b.impactDollarsPerTick));
 
@@ -69,9 +69,9 @@ export const TickImpactNetPanel: React.FC<TickImpactNetPanelProps> = ({
 
           {/* 40px height bar histogram */}
           <div className="h-[40px] w-full bg-[#04060b] rounded px-1.5 flex items-end justify-between gap-[2px]">
-            {minuteFlows.length === 0 ? (
+            {minuteFlows.length < 5 ? (
               <div className="w-full h-full flex items-center justify-center text-[9px] text-[#8a96a8]">
-                collecting data...
+                collecting data ({minuteFlows.length}/5)...
               </div>
             ) : (
               minuteFlows.map((b, idx) => {

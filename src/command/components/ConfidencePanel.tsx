@@ -3,12 +3,14 @@ import { ConfidenceBreakdown } from '../data/commandTypes';
 
 interface ConfidencePanelProps {
   confidence: ConfidenceBreakdown;
+  signalConfidence?: number;
   isDimmed: boolean;
   freshness: string;
 }
 
 export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
   confidence,
+  signalConfidence,
   isDimmed,
   freshness,
 }) => {
@@ -22,7 +24,7 @@ export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
     { label: 'Liquidity', val: confidence.liquidity, dot: 'bg-[#22e08a]' },
     { label: 'Momentum', val: confidence.momentum, dot: 'bg-[#f5a524]' },
     { label: 'Sentiment', val: confidence.sentiment, dot: 'bg-[#38bdf8]' },
-    { label: 'Overall', val: confidence.overall, dot: 'bg-[#22e08a]' },
+    { label: 'Market Total', val: confidence.overall, dot: 'bg-[#22e08a]' },
   ];
 
   const hasData = confidence.overall > 0;
@@ -37,9 +39,16 @@ export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
 
       {/* Header */}
       <div className="flex items-center justify-between font-mono mb-2">
-        <span className="text-[10px] font-bold text-[#38bdf8] uppercase tracking-[0.12em]">
-          10. CONFIDENCE
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-bold text-[#38bdf8] uppercase tracking-[0.12em]">
+            10. MARKET CONFIDENCE
+          </span>
+          {typeof signalConfidence === 'number' && (
+            <span className="text-[9px] px-1 py-0.2 rounded bg-[#38bdf8]/10 text-[#38bdf8] border border-[#38bdf8]/30">
+              SIGNAL CONFIDENCE: {signalConfidence}%
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-1.5 text-[9px] text-[#8a96a8]">
           <span className="px-1 py-0.2 rounded bg-white/5 uppercase">ESTIMATED</span>
           <span>·</span>

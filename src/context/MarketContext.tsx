@@ -57,6 +57,7 @@ interface MarketContextType {
   macroEvents: MacroNewsEvent[];
   isLoggedIn: boolean;
   user: UserSession | null;
+  adminConfigured: boolean;
   isLoginModalOpen: boolean;
   isTunnelActive: boolean;
   openLoginModal: () => void;
@@ -72,9 +73,9 @@ const INITIAL_PRICE_STATE: PriceTick = {
   ask: 4165.65,
   spread: 0.3,
   open24h: 4158.0,
-  previousClose: 4155.0,
-  change24h: 10.5,
-  changePercent24h: 0.25,
+  previousClose: null,
+  change24h: 0,
+  changePercent24h: 0,
   high24h: 4182.2,
   low24h: 4148.8,
   direction: 'flat',
@@ -156,6 +157,7 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [priceData, setPriceData] = useState<PriceTick>(INITIAL_PRICE_STATE);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [user, setUser] = useState<UserSession | null>(null);
+  const [adminConfigured, setAdminConfigured] = useState(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isTunnelActive, setIsTunnelActive] = useState(false);
 
@@ -168,6 +170,9 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         const res = await fetch('/api/auth/me', { headers, credentials: 'include' });
         if (res.ok) {
           const data = await res.json();
+          if (typeof data.configured === 'boolean') {
+            setAdminConfigured(data.configured);
+          }
           if (data.authenticated && data.user) {
             setUser(data.user);
             setIsLoggedIn(true);
@@ -343,6 +348,7 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         macroEvents: MACRO_EVENTS,
         isLoggedIn,
         user,
+        adminConfigured,
         isLoginModalOpen,
         isTunnelActive,
         openLoginModal,

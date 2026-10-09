@@ -127,12 +127,14 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
     if (currentPrice > prevD1.high || (isAboveMid && lastBullishMove)) {
       g1Status = 'PASS';
       g1Dir = 'BUY';
-      d1KeyLevel = d1SwingLow + (d1SwingHigh - d1SwingLow) * 0.382;
+      // Demand zone must be strictly below current price
+      d1KeyLevel = Math.min(currentPrice - 2.0, d1SwingLow + (d1SwingHigh - d1SwingLow) * 0.382);
       g1Reason = `D1 Bullish structure above $${d1KeyLevel.toFixed(1)} demand zone`;
     } else if (currentPrice < prevD1.low || (!isAboveMid && !lastBullishMove)) {
       g1Status = 'PASS';
       g1Dir = 'SELL';
-      d1KeyLevel = d1SwingHigh - (d1SwingHigh - d1SwingLow) * 0.382;
+      // Supply zone must be strictly above current price
+      d1KeyLevel = Math.max(currentPrice + 2.0, d1SwingHigh - (d1SwingHigh - d1SwingLow) * 0.382);
       g1Reason = `D1 Bearish structure below $${d1KeyLevel.toFixed(1)} supply zone`;
     } else {
       g1Status = 'FAIL';

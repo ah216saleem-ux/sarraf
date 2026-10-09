@@ -1,18 +1,36 @@
 import React from 'react';
-import { CommandSignalLogEntry, SignalEngineStats } from './types';
+import { CommandSignalLogEntry, SignalEngineStats, TelegramCommandStatus } from './types';
 import { ArrowUpRight, ArrowDownRight, CheckCircle2, XCircle, TrendingUp, DollarSign, Award, Layers } from 'lucide-react';
 
 interface SignalLogCardProps {
   history: CommandSignalLogEntry[];
   stats: SignalEngineStats;
   paperMode: boolean;
+  telegramStatus?: TelegramCommandStatus;
 }
 
 export const SignalLogCard: React.FC<SignalLogCardProps> = ({
   history,
   stats,
   paperMode,
+  telegramStatus,
 }) => {
+  // Requirement 10: Win rate only from TP/SL, exclude MANUAL exits, show "Not enough data" until 20 TP/SL exist
+  const tpSlCount = stats.winsCount + stats.lossesCount;
+  const hasEnoughData = tpSlCount >= 20;
+
+  let telegramStatusText = 'Telegram Dispatch: Disabled';
+  if (telegramStatus) {
+    if (!telegramStatus.configured) {
+      telegramStatusText = 'Telegram Dispatch: Not configured';
+    } else if (telegramStatus.hasFailed || telegramStatus.status === 'FAILED') {
+      telegramStatusText = 'Telegram Dispatch: Failed';
+    } else if (telegramStatus.enabled) {
+      telegramStatusText = 'Telegram Dispatch: Connected';
+    } else {
+      telegramStatusText = 'Telegram Dispatch: Disabled';
+    }
+  }
   return (
     <div className="relative rounded-lg bg-[#070b14] border border-[#38bdf8]/20 px-3.5 py-3 flex flex-col justify-between overflow-hidden shadow-lg select-none font-mono">
       {/* Top subtle glow bar */}
@@ -53,9 +71,9 @@ export const SignalLogCard: React.FC<SignalLogCardProps> = ({
             <Award className="w-3.5 h-3.5" />
           </div>
           <div>
-            <span className="text-[8px] text-[#8a96a8] uppercase font-bold">WIN RATE</span>
-            <div className={`text-xs font-bold ${stats.winRate >= 50 ? 'text-[#22e08a]' : stats.totalSignals > 0 ? 'text-[#ff3b6b]' : 'text-white'}`}>
-              {stats.totalSignals > 0 ? `${stats.winRate.toFixed(1)}%` : '0.0%'}
+            <span className="text-[8px] text-[#8a96a8] uppercase font-bold">WIN RATE (TP/SL)</span>
+            <div className={`text-xs font-bold ${hasEnoughData ? (stats.winRate >= 50 ? 'text-[#22e08a]' : 'text-[#ff3b6b]') : 'text-[#8a96a8]'}`}>
+              {hasEnoughData ? `${stats.winRate.toFixed(1)}%` : `Not enough data (${tpSlCount}/20)`}
             </div>
           </div>
         </div>
@@ -184,7 +202,7 @@ export const SignalLogCard: React.FC<SignalLogCardProps> = ({
       {/* Footer */}
       <div className="pt-2 border-t border-white/5 flex items-center justify-between text-[8px] text-[#8a96a8]">
         <span>Institutional Verification: Only real closed signals logged</span>
-        <span>Telegram Dispatch: Disabled (Phase 4 Paper Mode)</span>
+        <span>{telegramStatusText}</span>
       </div>
     </div>
   );

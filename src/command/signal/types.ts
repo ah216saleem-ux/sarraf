@@ -52,6 +52,7 @@ export interface CommandSignal {
   livePnL: number;
   realizedPnL?: number;
   isPaper: boolean;
+  isTest?: boolean;
   confidence: number;
   gatesPassedCount: number;
   entryReason: string;
@@ -68,6 +69,7 @@ export interface CommandSignalLogEntry {
   result: SignalCloseReason;
   pnlDollars: number;
   isPaper: boolean;
+  isTest?: boolean;
 }
 
 export interface SignalEngineStats {

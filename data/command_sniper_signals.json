@@ -1,9 +1,48 @@
 {
   "lifecycle": "WAIT",
-  "activeSignal": null,
+  "activeSignal": {
+    "id": "SIG-1791560197216",
+    "side": "BUY",
+    "entry": 4191.68,
+    "sl": 4181.68,
+    "tp1": 4196.68,
+    "tp2": 4199.68,
+    "tp3": 4203.68,
+    "tp1Hit": false,
+    "tp2Hit": false,
+    "tp3Hit": false,
+    "slHit": false,
+    "hitTargets": [],
+    "createdAt": 1791560197216,
+    "livePnL": 1.63,
+    "isPaper": false,
+    "confidence": 78,
+    "gatesPassedCount": 8,
+    "entryReason": "8/8 Ahmed Sniper Chain alignment (BUY) · Entry $4191.68 · Path +$12.0 clear",
+    "sentMessageFlags": {
+      "issued": true,
+      "tp1": false,
+      "tp2": false,
+      "tp3": false,
+      "sl": false,
+      "manual": false,
+      "cooldown": false
+    }
+  },
   "cooldownEndsAt": null,
   "paperMode": false,
   "history": [
+    {
+      "id": "SIG-1791559870457",
+      "timestamp": 1791559871426,
+      "timeStr": "15:31:11",
+      "side": "BUY",
+      "entry": 4122.45,
+      "closePrice": 4189.54,
+      "result": "TP3",
+      "pnlDollars": 12,
+      "isPaper": false
+    },
     {
       "id": "SIG-1791503721944",
       "timestamp": 1791506046086,
@@ -27,5 +66,5 @@
       "isPaper": true
     }
   ],
-  "lastEvaluatedAt": 1791506045699
+  "lastEvaluatedAt": 1791562047490
 }
