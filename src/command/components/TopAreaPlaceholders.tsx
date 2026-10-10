@@ -22,8 +22,11 @@ export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
 
   return (
     <div className={`space-y-2 transition-opacity duration-300 ${isDimmed ? 'opacity-40' : 'opacity-100'}`}>
-      {/* Phase 2 Quantum Vortex 3D Core with Live HUD & Phase 4 Trigger Hooks */}
-      <QuantumVortex onRegisterHooks={signalEngine.registerVortexHooks} />
+      {/* Flow Rivers 3D Core with Live HUD & Phase 4 Trigger Hooks */}
+      <QuantumVortex
+        onRegisterHooks={signalEngine.registerVortexHooks}
+        signalEngine={signalEngine}
+      />
 
       {/* 2-Column Responsive Row: DECISION & AHMED SNIPER CHAIN */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-2">

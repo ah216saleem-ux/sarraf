@@ -292,7 +292,7 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password: pass }),
+      body: JSON.stringify({ email, username: email, password: pass }),
       credentials: 'include',
     });
 

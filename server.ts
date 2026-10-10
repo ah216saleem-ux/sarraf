@@ -1737,9 +1737,10 @@ app.post('/api/auth/login', (req, res) => {
     });
   }
 
-  const { email, password } = req.body || {};
+  const { email, username, password } = req.body || {};
+  const loginUser = String(username || email || '').trim();
 
-  if (!email || !password) {
+  if (!loginUser || !password) {
     return res.status(400).json({
       success: false,
       error: 'Username/email and password are required.',
@@ -1747,7 +1748,7 @@ app.post('/api/auth/login', (req, res) => {
   }
 
   // 3) Constant-time credentials check (never prints credentials)
-  const isValid = verifyAdminCredentials(email, password);
+  const isValid = verifyAdminCredentials(loginUser, password);
 
   if (isValid) {
     // Reset rate limit on successful authentication
@@ -1761,7 +1762,7 @@ app.post('/api/auth/login', (req, res) => {
 
     const token = crypto.randomBytes(32).toString('hex');
     const userPayload = {
-      email: email.trim().toLowerCase(),
+      email: loginUser.toLowerCase(),
       accountType: 'Institutional Desk',
       terminalId: `SRF-${crypto.randomInt(1000, 9999)}-XAU`,
       role: 'admin',

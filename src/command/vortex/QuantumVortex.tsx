@@ -1,931 +1,846 @@
-import React, { useEffect, useRef, useState, useImperativeHandle, forwardRef, useCallback } from 'react';
-import * as THREE from 'three';
+import React, {
+  useEffect,
+  useRef,
+  useState,
+  useImperativeHandle,
+  forwardRef,
+  useCallback,
+  useMemo,
+} from 'react';
 import { useCommandFeed } from '../data/useCommandFeed';
-import { MarketScanVisualizer, ScanLabelAnchor, DiscAnchor } from './MarketScanVisualizer';
-import { WaveformSpectrumPanel } from './WaveformSpectrumPanel';
-import { QuantumVortexProps, QuantumVortexHooks, Phase4State } from './types';
-import { Activity, Zap } from 'lucide-react';
+import { commandStore } from '../data/commandFeedStore';
+import {
+  QuantumVortexProps,
+  QuantumVortexHooks,
+  GateArcState,
+} from './types';
+import {
+  FlowRiversVisualizer,
+  FloatingLabelProjection,
+} from './FlowRiversVisualizer';
+import { useCommandSignal } from '../signal/useCommandSignal';
+import { Play, Pause, RotateCcw } from 'lucide-react';
 
-export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(({
-  className = '',
-  onRegisterHooks,
-}, ref) => {
-  const feed = useCommandFeed();
+export const AHMED_GATES_ORDER = [
+  { id: 'gate_1', name: 'HTF Trend Bias', shortName: 'HTF', timeframe: 'H4/H1' },
+  { id: 'gate_2', name: 'Liquidity Sweep', shortName: 'SWP', timeframe: 'M15' },
+  { id: 'gate_3', name: 'Structural Shift (MSS)', shortName: 'MSS', timeframe: 'M15' },
+  { id: 'gate_4', name: 'Order Block (OB)', shortName: 'OB', timeframe: 'M15' },
+  { id: 'gate_5', name: 'Fair Value Gap (FVG)', shortName: 'FVG', timeframe: 'M5' },
+  { id: 'gate_6', name: 'Momentum Alignment', shortName: 'MOM', timeframe: 'M5' },
+  { id: 'gate_7', name: 'Tick Volume Surge', shortName: 'VOL', timeframe: 'M1' },
+  { id: 'gate_8', name: 'BiQuote Spread & Execution', shortName: 'EXE', timeframe: 'M1' },
+];
 
-  // Container & Canvas references
-  const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
+  ({ className = '', onRegisterHooks, variant = 'command', signalEngine: externalSignalEngine }, ref) => {
+    const feed = useCommandFeed();
+    const internalSignal = useCommandSignal();
+    const signalEngine = externalSignalEngine || internalSignal;
 
-  // WebGL availability state
-  const [webglAvailable, setWebglAvailable] = useState<boolean>(true);
+    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    const containerRef = useRef<HTMLDivElement | null>(null);
+    const visualizerRef = useRef<FlowRiversVisualizer | null>(null);
 
-  // Reduced motion preference
-  const prefersReducedMotion = typeof window !== 'undefined'
-    ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    : false;
-
-  // LITE Mode (stored in localStorage inside try/catch)
-  const [isLite, setIsLite] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    try {
-      const stored = localStorage.getItem('sarraf_market_scan_lite');
-      return stored === 'true';
-    } catch {
+    // Lite Mode State (persisted in localStorage)
+    const [isLite, setIsLite] = useState<boolean>(() => {
+      if (typeof window !== 'undefined') {
+        return localStorage.getItem('sarraf_vortex_lite') === 'true';
+      }
       return false;
-    }
-  });
-
-  const toggleLite = useCallback(() => {
-    setIsLite((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem('sarraf_market_scan_lite', String(next));
-      } catch {
-        // ignore
-      }
-      return next;
     });
-  }, []);
 
-  // Intro state (2.5s once per tab session)
-  const [introActive, setIntroActive] = useState<boolean>(() => {
-    if (typeof window === 'undefined' || prefersReducedMotion) return false;
-    const played = sessionStorage.getItem('sarraf_market_scan_intro');
-    return !played;
-  });
-  const [introProgress, setIntroProgress] = useState<number>(prefersReducedMotion ? 1.0 : 0.0);
-
-  // Smooth number tweens for HUD BUY FLOW & SELL FLOW
-  const [displayBuyRatio, setDisplayBuyRatio] = useState<number>(feed.buyRatio);
-  const [displaySellRatio, setDisplaySellRatio] = useState<number>(feed.sellRatio);
-
-  // Flash color state for central live price under sculpture
-  const [priceFlash, setPriceFlash] = useState<'UP' | 'DOWN' | 'NONE'>('NONE');
-  const prevPriceRef = useRef<number>(feed.currentPrice);
-
-  // Projected 6 scan labels with connector lines and numbers (Requirement 3)
-  interface ProjectedScanLabel {
-    id: string;
-    numId: string;
-    label: string;
-    value: string;
-    color: string;
-    glow: string;
-    nodeX: number;
-    nodeY: number;
-    labelX: number;
-    labelY: number;
-    visible: boolean;
-    opacity: number;
-  }
-  const [projectedLabels, setProjectedLabels] = useState<ProjectedScanLabel[]>([]);
-
-  // Projected S/R and Zone Discs at real price heights
-  interface ProjectedDiscLabel {
-    id: string;
-    label: string;
-    price: number;
-    x: number;
-    y: number;
-    visible: boolean;
-    color: string;
-  }
-  const [projectedDiscs, setProjectedDiscs] = useState<ProjectedDiscLabel[]>([]);
-
-  const lastAnchorUpdateTimeRef = useRef<number>(0);
-  const feedRef = useRef(feed);
-  useEffect(() => {
-    feedRef.current = feed;
-  }, [feed]);
-
-  // Phase 4 Hook State
-  const [phase4State, setPhase4State] = useState<Phase4State>({
-    shockwaveActive: false,
-    shockwaveTime: 0,
-    shockwaveSide: 'BUY',
-    resultActive: false,
-    resultTime: 0,
-    resultType: 'TP',
-    cooldownSeconds: 0,
-  });
-
-  // Three.js instances ref
-  const threeRef = useRef<{
-    scene: THREE.Scene;
-    camera: THREE.PerspectiveCamera;
-    renderer: THREE.WebGLRenderer;
-    scan: MarketScanVisualizer;
-    animFrameId: number;
-    clock: THREE.Clock;
-    isDragging: boolean;
-    dragStartX: number;
-    dragStartY: number;
-    rotVelX: number;
-    rotVelY: number;
-    targetDistance: number;
-    currentDistance: number;
-    introStartTime: number;
-    fpsCounter: number;
-    lastFpsCheck: number;
-    lowFpsDuration: number;
-  } | null>(null);
-
-  // Phase 4 Hook Definitions
-  const triggerSignal = useCallback((side: 'BUY' | 'SELL') => {
-    setPhase4State((prev) => ({
-      ...prev,
-      shockwaveActive: true,
-      shockwaveTime: performance.now(),
-      shockwaveSide: side,
-    }));
-    threeRef.current?.scan.triggerSignal(side);
-  }, []);
-
-  const triggerResult = useCallback((result: 'TP' | 'SL') => {
-    setPhase4State((prev) => ({
-      ...prev,
-      resultActive: true,
-      resultTime: performance.now(),
-      resultType: result,
-    }));
-    threeRef.current?.scan.triggerResult(result);
-  }, []);
-
-  const setCooldown = useCallback((secondsLeft: number) => {
-    setPhase4State((prev) => ({
-      ...prev,
-      cooldownSeconds: secondsLeft,
-    }));
-    threeRef.current?.scan.setCooldown(secondsLeft);
-  }, []);
-
-  // Expose imperative hooks
-  useImperativeHandle(ref, () => ({
-    triggerSignal,
-    triggerResult,
-    setCooldown,
-  }), [triggerSignal, triggerResult, setCooldown]);
-
-  useEffect(() => {
-    if (onRegisterHooks) {
-      onRegisterHooks({ triggerSignal, triggerResult, setCooldown });
-    }
-  }, [onRegisterHooks, triggerSignal, triggerResult, setCooldown]);
-
-  // Skip Intro Handler
-  const handleSkipIntro = () => {
-    setIntroActive(false);
-    setIntroProgress(1.0);
-    sessionStorage.setItem('sarraf_market_scan_intro', 'true');
-  };
-
-  // Sync LITE mode to MarketScanVisualizer
-  useEffect(() => {
-    if (threeRef.current) {
-      threeRef.current.scan.setLiteMode(isLite);
-    }
-  }, [isLite]);
-
-  // Real Tick Pulse: bright scan pulse traveling along tube from newest to oldest
-  useEffect(() => {
-    if (feed.currentPrice > 0 && prevPriceRef.current > 0 && feed.currentPrice !== prevPriceRef.current) {
-      const isUp = feed.currentPrice > prevPriceRef.current || feed.tickDirection === 'BUY';
-      setPriceFlash(isUp ? 'UP' : 'DOWN');
-
-      const delta = feed.currentPrice - prevPriceRef.current;
-      threeRef.current?.scan.triggerTickPulse({
-        direction: feed.tickDirection,
-        delta,
+    const toggleLite = useCallback(() => {
+      setIsLite((prev) => {
+        const next = !prev;
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('sarraf_vortex_lite', String(next));
+        }
+        visualizerRef.current?.setLiteMode(next);
+        return next;
       });
+    }, []);
 
+    // Prefers reduced motion
+    const reducedMotion = useMemo(() => {
+      if (typeof window !== 'undefined') {
+        return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      }
+      return false;
+    }, []);
+
+    // 2s Intro Animation (tap to skip)
+    const [isIntroRunning, setIsIntroRunning] = useState<boolean>(() => !reducedMotion);
+    const skipIntro = useCallback(() => {
+      setIsIntroRunning(false);
+      visualizerRef.current?.skipIntro();
+    }, []);
+
+    useEffect(() => {
+      if (reducedMotion) {
+        setIsIntroRunning(false);
+        return;
+      }
       const timer = setTimeout(() => {
-        setPriceFlash('NONE');
-      }, 350);
-      prevPriceRef.current = feed.currentPrice;
+        setIsIntroRunning(false);
+      }, 2000);
       return () => clearTimeout(timer);
-    }
-    prevPriceRef.current = feed.currentPrice;
-  }, [feed.currentPrice, feed.tickDirection]);
+    }, [reducedMotion]);
 
-  // Smooth tween for HUD ratios
-  useEffect(() => {
-    let animId: number;
-    const step = () => {
-      setDisplayBuyRatio((prev) => {
-        const diff = feed.buyRatio - prev;
-        return Math.abs(diff) < 0.1 ? feed.buyRatio : Number((prev + diff * 0.12).toFixed(1));
+    // Replay Mode State (for when market is closed or user engages replay)
+    const isMarketClosed = feed.connection.status === 'MARKET_CLOSED' || !feed.connection.isLive;
+    const [userReplayActive, setUserReplayActive] = useState<boolean>(false);
+    const [isReplayPlaying, setIsReplayPlaying] = useState<boolean>(true);
+    const [replayCursor, setReplayCursor] = useState<number>(0);
+
+    const isReplayMode = isMarketClosed || userReplayActive;
+
+    // Cooldown state
+    const [cooldownSec, setCooldownSec] = useState<number>(0);
+    useEffect(() => {
+      if (cooldownSec <= 0) return;
+      const interval = setInterval(() => {
+        setCooldownSec((s) => Math.max(0, s - 1));
+      }, 1000);
+      return () => clearInterval(interval);
+    }, [cooldownSec]);
+
+    // Active tooltip gate
+    const [activeGateTooltip, setActiveGateTooltip] = useState<GateArcState | null>(null);
+
+    // Dynamic screen overlay positions from 3D projection
+    const [labels, setLabels] = useState<FloatingLabelProjection[]>([]);
+    const [priceHead, setPriceHead] = useState<{
+      x: number;
+      y: number;
+      price: number;
+      direction: 'BUY' | 'SELL' | 'FLAT';
+    }>({
+      x: 0,
+      y: 0,
+      price: feed.currentPrice || 0,
+      direction: 'FLAT',
+    });
+
+    // Rolling Price History (Last 300 ticks or 120 M1 closes)
+    const rollingPriceHistoryRef = useRef<number[]>([]);
+
+    // Expose Hooks for Signal Manager (Section A.6)
+    useImperativeHandle(
+      ref,
+      () => ({
+        triggerSignal: (side: 'BUY' | 'SELL') => {
+          visualizerRef.current?.triggerSignal(side);
+        },
+        triggerResult: (result: 'TP' | 'SL') => {
+          visualizerRef.current?.triggerResult(result);
+        },
+        setCooldown: (secondsLeft: number) => {
+          setCooldownSec(secondsLeft);
+          visualizerRef.current?.setCooldown(secondsLeft);
+        },
+      }),
+      []
+    );
+
+    useEffect(() => {
+      if (onRegisterHooks) {
+        onRegisterHooks({
+          triggerSignal: (side: 'BUY' | 'SELL') => {
+            visualizerRef.current?.triggerSignal(side);
+          },
+          triggerResult: (result: 'TP' | 'SL') => {
+            visualizerRef.current?.triggerResult(result);
+          },
+          setCooldown: (secondsLeft: number) => {
+            setCooldownSec(secondsLeft);
+            visualizerRef.current?.setCooldown(secondsLeft);
+          },
+        });
+      }
+    }, [onRegisterHooks]);
+
+    // Initialize FlowRiversVisualizer Three.js Scene
+    useEffect(() => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+
+      const visualizer = new FlowRiversVisualizer({
+        canvas,
+        isLite,
+        reducedMotion,
+        variant,
       });
-      setDisplaySellRatio((prev) => {
-        const diff = feed.sellRatio - prev;
-        return Math.abs(diff) < 0.1 ? feed.sellRatio : Number((prev + diff * 0.12).toFixed(1));
-      });
-      animId = requestAnimationFrame(step);
-    };
-    animId = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(animId);
-  }, [feed.buyRatio, feed.sellRatio]);
 
-  // Update Price Sculpture with real candles (Requirement 1: real data only)
-  useEffect(() => {
-    if (threeRef.current && feed.candles.length > 0) {
-      const supZone = feed.liquidityZones.find((z) => z.type === 'SUPPORT');
-      const resZone = feed.liquidityZones.find((z) => z.type === 'RESISTANCE');
-      const supportLevel = supZone?.mid || feed.low24h || 0;
-      const resistanceLevel = resZone?.mid || feed.high24h || 0;
+      visualizer.onLabelsUpdate = (newLabels) => {
+        setLabels(newLabels);
+      };
 
-      threeRef.current.scan.updateCandles(
-        feed.candles,
-        feed.currentPrice,
-        supportLevel,
-        resistanceLevel,
-        feed.absorptionBuyZones,
-        feed.absorptionSellZones,
-        feed.originLevels
-      );
-    }
-  }, [
-    feed.candles,
-    feed.currentPrice,
-    feed.liquidityZones,
-    feed.low24h,
-    feed.high24h,
-    feed.absorptionBuyZones,
-    feed.absorptionSellZones,
-    feed.originLevels,
-  ]);
+      visualizer.onPriceHeadUpdate = (x, y, p, dir) => {
+        setPriceHead({ x, y, price: p, direction: dir });
+      };
 
-  // Main Three.js Lifecycle
-  useEffect(() => {
-    const container = containerRef.current;
-    const canvas = canvasRef.current;
-    if (!container || !canvas) return;
+      visualizerRef.current = visualizer;
 
-    // Check WebGL support
-    try {
-      const testCanvas = document.createElement('canvas');
-      const gl = testCanvas.getContext('webgl2') || testCanvas.getContext('webgl');
-      if (!gl) {
-        setWebglAvailable(false);
-        return;
-      }
-    } catch {
-      setWebglAvailable(false);
-      return;
-    }
+      const handleResize = () => {
+        visualizer.handleResize();
+      };
+      window.addEventListener('resize', handleResize);
 
-    const width = container.clientWidth || 360;
-    const height = Math.max(240, (container.clientHeight || 320) - 80);
-
-    const isMobile = window.innerWidth <= 768 || 'ontouchstart' in window;
-    // Cap DPR to 1.5 as per performance specification
-    const maxDpr = Math.min(window.devicePixelRatio || 1, 1.5);
-
-    // 1. Scene & Camera
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#04060b');
-
-    const camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 100);
-    camera.position.set(0, 0.7, 6.2);
-    camera.lookAt(0, 0, 0);
-
-    // 2. Renderer with ACESFilmic tone mapping, 0.9 exposure, sRGB encoding
-    const renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: !isMobile && !isLite,
-      alpha: false,
-      powerPreference: 'high-performance',
-    });
-    renderer.setSize(width, height);
-    renderer.setPixelRatio(maxDpr);
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 0.9;
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-
-    // 3. MARKET SCAN 3D Point-Cloud Visualizer
-    const scan = new MarketScanVisualizer(isMobile, isLite);
-    scene.add(scan.group);
-
-    // State container
-    const clock = new THREE.Clock();
-    const inst = {
-      scene,
-      camera,
-      renderer,
-      scan,
-      animFrameId: 0,
-      clock,
-      isDragging: false,
-      dragStartX: 0,
-      dragStartY: 0,
-      rotVelX: 0,
-      rotVelY: 0,
-      targetDistance: 6.2,
-      currentDistance: 6.2,
-      introStartTime: performance.now(),
-      fpsCounter: 0,
-      lastFpsCheck: performance.now(),
-      lowFpsDuration: 0,
-    };
-    threeRef.current = inst;
-
-    // Load initial real candles if already available
-    if (feed.candles.length > 0) {
-      const supZone = feed.liquidityZones.find((z) => z.type === 'SUPPORT');
-      const resZone = feed.liquidityZones.find((z) => z.type === 'RESISTANCE');
-      const supportLevel = supZone?.mid || feed.low24h || 0;
-      const resistanceLevel = resZone?.mid || feed.high24h || 0;
-
-      scan.updateCandles(
-        feed.candles,
-        feed.currentPrice,
-        supportLevel,
-        resistanceLevel,
-        feed.absorptionBuyZones,
-        feed.absorptionSellZones,
-        feed.originLevels
-      );
-    }
-
-    // 4. Mouse & Touch Interaction (drag-to-rotate with inertia, pinch/scroll zoom limited)
-    const onMouseDown = (e: MouseEvent) => {
-      inst.isDragging = true;
-      inst.dragStartX = e.clientX;
-      inst.dragStartY = e.clientY;
-    };
-
-    const onMouseMove = (e: MouseEvent) => {
-      if (!inst.isDragging) return;
-      const dx = e.clientX - inst.dragStartX;
-      const dy = e.clientY - inst.dragStartY;
-      inst.dragStartX = e.clientX;
-      inst.dragStartY = e.clientY;
-
-      inst.rotVelY += dx * 0.0035;
-      inst.rotVelX += dy * 0.0035;
-    };
-
-    const onMouseUp = () => {
-      inst.isDragging = false;
-    };
-
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      inst.targetDistance = Math.max(4.6, Math.min(8.0, inst.targetDistance + e.deltaY * 0.0035));
-    };
-
-    // Touch handlers for mobile
-    let touchStartDist = 0;
-    const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length === 1) {
-        inst.isDragging = true;
-        inst.dragStartX = e.touches[0].clientX;
-        inst.dragStartY = e.touches[0].clientY;
-      } else if (e.touches.length === 2) {
-        inst.isDragging = false;
-        const dx = e.touches[0].clientX - e.touches[1].clientX;
-        const dy = e.touches[0].clientY - e.touches[1].clientY;
-        touchStartDist = Math.sqrt(dx * dx + dy * dy);
-      }
-    };
-
-    const onTouchMove = (e: TouchEvent) => {
-      if (e.touches.length === 1 && inst.isDragging) {
-        const dx = e.touches[0].clientX - inst.dragStartX;
-        const dy = e.touches[0].clientY - inst.dragStartY;
-        inst.dragStartX = e.touches[0].clientX;
-        inst.dragStartY = e.touches[0].clientY;
-
-        inst.rotVelY += dx * 0.004;
-        inst.rotVelX += dy * 0.004;
-      } else if (e.touches.length === 2) {
-        const dx = e.touches[0].clientX - e.touches[1].clientX;
-        const dy = e.touches[0].clientY - e.touches[1].clientY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const diff = touchStartDist - dist;
-        inst.targetDistance = Math.max(4.6, Math.min(8.0, inst.targetDistance + diff * 0.01));
-        touchStartDist = dist;
-      }
-    };
-
-    const onTouchEnd = () => {
-      inst.isDragging = false;
-    };
-
-    canvas.addEventListener('mousedown', onMouseDown);
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-    canvas.addEventListener('wheel', onWheel, { passive: false });
-    canvas.addEventListener('touchstart', onTouchStart, { passive: true });
-    canvas.addEventListener('touchmove', onTouchMove, { passive: true });
-    window.addEventListener('touchend', onTouchEnd);
-
-    // 5. Resize Observer
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const w = entry.contentRect.width;
-        const h = Math.max(200, entry.contentRect.height - 80);
-        if (w > 0 && h > 0) {
-          camera.aspect = w / h;
-          camera.updateProjectionMatrix();
-          renderer.setSize(w, h);
-        }
-      }
-    });
-    resizeObserver.observe(container);
-
-    // 6. Intersection Observer (pause rendering when off-screen)
-    let isIntersecting = true;
-    const intersectionObserver = new IntersectionObserver((entries) => {
-      isIntersecting = entries[0].isIntersecting;
-    });
-    intersectionObserver.observe(container);
-
-    // 7. Animation Render Loop
-    let introDone = prefersReducedMotion;
-    const renderLoop = () => {
-      inst.animFrameId = requestAnimationFrame(renderLoop);
-
-      // Skip render if tab hidden or off-screen
-      if (document.visibilityState === 'hidden' || !isIntersecting) {
-        return;
-      }
-
-      const delta = Math.min(clock.getDelta(), 0.1);
-
-      // Auto-enable LITE if frame rate stays under 30fps for 3 seconds
-      inst.fpsCounter++;
-      const nowTime = performance.now();
-      if (nowTime - inst.lastFpsCheck >= 1000) {
-        const fps = (inst.fpsCounter * 1000) / (nowTime - inst.lastFpsCheck);
-        inst.fpsCounter = 0;
-        inst.lastFpsCheck = nowTime;
-        if (fps < 30) {
-          inst.lowFpsDuration += 1;
-          if (inst.lowFpsDuration >= 3 && !isLite) {
-            setIsLite(true);
-            try {
-              localStorage.setItem('sarraf_market_scan_lite', 'true');
-            } catch {
-              // ignore
+      // Intersection Observer to pause rendering when offscreen
+      let observer: IntersectionObserver | null = null;
+      if (typeof IntersectionObserver !== 'undefined' && containerRef.current) {
+        observer = new IntersectionObserver(
+          (entries) => {
+            const entry = entries[0];
+            if (visualizerRef.current) {
+              (visualizerRef.current as any).isPaused = !entry.isIntersecting;
             }
+          },
+          { threshold: 0.1 }
+        );
+        observer.observe(containerRef.current);
+      }
+
+      return () => {
+        window.removeEventListener('resize', handleResize);
+        observer?.disconnect();
+        visualizer.destroy();
+        visualizerRef.current = null;
+      };
+    }, [isLite, reducedMotion, variant]);
+
+    // Replay Mode Simulation Loop
+    useEffect(() => {
+      if (!isReplayMode || !isReplayPlaying) return;
+
+      // Extract historical seed points from candles or sparkline
+      const candlePrices: number[] = [];
+      if (commandStore.candles?.M1?.length) {
+        for (const c of commandStore.candles.M1) {
+          candlePrices.push(c.close);
+        }
+      } else if (feed.candles?.length) {
+        for (const c of feed.candles) {
+          candlePrices.push(c.close);
+        }
+      } else if (feed.sparkline?.length) {
+        candlePrices.push(...feed.sparkline);
+      }
+
+      if (candlePrices.length === 0) return;
+
+      const replayInterval = setInterval(() => {
+        setReplayCursor((prev) => {
+          const next = (prev + 1) % candlePrices.length;
+          const currentPrice = candlePrices[next];
+          const prevPrice = candlePrices[(next - 1 + candlePrices.length) % candlePrices.length];
+          const delta = Number((currentPrice - prevPrice).toFixed(2));
+
+          // Feed into visualizer
+          if (visualizerRef.current) {
+            const historySlice = candlePrices.slice(Math.max(0, next - 200), next + 1);
+            visualizerRef.current.updateData({
+              currentPrice,
+              previousPrice: prevPrice,
+              bid: currentPrice - 0.15,
+              ask: currentPrice + 0.15,
+              spread: 0.3,
+              buyRatio: delta > 0 ? 62 : delta < 0 ? 38 : 50,
+              sellRatio: delta > 0 ? 38 : delta < 0 ? 62 : 50,
+              ticksPerMin: 85,
+              tickDirection: delta > 0 ? 'BUY' : delta < 0 ? 'SELL' : 'FLAT',
+              tickDelta: delta,
+              priceHistory: historySlice.length > 10 ? historySlice : candlePrices.slice(0, 50),
+              nearestSupport: currentPrice - 3.5,
+              nearestResistance: currentPrice + 3.5,
+              pocPrice: currentPrice - 1.2,
+              absorptionPrice: currentPrice - 2.8,
+              fvgPrice: currentPrice + 1.8,
+              activeSignal: null,
+              isMarketClosed: true,
+              isReplay: true,
+            });
           }
-        } else {
-          inst.lowFpsDuration = 0;
+
+          return next;
+        });
+      }, 800);
+
+      return () => clearInterval(replayInterval);
+    }, [isReplayMode, isReplayPlaying, feed.candles, feed.sparkline]);
+
+    // Live Feed & Signal Engine Data Pipeline
+    useEffect(() => {
+      if (isReplayMode) return; // Replay loop handles closed state
+      if (!visualizerRef.current) return;
+
+      const price = feed.currentPrice;
+      if (price <= 0) return;
+
+      // Maintain rolling history of last 300 ticks
+      const hist = rollingPriceHistoryRef.current;
+      hist.push(price);
+      if (hist.length > 300) hist.shift();
+
+      // If history is small, backfill with M1 closes
+      let completeHistory = [...hist];
+      if (completeHistory.length < 20 && commandStore.candles?.M1?.length) {
+        const m1Closes = commandStore.candles.M1.map((c) => c.close);
+        completeHistory = [...m1Closes.slice(-120), ...completeHistory];
+      } else if (completeHistory.length < 20 && feed.candles?.length) {
+        const cCloses = feed.candles.map((c) => c.close);
+        completeHistory = [...cCloses.slice(-120), ...completeHistory];
+      } else if (completeHistory.length < 10 && feed.sparkline?.length) {
+        completeHistory = [...feed.sparkline, ...completeHistory];
+      }
+
+      // Nearest Support / Resistance from Liquidity Zones
+      let nearestSupport: number | undefined;
+      let nearestResistance: number | undefined;
+      if (feed.liquidityZones?.length) {
+        for (const zone of feed.liquidityZones) {
+          if (zone.type === 'SUPPORT' && zone.mid < price) {
+            if (!nearestSupport || zone.mid > nearestSupport) nearestSupport = zone.mid;
+          } else if (zone.type === 'RESISTANCE' && zone.mid > price) {
+            if (!nearestResistance || zone.mid < nearestResistance) nearestResistance = zone.mid;
+          }
         }
       }
 
-      // Intro progress calculation (2.5 seconds, tap to skip)
-      let curIntro = 1.0;
-      if (!introDone) {
-        const elapsedIntro = (performance.now() - inst.introStartTime) / 2500;
-        curIntro = Math.min(1.0, elapsedIntro);
-        setIntroProgress(curIntro);
-        if (curIntro >= 1.0) {
-          introDone = true;
-          setIntroActive(false);
-          sessionStorage.setItem('sarraf_market_scan_intro', 'true');
-        }
+      // POC price from Origin Levels (highest volumeWeight)
+      let pocPrice: number | undefined;
+      if (feed.originLevels?.length) {
+        const sortedLevels = [...feed.originLevels].sort((a, b) => b.volumeWeight - a.volumeWeight);
+        pocPrice = sortedLevels[0]?.priceLevel;
       }
 
-      // Smooth camera zoom
-      inst.currentDistance += (inst.targetDistance - inst.currentDistance) * 0.08;
-      camera.position.z = inst.currentDistance;
+      // Absorption price
+      const absZone = feed.absorptionBuyZones?.[0] || feed.absorptionSellZones?.[0];
+      const absorptionPrice = absZone ? absZone.mid : undefined;
 
-      // Apply drag rotation with inertia (slow auto-rotation when not dragging)
-      if (!inst.isDragging) {
-        inst.rotVelY += prefersReducedMotion ? 0.0001 : 0.00032;
-      }
-      scene.rotation.y += inst.rotVelY;
-      scene.rotation.x = Math.max(-0.55, Math.min(0.55, scene.rotation.x + inst.rotVelX));
-      inst.rotVelX *= 0.92;
-      inst.rotVelY *= 0.92;
+      // FVG / OB price
+      const fvgZone = feed.originDisplacements?.[0];
+      const fvgPrice = fvgZone ? fvgZone.originPrice : undefined;
 
-      // Update Visualizer (tint lerp, shader uniforms, dust, rings, flashes)
-      const liveBuyRatio = feedRef.current.buyRatio;
-      scan.update(delta, curIntro, phase4State, liveBuyRatio);
-
-      renderer.render(scene, camera);
-
-      // Project the 6 Scan Label Anchors (Requirement 3: numbered labels with connector lines)
-      if (nowTime - lastAnchorUpdateTimeRef.current > 32) {
-        lastAnchorUpdateTimeRef.current = nowTime;
-        const w = container.clientWidth || 360;
-        const h = Math.max(200, (container.clientHeight || 320) - 80);
-        const rawAnchors = scan.getLabelAnchors();
-
-        // 6 Scan Readouts from real live feed
-        const readouts: Record<string, { val: string; col: string; glow: string }> = {
-          momentum: {
-            val: feedRef.current.confidence.momentum > 0
-              ? `${feedRef.current.confidence.momentum}%`
-              : (feedRef.current.regime.trend !== 'N/A' ? feedRef.current.regime.trend : 'COLLECTING'),
-            col: feedRef.current.confidence.momentum >= 55
-              ? 'text-[#22e08a]'
-              : feedRef.current.confidence.momentum <= 45
-              ? 'text-[#ff3b6b]'
-              : 'text-[#f5c451]',
-            glow: feedRef.current.confidence.momentum >= 55
-              ? 'border-[#22e08a]/40 shadow-[0_0_10px_rgba(34,224,138,0.2)]'
-              : feedRef.current.confidence.momentum <= 45
-              ? 'border-[#ff3b6b]/40 shadow-[0_0_10px_rgba(255,59,107,0.2)]'
-              : 'border-[#f5c451]/40 shadow-[0_0_10px_rgba(245,196,81,0.2)]',
-          },
-          sentiment: {
-            val: feedRef.current.buyRatio >= 54 ? 'BULLISH' : feedRef.current.buyRatio <= 46 ? 'BEARISH' : 'NEUTRAL',
-            col: feedRef.current.buyRatio >= 54
-              ? 'text-[#22e08a]'
-              : feedRef.current.buyRatio <= 46
-              ? 'text-[#ff3b6b]'
-              : 'text-[#f5c451]',
-            glow: feedRef.current.buyRatio >= 54
-              ? 'border-[#22e08a]/40 shadow-[0_0_10px_rgba(34,224,138,0.2)]'
-              : feedRef.current.buyRatio <= 46
-              ? 'border-[#ff3b6b]/40 shadow-[0_0_10px_rgba(255,59,107,0.2)]'
-              : 'border-[#f5c451]/40 shadow-[0_0_10px_rgba(245,196,81,0.2)]',
-          },
-          poc: {
-            val: feedRef.current.originLevels[0]?.priceLevel
-              ? `$${feedRef.current.originLevels[0].priceLevel.toFixed(1)}`
-              : 'N/A',
-            col: 'text-[#38bdf8]',
-            glow: 'border-[#38bdf8]/40 shadow-[0_0_10px_rgba(56,189,248,0.2)]',
-          },
-          absorption: {
-            val: (feedRef.current.absorptionBuyZones.length + feedRef.current.absorptionSellZones.length > 0)
-              ? `${feedRef.current.absorptionBuyZones.length + feedRef.current.absorptionSellZones.length} ZONES`
-              : 'ACTIVE',
-            col: 'text-[#e8edf5]',
-            glow: 'border-white/20',
-          },
-          tickdata: {
-            val: feedRef.current.spread > 0
-              ? `$${feedRef.current.spread.toFixed(2)} SPD`
-              : `${feedRef.current.buyTicks60s + feedRef.current.sellTicks60s} T/M`,
-            col: feedRef.current.spread <= 0.35 ? 'text-[#22e08a]' : 'text-[#f5c451]',
-            glow: feedRef.current.spread <= 0.35
-              ? 'border-[#22e08a]/40 shadow-[0_0_10px_rgba(34,224,138,0.2)]'
-              : 'border-[#f5c451]/40 shadow-[0_0_10px_rgba(245,196,81,0.2)]',
-          },
-          fvg: {
-            val: feedRef.current.nearestFvgOrOb || 'N/A',
-            col: feedRef.current.nearestFvgOrOb ? 'text-[#f5c451]' : 'text-[#8a96a8]',
-            glow: 'border-white/20',
-          },
+      // Active Signal Levels
+      let activeSignalData = null;
+      if (signalEngine?.state?.activeSignal) {
+        const sig: any = signalEngine.state.activeSignal;
+        activeSignalData = {
+          side: sig.side,
+          entry: Number(sig.entry ?? sig.entryPrice ?? price),
+          sl: Number(sig.sl ?? sig.stopLoss ?? price - 10),
+          tp1: Number(sig.tp1 ?? sig.takeProfit1 ?? price + 10),
+          tp2: sig.tp2 ?? sig.takeProfit2,
+          tp3: sig.tp3 ?? sig.takeProfit3,
         };
-
-        const projected = rawAnchors.map((a, idx) => {
-          const toCam = camera.position.clone().sub(a.worldPos).normalize();
-          const dot = a.normal.dot(toCam);
-          const isFacing = dot > 0.05;
-
-          const p = a.worldPos.clone().project(camera);
-          const nodeX = (p.x * 0.5 + 0.5) * w;
-          const nodeY = (-p.y * 0.5 + 0.5) * h;
-
-          const isLeft = a.worldPos.x < 0;
-          const isTop = a.worldPos.y > 0;
-          const offsetX = isLeft ? -46 : 46;
-          const offsetY = isTop ? -18 : 18;
-          const labelX = Math.max(50, Math.min(w - 50, nodeX + offsetX));
-          const labelY = Math.max(34, Math.min(h - 34, nodeY + offsetY));
-
-          const readout = readouts[a.id] || { val: 'N/A', col: 'text-white', glow: 'border-white/10' };
-
-          // Fade labels in one-by-one during intro
-          const staggerStart = 0.3 + (idx / 6) * 0.5;
-          const introFade = Math.min(1.0, Math.max(0.0, (curIntro - staggerStart) / 0.2));
-
-          return {
-            id: a.id,
-            numId: a.numId,
-            label: a.label,
-            value: readout.val,
-            color: readout.col,
-            glow: readout.glow,
-            nodeX,
-            nodeY,
-            labelX,
-            labelY,
-            visible: isFacing && p.z < 1.0 && introFade > 0.05,
-            opacity: Math.max(0, Math.min(1, (dot - 0.05) * 3.5)) * introFade,
-          };
-        });
-
-        setProjectedLabels(projected);
-
-        // Project Discs
-        const rawDiscs = scan.getDiscAnchors();
-        const discProj = rawDiscs.map((d) => {
-          const p = d.worldPos.clone().project(camera);
-          const x = (p.x * 0.5 + 0.5) * w;
-          const y = (-p.y * 0.5 + 0.5) * h;
-          return {
-            id: d.id,
-            label: d.label,
-            price: d.price,
-            x: Math.max(40, Math.min(w - 40, x)),
-            y: Math.max(20, Math.min(h - 20, y)),
-            visible: p.z < 1.0 && p.z > -1.0,
-            color: d.color,
-          };
-        });
-        setProjectedDiscs(discProj);
       }
-    };
 
-    renderLoop();
+      // Real Ahmed Sniper Gates
+      const gates: GateArcState[] = AHMED_GATES_ORDER.map((def) => {
+        const liveGate = signalEngine?.state?.gates?.find((g) => g.id === def.id);
+        return {
+          id: def.id,
+          name: def.name,
+          shortName: def.shortName,
+          timeframe: def.timeframe,
+          status: liveGate ? liveGate.status : 'LOCKED',
+          reason: liveGate?.reason || 'Awaiting live tick alignment',
+        };
+      });
 
-    // 8. Cleanup on Unmount (dispose everything)
-    return () => {
-      cancelAnimationFrame(inst.animFrameId);
-      resizeObserver.disconnect();
-      intersectionObserver.disconnect();
+      // Flow stats
+      const totalFlow = (feed.buyTicks60s || 0) + (feed.sellTicks60s || 0);
+      const buyRatio = totalFlow > 0 ? ((feed.buyTicks60s || 0) / totalFlow) * 100 : 50;
+      const sellRatio = totalFlow > 0 ? ((feed.sellTicks60s || 0) / totalFlow) * 100 : 50;
 
-      canvas.removeEventListener('mousedown', onMouseDown);
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-      canvas.removeEventListener('wheel', onWheel);
-      canvas.removeEventListener('touchstart', onTouchStart);
-      canvas.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('touchend', onTouchEnd);
+      visualizerRef.current.updateData({
+        currentPrice: price,
+        previousPrice: feed.previousPrice || price,
+        bid: feed.bid || price - 0.15,
+        ask: feed.ask || price + 0.15,
+        spread: feed.spread || 0.3,
+        buyRatio,
+        sellRatio,
+        ticksPerMin: feed.volumeHistory?.[feed.volumeHistory.length - 1] || totalFlow || 25,
+        tickDirection: feed.tickDirection || 'FLAT',
+        tickDelta: Number((price - (feed.previousPrice || price)).toFixed(2)),
+        priceHistory: completeHistory,
+        nearestSupport,
+        nearestResistance,
+        pocPrice,
+        absorptionPrice,
+        fvgPrice,
+        activeSignal: activeSignalData,
+        gates,
+        isMarketClosed: false,
+        isReplay: false,
+      });
+    }, [feed, signalEngine, isReplayMode]);
 
-      scan.dispose();
-      renderer.dispose();
-      threeRef.current = null;
-    };
-  }, [prefersReducedMotion, isLite]);
+    // Active Signal Values
+    const activeSignal: any = signalEngine?.state?.activeSignal;
+    const isSignalActive = Boolean(activeSignal);
+    const livePnL = signalEngine?.livePnL ?? 0;
 
-  const isDisconnected = feed.connection.status === 'RECONNECTING' || feed.connection.status === 'OFFLINE';
-  const hasCandleData = feed.candles.length >= 2;
+    // Gates Alignment Calculation
+    const realGateStates: GateArcState[] = useMemo(() => {
+      return AHMED_GATES_ORDER.map((def) => {
+        const live = signalEngine?.state?.gates?.find((g) => g.id === def.id);
+        return {
+          id: def.id,
+          name: def.name,
+          shortName: def.shortName,
+          timeframe: def.timeframe,
+          status: live ? live.status : 'LOCKED',
+          reason: live?.reason || 'Evaluation in progress',
+        };
+      });
+    }, [signalEngine?.state?.gates]);
 
-  // Fallback banner if WebGL fails (Requirement 7)
-  if (!webglAvailable) {
+    const passCount = realGateStates.filter((g) => g.status === 'PASS').length;
+
+    // Single Status Tag: Strictly ONE of LIVE, REPLAY, RECONNECTING, MARKET CLOSED
+    const statusTag = useMemo(() => {
+      if (isReplayMode) {
+        return { text: 'REPLAY', color: 'text-[#f5c451]', border: 'border-[#f5c451]/50', bg: 'bg-[#f5c451]/10' };
+      }
+      if (feed.connection.status === 'RECONNECTING') {
+        return { text: 'RECONNECTING', color: 'text-[#f5c451]', border: 'border-[#f5c451]/40', bg: 'bg-[#f5c451]/10' };
+      }
+      if (feed.connection.status === 'MARKET_CLOSED') {
+        return { text: 'MARKET CLOSED', color: 'text-[#8a9ba8]', border: 'border-[#8a9ba8]/40', bg: 'bg-[#8a9ba8]/10' };
+      }
+      return { text: 'LIVE', color: 'text-[#22e08a]', border: 'border-[#22e08a]/40', bg: 'bg-[#22e08a]/10' };
+    }, [feed.connection.status, isReplayMode]);
+
+    const isHero = variant === 'hero';
+
+    // Flow Percentages
+    const totalFlowCount = (feed.buyTicks60s || 0) + (feed.sellTicks60s || 0);
+    const buyFlowPercent = totalFlowCount > 0 ? Math.round(((feed.buyTicks60s || 0) / totalFlowCount) * 100) : 50;
+    const sellFlowPercent = totalFlowCount > 0 ? 100 - buyFlowPercent : 50;
+
     return (
-      <div className={`relative rounded-xl bg-[#070b14] border border-[#f5c451]/30 p-4 font-mono text-[#e8edf5] ${className}`}>
-        <div className="flex items-center justify-between">
-          <div className="flex flex-col">
-            <span className="text-[10px] text-[#8a96a8] uppercase">BUY FLOW %</span>
-            <span className="text-xl font-bold text-[#22e08a]">{displayBuyRatio.toFixed(1)}%</span>
+      <div
+        ref={containerRef}
+        className={`relative w-full rounded-xl border border-white/10 bg-[#04060b] shadow-2xl overflow-hidden font-mono select-none ${className}`}
+      >
+        {/* SECTION 7: SLIM HEADER ROW ABOVE THE CANVAS */}
+        <div className="flex items-center justify-between px-3 sm:px-4 py-2 border-b border-white/5 bg-[#070b14]/90 z-20 relative">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold tracking-[0.2em] text-[#e2e8f0] uppercase">
+              FLOW RIVERS
+            </span>
+            <span className="text-[9px] text-[#5b6577] hidden sm:inline">
+              XAU/USD STREAM
+            </span>
           </div>
-          <div className="flex flex-col items-center">
-            <span className="text-[10px] text-[#f5c451] uppercase tracking-wider">MARKET SCAN 3D</span>
-            <span className="text-2xl font-bold text-white">${feed.currentPrice.toFixed(2)}</span>
-          </div>
-          <div className="flex flex-col items-end">
-            <span className="text-[10px] text-[#8a96a8] uppercase">SELL FLOW %</span>
-            <span className="text-xl font-bold text-[#ff3b6b]">{displaySellRatio.toFixed(1)}%</span>
+
+          <div className="flex items-center gap-2">
+            {/* Replay Controls if market closed */}
+            {isMarketClosed && (
+              <div className="flex items-center gap-1 bg-black/40 border border-white/10 rounded px-1.5 py-0.5 text-[9px]">
+                <button
+                  onClick={() => setIsReplayPlaying((p) => !p)}
+                  className="text-[#f5c451] hover:text-white transition-colors cursor-pointer"
+                  title={isReplayPlaying ? 'Pause Replay' : 'Play Replay'}
+                >
+                  {isReplayPlaying ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                </button>
+                <button
+                  onClick={() => setReplayCursor(0)}
+                  className="text-neutral-400 hover:text-white transition-colors cursor-pointer"
+                  title="Rewind Replay"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+
+            {/* LITE Toggle */}
+            <button
+              onClick={toggleLite}
+              className={`text-[9px] px-2 py-0.5 rounded border transition-colors cursor-pointer ${
+                isLite
+                  ? 'bg-[#f5c451]/20 border-[#f5c451] text-[#f5c451] font-bold'
+                  : 'bg-white/5 border-white/10 text-neutral-400 hover:text-white'
+              }`}
+              title="Toggle LITE Performance Mode (reduced particle count)"
+            >
+              LITE {isLite ? 'ON' : 'OFF'}
+            </button>
+
+            {/* Status Tag: Strictly ONE of LIVE, REPLAY, RECONNECTING, MARKET CLOSED */}
+            <div
+              className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[9px] font-bold border tracking-wider ${statusTag.bg} ${statusTag.border} ${statusTag.color}`}
+            >
+              <div
+                className={`w-1.5 h-1.5 rounded-full ${
+                  statusTag.text === 'LIVE'
+                    ? 'bg-[#22e08a] animate-ping'
+                    : statusTag.text === 'REPLAY'
+                    ? 'bg-[#f5c451]'
+                    : statusTag.text === 'RECONNECTING'
+                    ? 'bg-[#f5c451] animate-pulse'
+                    : 'bg-[#8a9ba8]'
+                }`}
+              />
+              <span>{statusTag.text}</span>
+            </div>
           </div>
         </div>
+
+        {/* SECTION 7: COMPACT BUY / SELL FLOW % BOXES IN TOP CORNERS */}
+        <div className="absolute top-11 left-3 z-10 pointer-events-none">
+          <div className="h-11 px-2.5 py-1 rounded bg-[#070b14]/85 border border-[#22e08a]/30 backdrop-blur-md flex flex-col justify-center shadow-lg">
+            <span className="text-[8px] text-[#22e08a] font-bold tracking-wider uppercase">
+              BUY FLOW
+            </span>
+            <div className="flex items-baseline gap-1">
+              <span className="text-xs font-bold text-[#e2e8f0]">
+                {buyFlowPercent}%
+              </span>
+              <div className="w-10 h-1 bg-white/10 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-[#22e08a] transition-all duration-300"
+                  style={{ width: `${buyFlowPercent}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="absolute top-11 right-3 z-10 pointer-events-none">
+          <div className="h-11 px-2.5 py-1 rounded bg-[#070b14]/85 border border-[#ff3b6b]/30 backdrop-blur-md flex flex-col justify-center items-end shadow-lg">
+            <span className="text-[8px] text-[#ff3b6b] font-bold tracking-wider uppercase">
+              SELL FLOW
+            </span>
+            <div className="flex items-baseline gap-1">
+              <div className="w-10 h-1 bg-white/10 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-[#ff3b6b] transition-all duration-300 ml-auto"
+                  style={{ width: `${sellFlowPercent}%` }}
+                />
+              </div>
+              <span className="text-xs font-bold text-[#e2e8f0]">
+                {sellFlowPercent}%
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* SECTION 6: COOLDOWN PILL (mm:ss) IN TOP RIGHT */}
+        {cooldownSec > 0 && (
+          <div className="absolute top-24 right-3 z-20 pointer-events-none">
+            <div className="px-2.5 py-1 rounded-full bg-[#070b14]/90 border border-[#f5c451]/60 text-[#f5c451] text-[9px] font-bold tracking-widest shadow-[0_0_15px_rgba(245,196,81,0.25)] flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#f5c451] animate-ping" />
+              <span>
+                COOLDOWN {Math.floor(cooldownSec / 60).toString().padStart(2, '0')}:
+                {(cooldownSec % 60).toString().padStart(2, '0')}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* WEBGL 3D CANVAS VIEWPORT (min height 320px mobile, 380px desktop) */}
+        <div className="relative w-full h-[320px] sm:h-[380px] bg-[#04060b]">
+          <canvas
+            ref={canvasRef}
+            className="w-full h-full block cursor-crosshair"
+          />
+
+          {/* SECTION 8: 2-SECOND INTRO OVERLAY (TAP TO SKIP) */}
+          {isIntroRunning && (
+            <div
+              onClick={skipIntro}
+              className="absolute inset-0 z-30 bg-[#04060b]/85 backdrop-blur-sm flex flex-col items-center justify-center cursor-pointer transition-opacity duration-300"
+            >
+              <div className="text-center space-y-1 animate-pulse">
+                <div className="text-[10px] text-[#22e08a] font-bold tracking-[0.25em] uppercase">
+                  FLOW RIVERS INITIALIZING
+                </div>
+                <div className="text-[9px] text-[#8a9ba8]">
+                  STREAMING BIQUOTE PARTICLES • TAP TO SKIP
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* SECTION 2: LIVE MONOSPACE PRICE AT THREAD HEAD */}
+          {priceHead.x > 0 && priceHead.y > 0 && (
+            <div
+              className="absolute z-20 pointer-events-none transform -translate-y-1/2 transition-transform duration-75"
+              style={{
+                left: `${Math.min(priceHead.x + 8, (containerRef.current?.clientWidth || 800) - 95)}px`,
+                top: `${priceHead.y}px`,
+              }}
+            >
+              <div
+                className={`px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wider backdrop-blur-md shadow-md border ${
+                  priceHead.direction === 'BUY'
+                    ? 'bg-[#22e08a]/20 border-[#22e08a] text-[#22e08a]'
+                    : priceHead.direction === 'SELL'
+                    ? 'bg-[#ff3b6b]/20 border-[#ff3b6b] text-[#ff3b6b]'
+                    : 'bg-black/60 border-white/20 text-[#ffd97a]'
+                }`}
+              >
+                ${(priceHead.price || feed.currentPrice || 0).toFixed(2)}
+              </div>
+            </div>
+          )}
+
+          {/* SECTION 4: HORIZONTAL LEVEL BANDS & ACTIVE SIGNAL LINES */}
+          {/* Nearest Support / Resistance */}
+          {feed.liquidityZones?.map((z) => {
+            const worldY = visualizerRef.current?.priceToWorldY(z.mid);
+            if (worldY === undefined) return null;
+            const screen = (visualizerRef.current as any)?.worldToScreen(0, worldY, 0);
+            if (!screen || screen.y < 20 || screen.y > 360) return null;
+
+            return (
+              <div
+                key={z.id}
+                className="absolute left-0 right-0 pointer-events-none flex items-center"
+                style={{ top: `${screen.y}px` }}
+              >
+                <div className="w-full h-[1px] bg-white/[0.08]" />
+                <span className="absolute left-2 text-[8px] text-[#8a9ba8]/80 font-mono -translate-y-1/2 bg-[#04060b]/80 px-1 rounded">
+                  {z.type === 'SUPPORT' ? 'SUP' : 'RES'} ${z.mid.toFixed(2)}
+                </span>
+              </div>
+            );
+          })}
+
+          {/* Active Signal Dashed Lines across whole canvas (Command Variant only) */}
+          {!isHero && isSignalActive && activeSignal && (
+            <>
+              {/* Entry Line */}
+              {(activeSignal.entry ?? activeSignal.entryPrice) && (
+                <div
+                  className="absolute left-0 right-0 pointer-events-none flex items-center z-10"
+                  style={{
+                    top: `${
+                      (visualizerRef.current as any)?.worldToScreen(
+                        0,
+                        visualizerRef.current?.priceToWorldY(activeSignal.entry ?? activeSignal.entryPrice),
+                        0
+                      )?.y || 160
+                    }px`,
+                  }}
+                >
+                  <div className="w-full border-t border-dashed border-[#ffd97a]/60" />
+                  <span className="absolute right-3 -translate-y-1/2 text-[8px] font-bold text-[#ffd97a] bg-[#070b14]/90 px-1 rounded border border-[#ffd97a]/40">
+                    ENTRY ${(activeSignal.entry ?? activeSignal.entryPrice).toFixed(2)}
+                  </span>
+                </div>
+              )}
+
+              {/* SL Line (Red) */}
+              {(activeSignal.sl ?? activeSignal.stopLoss) && (
+                <div
+                  className="absolute left-0 right-0 pointer-events-none flex items-center z-10"
+                  style={{
+                    top: `${
+                      (visualizerRef.current as any)?.worldToScreen(
+                        0,
+                        visualizerRef.current?.priceToWorldY(activeSignal.sl ?? activeSignal.stopLoss),
+                        0
+                      )?.y || 200
+                    }px`,
+                  }}
+                >
+                  <div className="w-full border-t border-dashed border-[#ff3b6b]/70" />
+                  <span className="absolute right-3 -translate-y-1/2 text-[8px] font-bold text-[#ff3b6b] bg-[#070b14]/90 px-1 rounded border border-[#ff3b6b]/40">
+                    SL ${(activeSignal.sl ?? activeSignal.stopLoss).toFixed(2)}
+                  </span>
+                </div>
+              )}
+
+              {/* TP1 Line (Green) */}
+              {(activeSignal.tp1 ?? activeSignal.takeProfit1) && (
+                <div
+                  className="absolute left-0 right-0 pointer-events-none flex items-center z-10"
+                  style={{
+                    top: `${
+                      (visualizerRef.current as any)?.worldToScreen(
+                        0,
+                        visualizerRef.current?.priceToWorldY(activeSignal.tp1 ?? activeSignal.takeProfit1),
+                        0
+                      )?.y || 120
+                    }px`,
+                  }}
+                >
+                  <div className="w-full border-t border-dashed border-[#22e08a]/70" />
+                  <span className="absolute right-3 -translate-y-1/2 text-[8px] font-bold text-[#22e08a] bg-[#070b14]/90 px-1 rounded border border-[#22e08a]/40">
+                    TP1 ${(activeSignal.tp1 ?? activeSignal.takeProfit1).toFixed(2)}
+                  </span>
+                </div>
+              )}
+            </>
+          )}
+
+          {/* SECTION 5: FLOATING LABELS IN STREAM (9px monospace, thin connector + ring marker) */}
+          {labels.map((lbl) => (
+            <div
+              key={lbl.id}
+              className="absolute z-10 pointer-events-none"
+              style={{ left: `${lbl.x}px`, top: `${lbl.y}px` }}
+            >
+              <div
+                className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#070b14]/80 border backdrop-blur-sm shadow"
+                style={{
+                  borderColor: lbl.color,
+                  boxShadow: `0 0 8px ${lbl.glowColor}`,
+                }}
+              >
+                <div
+                  className="w-1.5 h-1.5 rounded-full"
+                  style={{ backgroundColor: lbl.color }}
+                />
+                <span className="text-[8px] text-[#8a9ba8] tracking-wider uppercase">
+                  {lbl.label}
+                </span>
+                <span className="text-[9px] font-bold text-[#e2e8f0]">
+                  {lbl.value}
+                </span>
+                {lbl.subValue && (
+                  <span className="text-[8px] text-[#5b6577]">
+                    {lbl.subValue}
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+
+          {/* ACTIVE SIGNAL STATUS BADGE (Top Center) */}
+          {!isHero && isSignalActive && activeSignal && (
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+              <div
+                className={`px-3 py-1 rounded-full text-[9px] font-bold tracking-widest border backdrop-blur-md shadow-lg flex items-center gap-2 ${
+                  activeSignal.side === 'BUY'
+                    ? 'bg-[#22e08a]/15 border-[#22e08a]/50 text-[#22e08a]'
+                    : 'bg-[#ff3b6b]/15 border-[#ff3b6b]/50 text-[#ff3b6b]'
+                }`}
+              >
+                <span className="w-1.5 h-1.5 rounded-full animate-ping bg-current" />
+                <span>
+                  ACTIVE {activeSignal.side} @ ${(activeSignal.entry ?? activeSignal.entryPrice ?? 0).toFixed(2)}
+                </span>
+                <span className="text-white/80">
+                  PnL: {livePnL >= 0 ? '+' : ''}${livePnL.toFixed(2)}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* SECTION 6: GATE BAR AND TRADE STATE (Command Variant Only) */}
+        {!isHero && (
+          <div className="p-2 sm:p-2.5 border-t border-white/5 bg-[#070b14]/95 z-20 relative">
+            {/* Slim bar of 8 small pills */}
+            <div className="grid grid-cols-8 gap-1 mb-1.5">
+              {realGateStates.map((gate) => {
+                const colorBg =
+                  gate.status === 'PASS'
+                    ? 'bg-[#22e08a]/20 border-[#22e08a] text-[#22e08a]'
+                    : gate.status === 'FAIL'
+                    ? 'bg-[#ff3b6b]/20 border-[#ff3b6b] text-[#ff3b6b]'
+                    : 'bg-[#5b6577]/20 border-[#5b6577] text-[#8a9ba8]';
+
+                return (
+                  <button
+                    key={gate.id}
+                    onClick={() => setActiveGateTooltip(gate)}
+                    className={`py-1 rounded text-center border text-[8px] font-bold transition-all hover:brightness-125 cursor-pointer relative ${colorBg}`}
+                    title={`${gate.name}: ${gate.status}`}
+                  >
+                    <span>{gate.shortName}</span>
+                    <div
+                      className={`w-1 h-1 rounded-full mx-auto mt-0.5 ${
+                        gate.status === 'PASS'
+                          ? 'bg-[#22e08a]'
+                          : gate.status === 'FAIL'
+                          ? 'bg-[#ff3b6b]'
+                          : 'bg-[#5b6577]'
+                      }`}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* State Line Under the Gate Bar */}
+            <div className="flex items-center justify-between text-[9px] text-[#8a9ba8]">
+              <div>
+                {isSignalActive ? (
+                  <span
+                    className={`font-bold ${
+                      activeSignal?.side === 'BUY' ? 'text-[#22e08a]' : 'text-[#ff3b6b]'
+                    }`}
+                  >
+                    ACTIVE {activeSignal?.side} SIGNAL • 8/8 CONVERGED
+                  </span>
+                ) : (
+                  <span>
+                    WAITING FOR ALIGNMENT{' '}
+                    <span className="text-[#ffd97a] font-bold">{passCount}/8 PASS</span>
+                  </span>
+                )}
+              </div>
+
+              <div className="text-[8px] text-[#5b6577]">
+                AHMED SNIPER ENGINE
+              </div>
+            </div>
+
+            {/* Gate Tooltip Modal */}
+            {activeGateTooltip && (
+              <div
+                onClick={() => setActiveGateTooltip(null)}
+                className="absolute inset-0 bg-black/80 backdrop-blur-sm z-30 flex items-center justify-center p-3 cursor-pointer"
+              >
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  className="bg-[#0b111d] border border-white/20 rounded-lg p-3 max-w-xs w-full shadow-2xl space-y-1.5"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-white uppercase tracking-wider">
+                      {activeGateTooltip.name}
+                    </span>
+                    <span
+                      className={`text-[8px] font-bold px-1.5 py-0.5 rounded border ${
+                        activeGateTooltip.status === 'PASS'
+                          ? 'bg-[#22e08a]/20 border-[#22e08a] text-[#22e08a]'
+                          : activeGateTooltip.status === 'FAIL'
+                          ? 'bg-[#ff3b6b]/20 border-[#ff3b6b] text-[#ff3b6b]'
+                          : 'bg-[#5b6577]/20 border-[#5b6577] text-[#8a9ba8]'
+                      }`}
+                    >
+                      {activeGateTooltip.status}
+                    </span>
+                  </div>
+                  <div className="text-[9px] text-[#8a9ba8]">
+                    Timeframe: {activeGateTooltip.timeframe}
+                  </div>
+                  <div className="text-[9px] text-[#cbd5e1] bg-black/40 p-1.5 rounded border border-white/5">
+                    {activeGateTooltip.reason}
+                  </div>
+                  <button
+                    onClick={() => setActiveGateTooltip(null)}
+                    className="w-full mt-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[9px] font-bold tracking-wider uppercase transition-colors"
+                  >
+                    CLOSE
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     );
   }
-
-  return (
-    <div
-      ref={containerRef}
-      className={`relative w-full rounded-xl overflow-hidden bg-[#04060b] border border-[#f5c451]/25 select-none flex flex-col ${className}`}
-    >
-      {/* 3D WebGL Canvas Area */}
-      <div className="relative w-full h-[220px] sm:h-[250px] overflow-hidden">
-        <canvas
-          ref={canvasRef}
-          className="w-full h-full block cursor-grab active:cursor-grabbing touch-none"
-        />
-
-        {/* Not enough candle data prompt (Requirement 1: show only dust and text "collecting data", never fake candles) */}
-        {!hasCandleData && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 bg-black/40">
-            <div className="px-3 py-1.5 rounded-lg bg-black/80 border border-[#f5c451]/30 text-xs font-mono text-[#f5c451] flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#f5c451] animate-ping" />
-              <span className="tracking-wider uppercase">COLLECTING DATA...</span>
-            </div>
-          </div>
-        )}
-
-        {/* SVG Layer: Ring markers, thin connector lines, and subtle network lines (Requirement 3) */}
-        <svg className="absolute inset-0 pointer-events-none w-full h-full z-20">
-          {/* Faint network lines between anchors */}
-          {projectedLabels.length >= 2 && (
-            <g opacity={0.2}>
-              {projectedLabels.slice(0, -1).map((a, i) => {
-                const next = projectedLabels[i + 1];
-                if (!a.visible || !next.visible) return null;
-                return (
-                  <line
-                    key={`net-${a.id}-${next.id}`}
-                    x1={a.nodeX}
-                    y1={a.nodeY}
-                    x2={next.nodeX}
-                    y2={next.nodeY}
-                    stroke="#f5c451"
-                    strokeWidth={0.8}
-                    strokeDasharray="2,3"
-                  />
-                );
-              })}
-            </g>
-          )}
-
-          {/* Individual connector lines and ring markers */}
-          {projectedLabels.map((a) => {
-            if (!a.visible || a.opacity <= 0.05) return null;
-            return (
-              <g key={`marker-${a.id}`} opacity={a.opacity} className="transition-opacity duration-150">
-                {/* Thin connector line to label */}
-                <line
-                  x1={a.nodeX}
-                  y1={a.nodeY}
-                  x2={a.labelX}
-                  y2={a.labelY}
-                  stroke="#f5c451"
-                  strokeWidth={1}
-                  strokeDasharray="2,2"
-                  opacity={0.65}
-                />
-                {/* Small ring marker anchored to real 3D point */}
-                <circle cx={a.nodeX} cy={a.nodeY} r={3.2} stroke="#f5c451" strokeWidth={1.4} fill="#04060b" />
-                <circle cx={a.nodeX} cy={a.nodeY} r={1.2} fill="#f5c451" />
-              </g>
-            );
-          })}
-        </svg>
-
-        {/* 6 Camera-Facing Anchored Labels (Requirement 3: Numbered tracking labels with connector lines) */}
-        {projectedLabels.map((a) => {
-          return (
-            <div
-              key={`label-${a.id}`}
-              style={{
-                left: `${a.labelX}px`,
-                top: `${a.labelY}px`,
-                opacity: a.visible ? a.opacity : 0,
-                transform: 'translate(-50%, -50%)',
-                pointerEvents: 'none',
-              }}
-              className={`absolute z-20 flex flex-col items-center justify-center py-0.5 px-1.5 rounded bg-black/85 backdrop-blur-md border ${a.glow} transition-opacity duration-150 select-none shadow-[0_2px_10px_rgba(0,0,0,0.8)]`}
-            >
-              <div className="flex items-center gap-1">
-                <span className="text-[6.5px] font-mono text-[#f5c451]/80 font-bold">
-                  [{a.numId}]
-                </span>
-                <span className="text-[7px] font-mono uppercase tracking-[0.08em] text-[#8a96a8] truncate max-w-[80px]">
-                  {a.label}
-                </span>
-              </div>
-              <span className={`text-[8.5px] sm:text-[9px] font-mono font-bold tabular-nums truncate max-w-[85px] ${a.color}`}>
-                {a.value}
-              </span>
-            </div>
-          );
-        })}
-
-        {/* Translucent S/R & Demand/Supply Disc Price Tags (Requirement 1) */}
-        {projectedDiscs.map((d) => {
-          if (!d.visible) return null;
-          return (
-            <div
-              key={`disc-${d.id}`}
-              style={{
-                left: `${d.x}px`,
-                top: `${d.y}px`,
-                transform: 'translate(-50%, -50%)',
-                pointerEvents: 'none',
-              }}
-              className="absolute z-15 px-1.5 py-0.5 rounded text-[7.5px] font-mono font-bold backdrop-blur-sm bg-black/60 border border-white/10 select-none"
-            >
-              <span style={{ color: d.color }}>{d.label}</span>
-            </div>
-          );
-        })}
-
-        {/* Reconnecting Dimming Overlay (Requirement 5) */}
-        {isDisconnected && (
-          <div className="absolute inset-0 bg-[#04060b]/80 backdrop-blur-[2px] z-30 flex items-center justify-center p-4 pointer-events-none">
-            <div className="px-3.5 py-1.5 rounded-full bg-[#ff3b6b]/20 border border-[#ff3b6b]/50 text-[#ff3b6b] flex items-center gap-2 text-xs font-mono font-bold animate-pulse shadow-[0_0_20px_rgba(255,59,107,0.3)]">
-              <span className="w-2 h-2 rounded-full bg-[#ff3b6b] animate-ping" />
-              <span>RECONNECTING · NO STALE DATA</span>
-            </div>
-          </div>
-        )}
-
-        {/* Intro Overlay (2.5s once per tab session with Tap to Skip, Requirement 5) */}
-        {introActive && (
-          <div
-            onClick={handleSkipIntro}
-            className="absolute inset-0 z-40 bg-[#04060b]/92 backdrop-blur-sm flex flex-col items-center justify-center p-4 cursor-pointer transition-opacity duration-300"
-          >
-            <div className="flex flex-col items-center space-y-2 text-center pointer-events-auto">
-              <div className="w-8 h-8 rounded-full bg-[#38bdf8]/20 border border-[#38bdf8]/60 flex items-center justify-center text-[#38bdf8] animate-pulse shadow-[0_0_20px_rgba(56,189,248,0.4)]">
-                <Activity className="w-4 h-4 text-[#38bdf8]" />
-              </div>
-              <div className="space-y-0.5">
-                <span className="text-[10px] font-mono tracking-[0.16em] uppercase text-[#f5c451] font-bold">
-                  MARKET SCAN 3D INITIALIZING
-                </span>
-                <div className="text-xs font-mono text-[#8a96a8]">
-                  Tap anywhere to skip
-                </div>
-              </div>
-              <div className="w-36 h-1 bg-white/10 rounded-full overflow-hidden mt-1">
-                <div
-                  className="h-full bg-gradient-to-r from-[#22e08a] via-[#f5c451] to-[#ff3b6b] transition-all duration-75"
-                  style={{ width: `${Math.round(introProgress * 100)}%` }}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TOP HUD BAR: BUY FLOW (Left), Title & LITE switch (Center), SELL FLOW (Right) (Requirement 6 & 7) */}
-        <div className="absolute top-2 left-2 right-2 flex items-start justify-between pointer-events-none z-25">
-          {/* Left: BUY FLOW % */}
-          <div className="flex flex-col items-start bg-black/55 backdrop-blur-md px-2 py-1 rounded border border-[#22e08a]/25 shadow-[0_2px_10px_rgba(34,224,138,0.1)]">
-            <span className="text-[8.5px] uppercase tracking-[0.1em] font-mono text-[#8a96a8]">
-              BUY FLOW (60S)
-            </span>
-            <div className="flex items-baseline gap-1">
-              <span className="text-base sm:text-lg font-bold font-mono tabular-nums text-[#22e08a]">
-                {displayBuyRatio.toFixed(1)}%
-              </span>
-              <span className="text-[8px] font-mono text-[#22e08a]/70">EST.</span>
-            </div>
-          </div>
-
-          {/* Center-Top: Title + LITE switch */}
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-md border border-[#f5c451]/30">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#f5c451] animate-pulse" />
-              <span className="text-[8.5px] font-mono font-bold uppercase tracking-[0.14em] text-[#f5c451]">
-                MARKET SCAN
-              </span>
-            </div>
-
-            {/* LITE Mode Switch (Requirement 7) */}
-            <button
-              type="button"
-              onClick={toggleLite}
-              className={`pointer-events-auto px-2 py-0.5 rounded text-[8px] font-mono font-bold transition-all border ${
-                isLite
-                  ? 'bg-[#38bdf8]/20 border-[#38bdf8] text-[#38bdf8] shadow-[0_0_8px_rgba(56,189,248,0.3)]'
-                  : 'bg-black/40 border-white/15 text-[#8a96a8] hover:text-white'
-              }`}
-              title="Toggle Lite Mode (8,000 points, turns off glitch & dust)"
-            >
-              <Zap className="w-2.5 h-2.5 inline mr-0.5" />
-              LITE {isLite ? 'ON' : 'OFF'}
-            </button>
-          </div>
-
-          {/* Right: SELL FLOW % */}
-          <div className="flex flex-col items-end text-right bg-black/55 backdrop-blur-md px-2 py-1 rounded border border-[#ff3b6b]/25 shadow-[0_2px_10px_rgba(255,59,107,0.1)]">
-            <span className="text-[8.5px] uppercase tracking-[0.1em] font-mono text-[#8a96a8]">
-              SELL FLOW (60S)
-            </span>
-            <div className="flex items-baseline gap-1">
-              <span className="text-[8px] font-mono text-[#ff3b6b]/70">EST.</span>
-              <span className="text-base sm:text-lg font-bold font-mono tabular-nums text-[#ff3b6b]">
-                {displaySellRatio.toFixed(1)}%
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Live Price Tag under sculpture */}
-        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 pointer-events-none z-25">
-          <div
-            className={`px-2.5 py-0.5 rounded backdrop-blur-md border transition-all duration-200 ${
-              priceFlash === 'UP'
-                ? 'bg-[#22e08a]/20 border-[#22e08a] text-[#22e08a] shadow-[0_0_15px_rgba(34,224,138,0.5)] scale-105'
-                : priceFlash === 'DOWN'
-                ? 'bg-[#ff3b6b]/20 border-[#ff3b6b] text-[#ff3b6b] shadow-[0_0_15px_rgba(255,59,107,0.5)] scale-105'
-                : 'bg-black/60 border-white/15 text-[#e8edf5]'
-            }`}
-          >
-            <div className="flex items-center gap-1.5">
-              <span className="text-[8px] font-mono tracking-wider text-[#8a96a8] uppercase">
-                XAU/USD
-              </span>
-              <span className="w-1 h-1 rounded-full bg-[#f5c451]" />
-              <span className="text-sm font-bold font-mono tabular-nums">
-                ${feed.currentPrice > 0 ? feed.currentPrice.toFixed(2) : '---.--'}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* BOTTOM PANEL: Spectrum + Waveform readout (Requirement 4) */}
-      <WaveformSpectrumPanel
-        currentPrice={feed.currentPrice}
-        spread={feed.spread}
-        buyTicks60s={feed.buyTicks60s}
-        sellTicks60s={feed.sellTicks60s}
-        change24h={feed.change24h}
-        tickTape={feed.tickTape}
-        tickDirection={feed.tickDirection}
-      />
-    </div>
-  );
-});
+);
 
 QuantumVortex.displayName = 'QuantumVortex';

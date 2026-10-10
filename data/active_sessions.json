@@ -1,12 +1,22 @@
 {
-  "dab0553bcac0c382e3a05d5fead545f8e60521996f4010a57f9a1be3709c93a8": {
+  "30224c2e32d87034e73979ed795f67f31f605960be989d3fe865b68a3f6edc72": {
     "user": {
       "email": "gmcf7",
       "accountType": "Institutional Desk",
-      "terminalId": "SRF-9251-XAU",
+      "terminalId": "SRF-8386-XAU",
       "role": "admin",
       "isAdmin": true
     },
-    "expiresAt": 1791627568742
+    "expiresAt": 1791686471364
+  },
+  "b8c90c0a48c8a7e6820d39b94bbe68f611aaf876491f00fab4bd9ab39613ab7a": {
+    "user": {
+      "email": "gmcf7",
+      "accountType": "Institutional Desk",
+      "terminalId": "SRF-1929-XAU",
+      "role": "admin",
+      "isAdmin": true
+    },
+    "expiresAt": 1791686511154
   }
 }
