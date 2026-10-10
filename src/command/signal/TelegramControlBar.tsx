@@ -19,7 +19,6 @@ import {
 interface TelegramControlBarProps {
   status: TelegramCommandStatus;
   onToggleMaster: (enabled?: boolean) => Promise<void>;
-  onTogglePaper: (sendPaper?: boolean) => Promise<void>;
   onSendTest: () => Promise<{ success: boolean; message: string }>;
   onStartSignals: () => Promise<{ success: boolean; message: string; reasonCode?: TelegramReasonCode }>;
   onStopSignals: () => Promise<{ success: boolean; message: string }>;
@@ -31,7 +30,6 @@ interface TelegramControlBarProps {
 export const TelegramControlBar: React.FC<TelegramControlBarProps> = ({
   status,
   onToggleMaster,
-  onTogglePaper,
   onSendTest,
   onStartSignals,
   onStopSignals,
@@ -261,27 +259,6 @@ export const TelegramControlBar: React.FC<TelegramControlBarProps> = ({
           >
             <span className={`w-1.5 h-1.5 rounded-full ${status.enabled ? 'bg-[#22e08a]' : 'bg-[#8a96a8]'}`} />
             <span>TELEGRAM: {status.enabled ? 'ON' : 'OFF'}</span>
-          </button>
-
-          {/* Send Paper Signals Toggle (Default OFF) */}
-          <button
-            onClick={() => onTogglePaper()}
-            disabled={isActionDisabled}
-            title={
-              !status.configured
-                ? 'Telegram not configured'
-                : 'Send PAPER signals to Telegram (default OFF)'
-            }
-            className={`inline-flex items-center gap-1 text-[9px] font-bold px-2 py-1 rounded border transition-colors cursor-pointer ${
-              isActionDisabled
-                ? 'opacity-40 cursor-not-allowed bg-white/5 text-[#8a96a8] border-white/5'
-                : status.sendPaperSignals
-                ? 'bg-[#E8B84A]/10 text-[#E8B84A] border-[#E8B84A]/30 hover:bg-[#E8B84A]/20'
-                : 'bg-white/5 text-[#8a96a8] border-white/10 hover:bg-white/10'
-            }`}
-          >
-            <FileText className="w-2.5 h-2.5" />
-            <span>PAPER: {status.sendPaperSignals ? 'ON' : 'OFF'}</span>
           </button>
         </div>
 

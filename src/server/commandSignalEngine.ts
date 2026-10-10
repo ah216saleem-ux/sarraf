@@ -26,7 +26,6 @@ interface PersistedState {
   lifecycle: SignalLifecycle;
   activeSignal: CommandSignal | null;
   cooldownEndsAt: number | null;
-  paperMode: boolean;
   history: CommandSignalLogEntry[];
   lastEvaluatedAt: number;
 }
@@ -35,7 +34,6 @@ interface PersistedState {
 let lifecycle: SignalLifecycle = 'WAIT';
 let activeSignal: CommandSignal | null = null;
 let cooldownEndsAt: number | null = null;
-let paperMode: boolean = true; // Default ON as required
 let history: CommandSignalLogEntry[] = [];
 let lastEvaluatedAt: number = Date.now();
 let lastGates: SniperGateResult[] = [];
@@ -126,7 +124,6 @@ export function saveCommandSignalsToDisk() {
       lifecycle,
       activeSignal,
       cooldownEndsAt,
-      paperMode,
       history: history.filter((h) => !h.isTest).slice(0, SNIPER_CONFIG.maxHistoryEntries),
       lastEvaluatedAt,
     };
@@ -145,8 +142,6 @@ export function loadCommandSignalsFromDisk() {
 
     const raw = fs.readFileSync(SIGNALS_FILE, 'utf8');
     const data: Partial<PersistedState> = JSON.parse(raw);
-
-    if (data.paperMode !== undefined) paperMode = Boolean(data.paperMode);
 
     // Data Migration & Integrity Verification
     if (Array.isArray(data.history)) {
@@ -186,7 +181,7 @@ export function loadCommandSignalsFromDisk() {
       cooldownEndsAt = null;
     }
 
-    console.log(`[COMMAND SIGNAL ENGINE] Loaded successfully: Lifecycle=${lifecycle}, History=${history.length}, PaperMode=${paperMode}`);
+    console.log(`[COMMAND SIGNAL ENGINE] Loaded successfully: Lifecycle=${lifecycle}, History=${history.length}`);
   } catch (err) {
     console.error('[COMMAND SIGNAL ENGINE] Error loading command signals from disk:', err);
     lifecycle = 'WAIT';
@@ -443,7 +438,6 @@ function issueNewSignal(side: SignalSide, entryPrice: number, isTest = false) {
     hitTargets: [],
     createdAt: Date.now(),
     livePnL: 0,
-    isPaper: paperMode,
     isTest,
     confidence: lastConfidence,
     gatesPassedCount: 8,
@@ -462,7 +456,7 @@ function issueNewSignal(side: SignalSide, entryPrice: number, isTest = false) {
   activeSignal = newSignal;
   lifecycle = 'ACTIVE';
 
-  console.log(`[COMMAND SIGNAL ENGINE] Issued NEW ${side} Signal: Entry=$${entry}, SL=$${sl}, TP1=$${tp1}, TP2=$${tp2}, TP3=$${tp3} (Paper=${paperMode}, isTest=${isTest})`);
+  console.log(`[COMMAND SIGNAL ENGINE] Issued NEW ${side} Signal: Entry=$${entry}, SL=$${sl}, TP1=$${tp1}, TP2=$${tp2}, TP3=$${tp3} (isTest=${isTest})`);
   saveCommandSignalsToDisk();
 
   // Telegram notification for real signals only (never send test signals to public Telegram chat)
@@ -499,7 +493,6 @@ function finalizeClosedSignal(reason: SignalCloseReason, closePrice: number) {
       closePrice: closedSignal.closePrice,
       result: reason,
       pnlDollars: computedPnL,
-      isPaper: closedSignal.isPaper,
       isTest: false,
     };
 
@@ -557,18 +550,6 @@ export function manualCloseCommandSignal(marketPrice: number): { success: boolea
   };
 }
 
-/**
- * Toggle Paper Mode
- */
-export function toggleCommandSignalPaperMode(): { paperMode: boolean } {
-  paperMode = !paperMode;
-  if (activeSignal) {
-    activeSignal.isPaper = paperMode;
-  }
-  saveCommandSignalsToDisk();
-  console.log(`[COMMAND SIGNAL ENGINE] Paper mode toggled to: ${paperMode}`);
-  return { paperMode };
-}
 
 /**
  * Reset cooldown (e.g. for testing / debugging)
@@ -591,7 +572,7 @@ export function triggerSimulatedCommandSignal(side: SignalSide = 'BUY', customPr
 
   const price = customPrice && customPrice > 0 ? customPrice : 4118.50;
   issueNewSignal(side, price, true); // isTest = true
-  return { success: true, signal: activeSignal || undefined, message: `Issued ${side} test signal @ $${price} (Paper Mode: ${paperMode}).` };
+  return { success: true, signal: activeSignal || undefined, message: `Issued ${side} test signal @ $${price}.` };
 }
 
 /**
@@ -652,7 +633,6 @@ export function getCommandSignalState(currentTickPrice?: number): SignalEnginePu
     activeSignal,
     cooldownRemainingSeconds,
     cooldownEndsAt,
-    paperMode,
     gates,
     gatesAllPassed: gates.every((g) => g.status === 'PASS'),
     alignedDirection: lastAlignedDirection,

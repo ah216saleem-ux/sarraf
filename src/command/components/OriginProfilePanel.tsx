@@ -16,7 +16,7 @@ export const OriginProfilePanel: React.FC<OriginProfilePanelProps> = ({
   isDimmed,
   freshness,
 }) => {
-  const hasData = originLevels.length > 0 || originDisplacements.length > 0;
+  const hasData = currentPrice > 0;
 
   return (
     <div
@@ -32,7 +32,7 @@ export const OriginProfilePanel: React.FC<OriginProfilePanelProps> = ({
           8. ORIGIN PROFILE
         </span>
         <div className="flex items-center gap-1.5 text-[9px] text-[#8a96a8]">
-          <span className="px-1 py-0.2 rounded bg-white/5 uppercase">ESTIMATED</span>
+          <span className="px-1 py-0.2 rounded bg-white/5 uppercase">LIVE RANGE ±$25</span>
           <span>·</span>
           <span>{freshness}</span>
         </div>
@@ -52,11 +52,11 @@ export const OriginProfilePanel: React.FC<OriginProfilePanelProps> = ({
             <div className="space-y-1.5 relative">
               {originLevels.length === 0 ? (
                 <div className="text-[10px] text-[#8a96a8] h-[22px] flex items-center italic">
-                  N/A (insufficient impulses)
+                  N/A (fewer than 3 impulses in range)
                 </div>
               ) : (
                 originLevels.map((lvl, idx) => {
-                  const isNear = currentPrice > 0 && Math.abs(lvl.priceLevel - currentPrice) < 3.0;
+                  const isNear = currentPrice > 0 && Math.abs(lvl.priceLevel - currentPrice) < 2.5;
                   return (
                     <div key={idx} className="relative">
                       <div className="flex items-center justify-between h-[18px]">
@@ -93,8 +93,8 @@ export const OriginProfilePanel: React.FC<OriginProfilePanelProps> = ({
             </span>
             <div className="space-y-1">
               {originDisplacements.length === 0 ? (
-                <div className="text-[10px] text-[#8a96a8] h-[22px] flex items-center">
-                  collecting data...
+                <div className="text-[10px] text-[#8a96a8] h-[22px] flex items-center text-[#8a96a8] italic">
+                  N/A
                 </div>
               ) : (
                 originDisplacements.map((od) => {
@@ -129,3 +129,4 @@ export const OriginProfilePanel: React.FC<OriginProfilePanelProps> = ({
     </div>
   );
 };
+

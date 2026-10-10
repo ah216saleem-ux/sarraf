@@ -38,6 +38,7 @@ import { SettingsTab } from './SettingsTab';
 import { PerformanceTab } from './PerformanceTab';
 import { GoLiveChecklistTab } from './GoLiveChecklistTab';
 import { SarrafCommandView } from '../command/SarrafCommandView';
+import { SpyOptionsView } from '../spy/SpyOptionsView';
 
 export const DashboardView: React.FC = () => {
   const { priceData, user, logout, macroEvents } = useMarket();
@@ -45,6 +46,7 @@ export const DashboardView: React.FC = () => {
   const [activeMainTab, setActiveMainTab] = useState<
     | 'OVERVIEW'
     | 'TELEGRAM'
+    | 'SPY'
     | 'NEWS'
     | 'GOOGLE_CHAT'
     | 'AI_CHAT'
@@ -53,6 +55,18 @@ export const DashboardView: React.FC = () => {
     | 'CHECKLIST'
     | 'TESTS'
   >('OVERVIEW');
+  const spyNavTabRef = useRef<HTMLButtonElement>(null);
+  const [spyHeaderData, setSpyHeaderData] = useState<{
+    price: number | null;
+    status: string;
+  }>({ price: null, status: 'CONNECTING' });
+
+  useEffect(() => {
+    if (activeMainTab === 'SPY' && spyNavTabRef.current) {
+      spyNavTabRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    }
+  }, [activeMainTab]);
+
   const [activeChartTab, setActiveChartTab] = useState<'15M' | '1H' | '4H' | '1D'>('15M');
   const [chartPoints, setChartPoints] = useState<number[]>([]);
 
@@ -95,12 +109,13 @@ export const DashboardView: React.FC = () => {
   // Poll real-time data
   const fetchAllData = useCallback(async () => {
     try {
-      const [curRes, histRes, statsRes, tgRes, valRes] = await Promise.all([
+      const [curRes, histRes, statsRes, tgRes, valRes, spyRes] = await Promise.all([
         fetch('/api/signal/current'),
         fetch('/api/signal/history'),
         fetch('/api/signal/stats'),
         fetch('/api/telegram/status'),
         fetch('/api/telegram/validations'),
+        fetch('/api/spy/status'),
       ]);
 
       if (curRes.ok) {
@@ -122,6 +137,15 @@ export const DashboardView: React.FC = () => {
       if (valRes.ok) {
         const valJson = await valRes.json();
         setValidations(valJson.validations || []);
+      }
+      if (spyRes.ok) {
+        const spyJson = await spyRes.json();
+        if (spyJson.data) {
+          setSpyHeaderData({
+            price: spyJson.data.currentPrice,
+            status: spyJson.data.status,
+          });
+        }
       }
     } catch {
       // Background poll error
@@ -477,6 +501,18 @@ export const DashboardView: React.FC = () => {
               <span>TELEGRAM</span>
             </button>
             <button
+              ref={spyNavTabRef}
+              onClick={() => setActiveMainTab('SPY')}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-all cursor-pointer shrink-0 ${
+                activeMainTab === 'SPY'
+                  ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+            >
+              <TrendingUp className="w-3.5 h-3.5" />
+              <span>SPY</span>
+            </button>
+            <button
               onClick={() => setActiveMainTab('NEWS')}
               className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
                 activeMainTab === 'NEWS'
@@ -560,37 +596,75 @@ export const DashboardView: React.FC = () => {
 
           {/* Right Live Ticker & Logout */}
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 font-mono text-xs">
-              <span className="text-neutral-400">XAU/USD:</span>
-              <span
-                className={`text-base font-bold ${
-                  priceData.status === 'LIVE'
-                    ? 'text-[#FFD97A]'
-                    : priceData.status === 'MARKET_CLOSED'
-                    ? 'text-amber-300'
-                    : 'text-neutral-300'
-                }`}
-              >
-                ${(currentPrice ?? 4165.5).toFixed(2)}
-              </span>
-              {priceData.status === 'LIVE' ? (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-[9px] text-emerald-400 font-semibold">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  LIVE
-                </span>
-              ) : priceData.status === 'MARKET_CLOSED' ? (
+            {activeMainTab === 'SPY' ? (
+              <div className="flex items-center gap-2 font-mono text-xs">
+                <span className="text-neutral-400">SPY:</span>
                 <span
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/40 text-[9px] text-amber-300 font-semibold"
-                  title="Market Closed - Last Price"
+                  className={`text-base font-bold ${
+                    spyHeaderData.status === 'LIVE'
+                      ? 'text-[#FFD97A]'
+                      : spyHeaderData.status === 'MARKET CLOSED'
+                      ? 'text-amber-300'
+                      : 'text-neutral-300'
+                  }`}
                 >
-                  CLOSED
+                  {spyHeaderData.price !== null ? `$${spyHeaderData.price.toFixed(2)}` : 'NO DATA'}
                 </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-rose-950/60 border border-rose-500/40 text-[9px] text-rose-300 font-semibold">
-                  {priceData.status === 'FEED_STALE' ? 'STALE' : 'OFFLINE'}
+                {spyHeaderData.status === 'LIVE' ? (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-[9px] text-emerald-400 font-semibold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                    LIVE
+                  </span>
+                ) : spyHeaderData.status === 'MARKET CLOSED' ? (
+                  <span
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/40 text-[9px] text-amber-300 font-semibold"
+                    title="US Regular Session Closed (09:30-16:00 ET)"
+                  >
+                    CLOSED
+                  </span>
+                ) : spyHeaderData.status === 'STALE' ? (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-rose-950/60 border border-rose-500/40 text-[9px] text-rose-300 font-semibold">
+                    STALE
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-neutral-900 border border-neutral-700 text-[9px] text-neutral-400 font-semibold">
+                    NO DATA
+                  </span>
+                )}
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 font-mono text-xs">
+                <span className="text-neutral-400">XAU/USD:</span>
+                <span
+                  className={`text-base font-bold ${
+                    priceData.status === 'LIVE'
+                      ? 'text-[#FFD97A]'
+                      : priceData.status === 'MARKET_CLOSED'
+                      ? 'text-amber-300'
+                      : 'text-neutral-300'
+                  }`}
+                >
+                  ${(currentPrice ?? 4165.5).toFixed(2)}
                 </span>
-              )}
-            </div>
+                {priceData.status === 'LIVE' ? (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-[9px] text-emerald-400 font-semibold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                    LIVE
+                  </span>
+                ) : priceData.status === 'MARKET_CLOSED' ? (
+                  <span
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/40 text-[9px] text-amber-300 font-semibold"
+                    title="Market Closed - Last Price"
+                  >
+                    CLOSED
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-rose-950/60 border border-rose-500/40 text-[9px] text-rose-300 font-semibold">
+                    {priceData.status === 'FEED_STALE' ? 'STALE' : 'OFFLINE'}
+                  </span>
+                )}
+              </div>
+            )}
 
             <button
               onClick={logout}
@@ -1487,6 +1561,9 @@ export const DashboardView: React.FC = () => {
             </div>
           </div>
         )}
+
+        {/* TAB: SPY S&P 500 OPTIONS QUANT MODULE */}
+        {activeMainTab === 'SPY' && <SpyOptionsView />}
 
         {/* TAB 3: REAL FOREX FACTORY NEWS RADAR */}
         {activeMainTab === 'NEWS' && <NewsTab currentPrice={currentPrice} />}

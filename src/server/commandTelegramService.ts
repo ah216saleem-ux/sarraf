@@ -14,7 +14,6 @@ const DYNAMIC_CHAT_FILE = path.resolve(DATA_DIR, 'telegram_chat.json');
 
 export interface CommandTelegramSettings {
   enabled: boolean;          // Default OFF
-  sendPaperSignals: boolean; // Default OFF
   lastMessageTime: number | null;
   lastMessageStatus: 'OK' | 'FAILED' | 'NONE';
   lastErrorMessage: string | null;
@@ -22,7 +21,6 @@ export interface CommandTelegramSettings {
 
 let settings: CommandTelegramSettings = {
   enabled: false,
-  sendPaperSignals: false,
   lastMessageTime: null,
   lastMessageStatus: 'NONE',
   lastErrorMessage: null,
@@ -49,12 +47,11 @@ export function loadTelegramSettings() {
       const data = JSON.parse(raw);
       settings = {
         enabled: Boolean(data.enabled),
-        sendPaperSignals: Boolean(data.sendPaperSignals),
         lastMessageTime: typeof data.lastMessageTime === 'number' ? data.lastMessageTime : null,
         lastMessageStatus: data.lastMessageStatus || 'NONE',
         lastErrorMessage: data.lastErrorMessage || null,
       };
-      console.log(`[SARRAF TELEGRAM] Loaded settings: Enabled=${settings.enabled}, SendPaper=${settings.sendPaperSignals}`);
+      console.log(`[SARRAF TELEGRAM] Loaded settings: Enabled=${settings.enabled}`);
     }
   } catch (err) {
     console.error('[SARRAF TELEGRAM] Could not load settings, using defaults');
@@ -249,13 +246,8 @@ function formatTimeUTC(timestamp: number): string {
 }
 
 export function formatNewSignalMessage(signal: CommandSignal): string {
-  const isPaper = signal.isPaper;
   const timeStr = formatTimeUTC(signal.createdAt);
   const lines: string[] = [];
-
-  if (isPaper) {
-    lines.push('PAPER');
-  }
 
   const icon = signal.side === 'BUY' ? '🟡' : '🔴';
   lines.push(`${icon} XAUUSD | ${signal.side}`);
@@ -269,44 +261,39 @@ export function formatNewSignalMessage(signal: CommandSignal): string {
   return lines.join('\n');
 }
 
-export function formatTargetHitMessage(target: 'TP1' | 'TP2', isPaper: boolean): string {
-  const prefix = isPaper ? 'PAPER\n' : '';
+export function formatTargetHitMessage(target: 'TP1' | 'TP2'): string {
   if (target === 'TP1') {
-    return `${prefix}✅ XAUUSD | TP1 hit (+$5)`;
+    return `✅ XAUUSD | TP1 hit (+$5)`;
   }
-  return `${prefix}✅ TP2 hit (+$8)`;
+  return `✅ TP2 hit (+$8)`;
 }
 
 export function formatFinalResultMessage(
   reason: SignalCloseReason,
   realizedDollars: number,
-  closePrice: number,
-  isPaper: boolean
+  closePrice: number
 ): string {
-  const prefix = isPaper ? 'PAPER\n' : '';
   if (reason === 'TP3') {
-    return `${prefix}🏆 TP3 hit (+$12)`;
+    return `🏆 TP3 hit (+$12)`;
   }
   if (reason === 'SL') {
-    return `${prefix}❌ SL hit (-$10)`;
+    return `❌ SL hit (-$10)`;
   }
   const sign = realizedDollars >= 0 ? '+' : '-';
   const absVal = Math.abs(realizedDollars).toFixed(2);
-  return `${prefix}⚪ Closed manually at ${closePrice.toFixed(2)} (${sign}$${absVal})`;
+  return `⚪ Closed manually at ${closePrice.toFixed(2)} (${sign}$${absVal})`;
 }
 
-export function formatCooldownMessage(isPaper: boolean): string {
-  const prefix = isPaper ? 'PAPER\n' : '';
-  return `${prefix}⏳ Cooldown 30 min. Next setup after analysis.`;
+export function formatCooldownMessage(): string {
+  return `⏳ Cooldown 30 min. Next setup after analysis.`;
 }
 
 /**
  * Checks whether the signal is eligible to be sent to Telegram.
  */
-function shouldSendSignal(isPaper: boolean): boolean {
+function shouldSendSignal(): boolean {
   if (!settings.enabled) return false;
   if (!isTelegramConfigured()) return false;
-  if (isPaper && !settings.sendPaperSignals) return false;
   return true;
 }
 
@@ -314,14 +301,14 @@ function shouldSendSignal(isPaper: boolean): boolean {
  * Signal-Engine Lifecycle Dispatchers
  */
 export async function notifyNewSignal(signal: CommandSignal) {
-  if (!shouldSendSignal(signal.isPaper)) return;
+  if (!shouldSendSignal()) return;
   const text = formatNewSignalMessage(signal);
   await sendTelegramMessageWithRetry(text);
 }
 
-export async function notifyTargetHit(target: 'TP1' | 'TP2', signal: CommandSignal) {
-  if (!shouldSendSignal(signal.isPaper)) return;
-  const text = formatTargetHitMessage(target, signal.isPaper);
+export async function notifyTargetHit(target: 'TP1' | 'TP2', _signal: CommandSignal) {
+  if (!shouldSendSignal()) return;
+  const text = formatTargetHitMessage(target);
   await sendTelegramMessageWithRetry(text);
 }
 
@@ -329,14 +316,14 @@ export async function notifySignalClosed(
   reason: SignalCloseReason,
   realizedDollars: number,
   closePrice: number,
-  signal: CommandSignal
+  _signal: CommandSignal
 ) {
-  if (!shouldSendSignal(signal.isPaper)) return;
-  const resultText = formatFinalResultMessage(reason, realizedDollars, closePrice, signal.isPaper);
+  if (!shouldSendSignal()) return;
+  const resultText = formatFinalResultMessage(reason, realizedDollars, closePrice);
   await sendTelegramMessageWithRetry(resultText);
 
   // Send cooldown notice immediately after result
-  const cooldownText = formatCooldownMessage(signal.isPaper);
+  const cooldownText = formatCooldownMessage();
   await sendTelegramMessageWithRetry(cooldownText);
 }
 
@@ -363,7 +350,7 @@ export async function sendTestMessage(): Promise<{ success: boolean; message: st
  * In order:
  * a) Verify bot with Telegram getMe
  * b) Send the message "SARRAF signals are LIVE" to the chat
- * c) Only if that message is delivered: turn Telegram master toggle ON and "Send paper signals" ON
+ * c) Only if that message is delivered: turn Telegram master toggle ON
  * d) Persist the state on the server so it survives restarts
  * e) Update the UI immediately: status badge "Connected", last sent time, and note "Telegram message delivered"
  * If any step fails: keep everything OFF and return exact reason code and message.
@@ -424,7 +411,6 @@ export async function startTelegramSignals(): Promise<{
   if (botUsername && chatId.toLowerCase() === `@${botUsername.toLowerCase()}`) {
     // Cannot send message to self
     settings.enabled = false;
-    settings.sendPaperSignals = false;
     settings.lastMessageStatus = 'FAILED';
     settings.lastErrorMessage = "TELEGRAM_CHAT_ID is set to the bot's own username. A bot cannot message itself.";
     saveTelegramSettings();
@@ -443,7 +429,6 @@ export async function startTelegramSignals(): Promise<{
   if (!sendRes.success) {
     // Delivery failed: keep everything OFF
     settings.enabled = false;
-    settings.sendPaperSignals = false;
     settings.lastMessageStatus = 'FAILED';
     settings.lastErrorMessage = sendRes.error || 'Failed to deliver live announcement';
     saveTelegramSettings();
@@ -471,9 +456,8 @@ export async function startTelegramSignals(): Promise<{
     };
   }
 
-  // Turn ON both master toggle and paper signals
+  // Turn ON master toggle
   settings.enabled = true;
-  settings.sendPaperSignals = true;
   settings.lastMessageTime = Date.now();
   settings.lastMessageStatus = 'OK';
   settings.lastErrorMessage = null;
@@ -481,7 +465,7 @@ export async function startTelegramSignals(): Promise<{
   // Step d: Persist the state on the server so it survives restarts
   saveTelegramSettings();
 
-  console.log('[SARRAF TELEGRAM] START SIGNALS activated successfully! Telegram master toggle and Paper signals are now ON.');
+  console.log('[SARRAF TELEGRAM] START SIGNALS activated successfully! Telegram master toggle is now ON.');
 
   // Step e: Return updated status immediately
   return {
@@ -502,7 +486,6 @@ export function stopTelegramSignals(): {
   status: TelegramCommandStatus;
 } {
   settings.enabled = false;
-  settings.sendPaperSignals = false;
   saveTelegramSettings();
   console.log('[SARRAF TELEGRAM] STOP SIGNALS executed. Telegram dispatch disabled.');
   return {
@@ -575,7 +558,6 @@ export function getCommandTelegramStatus(isAdmin: boolean = true): TelegramComma
   return {
     configured,
     enabled: settings.enabled,
-    sendPaperSignals: settings.sendPaperSignals,
     status: state,
     lastMessageTime: settings.lastMessageTime,
     lastMessageTimeStr: timeStr,
@@ -589,13 +571,9 @@ export function getCommandTelegramStatus(isAdmin: boolean = true): TelegramComma
 
 export function updateCommandTelegramSettings(patch: {
   enabled?: boolean;
-  sendPaperSignals?: boolean;
 }): TelegramCommandStatus {
   if (typeof patch.enabled === 'boolean') {
     settings.enabled = patch.enabled;
-  }
-  if (typeof patch.sendPaperSignals === 'boolean') {
-    settings.sendPaperSignals = patch.sendPaperSignals;
   }
   // Clear failed flag if user re-enables
   if (patch.enabled) {

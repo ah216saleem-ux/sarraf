@@ -8,7 +8,6 @@ const INITIAL_STATE: SignalEnginePublicState = {
   activeSignal: null,
   cooldownRemainingSeconds: 0,
   cooldownEndsAt: null,
-  paperMode: true,
   gates: [
     { id: 'g1', name: 'W1/D1 Context', shortName: 'D1 Context', timeframe: 'D1', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Scanning multi-timeframe context...' },
     { id: 'g2', name: 'H4 Bias', shortName: 'H4 Bias', timeframe: 'H4', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Scanning multi-timeframe context...' },
@@ -45,7 +44,6 @@ const INITIAL_STATE: SignalEnginePublicState = {
 const INITIAL_TELEGRAM_STATUS: TelegramCommandStatus = {
   configured: false,
   enabled: false,
-  sendPaperSignals: false,
   status: 'DISABLED',
   lastMessageTime: null,
   lastMessageTimeStr: null,
@@ -66,11 +64,9 @@ export interface UseCommandSignalReturn {
   telegramStatus: TelegramCommandStatus;
   livePnL: number;
   manualClose: () => Promise<void>;
-  togglePaperMode: () => Promise<void>;
   resetCooldown: () => Promise<void>;
   triggerTestSignal: (side?: SignalSide) => Promise<void>;
   toggleTelegramMaster: (enabled?: boolean) => Promise<void>;
-  toggleTelegramPaper: (sendPaper?: boolean) => Promise<void>;
   sendTelegramTest: () => Promise<{ success: boolean; message: string }>;
   startSignals: () => Promise<{ success: boolean; message: string; reasonCode?: TelegramReasonCode }>;
   stopSignals: () => Promise<{ success: boolean; message: string }>;
@@ -197,20 +193,6 @@ export function useCommandSignal(): UseCommandSignalReturn {
     }
   }, [fetchState]);
 
-  const togglePaperMode = useCallback(async () => {
-    try {
-      setIsLoading(true);
-      await fetch('/api/command/signal/toggle-paper', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        credentials: 'include',
-      });
-      await fetchState();
-    } finally {
-      setIsLoading(false);
-    }
-  }, [fetchState]);
-
   const resetCooldown = useCallback(async () => {
     try {
       setIsLoading(true);
@@ -250,31 +232,6 @@ export function useCommandSignal(): UseCommandSignalReturn {
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         credentials: 'include',
         body: JSON.stringify(typeof enabled === 'boolean' ? { enabled } : {}),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const errText = `HTTP ${res.status}: ${data.error || res.statusText}`;
-        setTelegramError(errText);
-        return;
-      }
-      if (data.settings) setTelegramStatus(data.settings);
-    } catch (err: any) {
-      setTelegramError(err.message || 'Network error');
-    } finally {
-      setTelegramLoading(false);
-      fetchTelegramStatus();
-    }
-  }, [fetchTelegramStatus]);
-
-  const toggleTelegramPaper = useCallback(async (sendPaper?: boolean) => {
-    try {
-      setTelegramLoading(true);
-      setTelegramError(null);
-      const res = await fetch('/api/command/telegram/toggle-paper', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        credentials: 'include',
-        body: JSON.stringify(typeof sendPaper === 'boolean' ? { sendPaperSignals: sendPaper } : {}),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -390,11 +347,9 @@ export function useCommandSignal(): UseCommandSignalReturn {
     telegramStatus,
     livePnL,
     manualClose,
-    togglePaperMode,
     resetCooldown,
     triggerTestSignal,
     toggleTelegramMaster,
-    toggleTelegramPaper,
     sendTelegramTest,
     startSignals,
     stopSignals,

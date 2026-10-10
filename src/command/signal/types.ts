@@ -51,7 +51,6 @@ export interface CommandSignal {
   closeReason?: SignalCloseReason;
   livePnL: number;
   realizedPnL?: number;
-  isPaper: boolean;
   isTest?: boolean;
   confidence: number;
   gatesPassedCount: number;
@@ -68,7 +67,6 @@ export interface CommandSignalLogEntry {
   closePrice: number;
   result: SignalCloseReason;
   pnlDollars: number;
-  isPaper: boolean;
   isTest?: boolean;
 }
 
@@ -91,7 +89,6 @@ export interface SignalEnginePublicState {
   activeSignal: CommandSignal | null;
   cooldownRemainingSeconds: number;
   cooldownEndsAt: number | null;
-  paperMode: boolean;
   gates: SniperGateResult[];
   gatesAllPassed: boolean;
   alignedDirection: SignalSide | null;
@@ -118,7 +115,6 @@ export type TelegramReasonCode =
 export interface TelegramCommandStatus {
   configured: boolean;
   enabled: boolean;
-  sendPaperSignals: boolean;
   status: TelegramConnectionState;
   lastMessageTime: number | null;
   lastMessageTimeStr: string | null;

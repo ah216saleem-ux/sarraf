@@ -38,7 +38,6 @@ export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
             currentPrice={feed.currentPrice}
             isFeedDimmed={isDimmed}
             onManualClose={signalEngine.manualClose}
-            onTogglePaper={signalEngine.togglePaperMode}
             onTriggerTest={signalEngine.triggerTestSignal}
             isLoading={signalEngine.isLoading}
           />
@@ -47,7 +46,6 @@ export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
           <TelegramControlBar
             status={signalEngine.telegramStatus}
             onToggleMaster={signalEngine.toggleTelegramMaster}
-            onTogglePaper={signalEngine.toggleTelegramPaper}
             onSendTest={signalEngine.sendTelegramTest}
             onStartSignals={signalEngine.startSignals}
             onStopSignals={signalEngine.stopSignals}
@@ -72,7 +70,6 @@ export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
       <SignalLogCard
         history={signalEngine.state.history}
         stats={signalEngine.state.stats}
-        paperMode={signalEngine.state.paperMode}
         telegramStatus={signalEngine.telegramStatus}
       />
     </div>

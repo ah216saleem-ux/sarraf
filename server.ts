@@ -52,7 +52,6 @@ import {
   processCommandSignalTick,
   getCommandSignalState,
   manualCloseCommandSignal,
-  toggleCommandSignalPaperMode,
   resetCommandSignalCooldown,
   triggerSimulatedCommandSignal,
 } from './src/server/commandSignalEngine.ts';
@@ -153,6 +152,21 @@ import {
   getWhitelistedEmails,
 } from './src/server/googleChatService.ts';
 import { runGoogleChatHardeningTests } from './src/server/googleChatHardenTests.ts';
+import {
+  initSpyFeed,
+  getSpyFeedState,
+  addSpySseClient,
+  getSpyCandleStore,
+  evaluateSpySignal,
+  getSpySignalHistory,
+  loadSpySignalsFromDisk,
+  saveSpySignalsToDisk,
+  saveCandlesToDisk as saveSpyCandlesToDisk,
+  getExpiryOptionsStatus,
+  getExpiryLockStatus,
+  getSpyHistoryStats,
+  SpyExpiryOption,
+} from './server/spy/index.ts';
 
 dotenv.config();
 
@@ -535,12 +549,6 @@ app.post('/api/command/signal/close', (_req, res) => {
   return res.json(result);
 });
 
-// POST /api/command/signal/toggle-paper - Toggle Paper Mode (default ON)
-app.post('/api/command/signal/toggle-paper', (_req, res) => {
-  const result = toggleCommandSignalPaperMode();
-  return res.json(result);
-});
-
 // POST /api/command/signal/reset-cooldown - Reset cooldown to 0
 app.post('/api/command/signal/reset-cooldown', (_req, res) => {
   const result = resetCommandSignalCooldown();
@@ -631,15 +639,6 @@ app.post('/api/command/telegram/toggle', requireCommandAdmin, (req, res) => {
   return res.json({ success: true, settings: updated });
 });
 
-// POST /api/command/telegram/toggle-paper - Toggle Send Paper Signals (default OFF)
-app.post('/api/command/telegram/toggle-paper', requireCommandAdmin, (req, res) => {
-  const { sendPaperSignals } = req.body || {};
-  const current = getCommandTelegramStatus(true);
-  const nextVal = typeof sendPaperSignals === 'boolean' ? sendPaperSignals : !current.sendPaperSignals;
-  const updated = updateCommandTelegramSettings({ sendPaperSignals: nextVal });
-  return res.json({ success: true, settings: updated });
-});
-
 // POST /api/command/telegram/test - Send test message ("SARRAF test message OK")
 app.post('/api/command/telegram/test', requireCommandAdmin, async (_req, res) => {
   const result = await sendTestMessage();
@@ -713,6 +712,110 @@ app.get('/api/engine/replay', (req, res) => {
     timestamp: new Date().toISOString(),
     withHTFFilter: withHTF,
     withoutHTFFilter: withoutHTF,
+  });
+});
+
+// -------------------------------------------------------------
+// SPY (S&P 500) OPTIONS-SIGNAL TAB ENDPOINTS
+// -------------------------------------------------------------
+
+// GET /api/spy/feed - SSE live stream for SPY quotes, ticks, and state
+app.get('/api/spy/feed', (req, res) => {
+  addSpySseClient(res);
+});
+
+// GET /api/spy/status - SPY market hours, quote, freshness, expiry status, and lock/cooldown
+app.get('/api/spy/status', (_req, res) => {
+  const state = getSpyFeedState();
+  const expiryOptions = getExpiryOptionsStatus(state.marketHours, getExpiryLockStatus);
+  const stats = getSpyHistoryStats();
+  return res.json({
+    status: 'SUCCESS',
+    data: state,
+    expiryOptions,
+    stats,
+  });
+});
+
+// GET /api/spy/candles - SPY historical candles for mini chart
+app.get('/api/spy/candles', (req, res) => {
+  const tf = (req.query.tf as '1m' | '5m' | '15m' | '1h' | '4h' | '1d') || '15m';
+  const store = getSpyCandleStore();
+  const candles = store[tf] || store['15m'] || [];
+  return res.json({
+    status: 'SUCCESS',
+    timeframe: tf,
+    candles,
+  });
+});
+
+// POST /api/spy/analyze - Run deterministic options signal evaluation (START SIGNAL)
+app.post('/api/spy/analyze', async (req, res) => {
+  const { expiry } = req.body || {};
+  const validExpiries: SpyExpiryOption[] = ['15m', '30m', '45m', '1H', '4H', 'CLOSE'];
+  if (!validExpiries.includes(expiry)) {
+    return res.status(400).json({ success: false, error: 'Invalid expiry option specified.' });
+  }
+
+  const feedState = getSpyFeedState();
+
+  // Guard 1: Market closed
+  if (!feedState.marketHours.marketOpen) {
+    return res.status(400).json({
+      success: false,
+      error: 'MARKET CLOSED: Regular session (09:30-16:00 ET) is currently closed. START SIGNAL is disabled.',
+    });
+  }
+
+  // Guard 2: Stale data guard (> 10s old blocks START SIGNAL)
+  if (!feedState.isFresh || feedState.dataFreshnessMs > 10000) {
+    return res.status(400).json({
+      success: false,
+      error: `STALE DATA: Feed data is ${Math.round(feedState.dataFreshnessMs / 1000)}s old (>10s threshold). START SIGNAL blocked until fresh quotes arrive.`,
+    });
+  }
+
+  // Guard 3: Missing live price
+  if (feedState.currentPrice === null) {
+    return res.status(400).json({
+      success: false,
+      error: 'NO DATA: Live SPY price stream is unavailable. START SIGNAL blocked.',
+    });
+  }
+
+  // Guard 4: Lock + 15 min Cooldown per expiry
+  const lock = getExpiryLockStatus(expiry);
+  if (lock.isLocked) {
+    return res.status(400).json({
+      success: false,
+      error: lock.lockReason || 'Expiry is locked or in 15-minute cooldown.',
+    });
+  }
+
+  const currentPrice = feedState.currentPrice;
+  const candleStore = getSpyCandleStore();
+
+  const result = evaluateSpySignal({
+    expiry,
+    currentPrice,
+    candleStore,
+    marketOpen: feedState.marketHours.marketOpen,
+  });
+
+  return res.json({
+    success: true,
+    result,
+  });
+});
+
+// GET /api/spy/history - Recent evaluated options signals and selectivity stats
+app.get('/api/spy/history', (_req, res) => {
+  const history = getSpySignalHistory();
+  const stats = getSpyHistoryStats();
+  return res.json({
+    status: 'SUCCESS',
+    history,
+    stats,
   });
 });
 
@@ -1898,6 +2001,10 @@ async function startServer() {
   // 10. Start resilient background tick worker
   fetchBiquoteTick();
 
+  // 10b. Initialize SPY S&P 500 Options Feed & Signals
+  loadSpySignalsFromDisk();
+  initSpyFeed();
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -1927,6 +2034,8 @@ function handleGracefulShutdown(signal: string) {
   saveCandlesToDisk();
   saveSignalsToDisk();
   saveCommandSignalsToDisk();
+  saveSpySignalsToDisk();
+  saveSpyCandlesToDisk();
   saveTelegramSettings();
   saveLastTickToDisk();
   releaseInstanceLease();

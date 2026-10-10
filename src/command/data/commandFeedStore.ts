@@ -882,49 +882,73 @@ class CommandFeedStore {
         .slice(0, 3);
     }
 
-    // --- 7. REAL ORIGIN PROFILE & DISPLACEMENTS (from real candle impulse moves) ---
-    if (m15Candles.length >= 8) {
+    // --- 7. REAL ORIGIN PROFILE & DISPLACEMENTS (from live price +/- $25, $2.5 bins) ---
+    if (p > 0) {
+      const minRange = p - 25.0;
+      const maxRange = p + 25.0;
       const displacements: OriginDisplacement[] = [];
       const levelsMap = new Map<number, { count: number; volume: number }>();
+      let totalImpulsesInRange = 0;
 
-      for (let i = 0; i < m15Candles.length; i++) {
-        const c = m15Candles[i];
+      // Scan M1, M5, M15, M30 stored candles for real impulse moves
+      const allCandles = [
+        ...(this.candles.M15 || []),
+        ...(this.candles.M5 || []),
+        ...(this.candles.M30 || []),
+        ...(this.candles.M1 || []),
+      ];
+
+      const processedTimes = new Set<number>();
+
+      for (let i = 0; i < allCandles.length; i++) {
+        const c = allCandles[i];
+        if (!c || processedTimes.has(c.time)) continue;
+        processedTimes.add(c.time);
+
         const body = Math.abs(c.close - c.open);
-        // Minimum displacement threshold: $2.00 move in M15
-        if (body >= 2.0) {
+        // Minimum impulse threshold: $0.80 move
+        if (body >= 0.8) {
           const isBull = c.close > c.open;
           const originPrice = Number(c.open.toFixed(2));
           const targetPrice = Number(c.close.toFixed(2));
-          const diffPips = Math.round(body * 10);
-          const minutesAgo = Math.round((now - c.time) / 60000);
-          const timeAgo = minutesAgo < 60 ? `${minutesAgo}m ago` : `${Math.floor(minutesAgo / 60)}h ${minutesAgo % 60}m ago`;
-          const powerScore = Math.min(98, Math.max(65, Math.round(60 + body * 5)));
 
-          displacements.unshift({
-            id: `od-${c.time}`,
-            originPrice,
-            targetPrice,
-            displacementPips: isBull ? diffPips : -diffPips,
-            timeAgo,
-            powerScore,
-            direction: isBull ? 'BULLISH' : 'BEARISH',
-          });
+          // STRICT CHECK: originPrice MUST be within range [livePrice - 25, livePrice + 25]
+          if (originPrice >= minRange && originPrice <= maxRange) {
+            totalImpulsesInRange++;
 
-          // Bin into $3 clusters for horizontal profile
-          const binKey = Math.round(originPrice / 3) * 3;
-          const curr = levelsMap.get(binKey) || { count: 0, volume: 0 };
-          curr.count += 1;
-          curr.volume += c.volume || 10;
-          levelsMap.set(binKey, curr);
+            // Bin key: bins of $2.5
+            const binKey = Number((Math.round(originPrice / 2.5) * 2.5).toFixed(1));
+            if (binKey >= minRange && binKey <= maxRange) {
+              const curr = levelsMap.get(binKey) || { count: 0, volume: 0 };
+              curr.count += 1;
+              curr.volume += c.volume || 10;
+              levelsMap.set(binKey, curr);
+            }
+
+            const diffPips = Math.round(body * 10);
+            const minutesAgo = Math.round((now - c.time) / 60000);
+            const timeAgo = minutesAgo < 60 ? `${minutesAgo}m ago` : `${Math.floor(minutesAgo / 60)}h ${minutesAgo % 60}m ago`;
+            const powerScore = Math.min(98, Math.max(65, Math.round(60 + body * 5)));
+
+            displacements.unshift({
+              id: `od-${c.time}`,
+              originPrice,
+              targetPrice,
+              displacementPips: isBull ? diffPips : -diffPips,
+              timeAgo,
+              powerScore,
+              direction: isBull ? 'BULLISH' : 'BEARISH',
+            });
+          }
         }
       }
 
       this.originDisplacements = displacements.slice(0, 4);
 
-      if (displacements.length < 2 || levelsMap.size === 0) {
+      // FIX 1 Rule: If fewer than 3 impulses fall in the range live price +/- $25, show N/A
+      if (totalImpulsesInRange < 3 || levelsMap.size === 0) {
         this.originLevels = [];
       } else {
-        // Convert levelsMap to OriginLevel array: strongest volume = exactly 100%
         const maxVol = Math.max(1, ...Array.from(levelsMap.values()).map((v) => v.volume));
         this.originLevels = Array.from(levelsMap.entries())
           .map(([priceLevel, data]) => ({
@@ -932,9 +956,14 @@ class CommandFeedStore {
             volumeWeight: Math.min(100, Math.round((data.volume / maxVol) * 100)),
             displacementsCount: data.count,
           }))
-          .sort((a, b) => a.priceLevel - b.priceLevel)
-          .slice(0, 6);
+          .filter((lvl) => lvl.priceLevel >= minRange && lvl.priceLevel <= maxRange)
+          .sort((a, b) => Math.abs(a.priceLevel - p) - Math.abs(b.priceLevel - p))
+          .slice(0, 6)
+          .sort((a, b) => a.priceLevel - b.priceLevel);
       }
+    } else {
+      this.originLevels = [];
+      this.originDisplacements = [];
     }
 
     // --- 8. REAL CONFIDENCE MATRIX (computed from live components) ---

@@ -1,6 +1,6 @@
 import React from 'react';
 import { SignalEnginePublicState } from './types';
-import { Shield, Clock, XCircle, ArrowUpRight, ArrowDownRight, Zap } from 'lucide-react';
+import { Clock, XCircle, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 
 interface AhmedDecisionCardProps {
   state: SignalEnginePublicState;
@@ -8,7 +8,6 @@ interface AhmedDecisionCardProps {
   currentPrice: number;
   isFeedDimmed: boolean;
   onManualClose: () => Promise<void>;
-  onTogglePaper: () => Promise<void>;
   onTriggerTest?: () => Promise<void>;
   isLoading: boolean;
 }
@@ -19,10 +18,9 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
   currentPrice,
   isFeedDimmed,
   onManualClose,
-  onTogglePaper,
   isLoading,
 }) => {
-  const { lifecycle, activeSignal, cooldownRemainingSeconds, paperMode, waitReason } = state;
+  const { lifecycle, activeSignal, cooldownRemainingSeconds, waitReason } = state;
 
   // Format cooldown time MM:SS
   const formatCooldown = (seconds: number) => {
@@ -31,7 +29,7 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Determine primary display status
+  // Determine primary display status: MUST ONLY SAY WAIT, BUY, OR SELL
   let statusBadge = 'WAIT';
   let statusBg = 'bg-[#f5a524]/10 text-[#f5a524] border-[#f5a524]/30';
   let dotColor = 'bg-[#f5a524]';
@@ -51,7 +49,7 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
       dotColor = 'bg-[#ff3b6b]';
     }
   } else if (lifecycle === 'COOLDOWN') {
-    statusBadge = 'COOLDOWN';
+    statusBadge = 'WAIT';
     statusBg = 'bg-[#38bdf8]/10 text-[#38bdf8] border-[#38bdf8]/30';
     dotColor = 'bg-[#38bdf8]';
   }
@@ -77,26 +75,17 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
           </div>
         </div>
 
-        {/* Execution Mode Badge: show PAPER MODE while paper mode is on, no LIVE EXEC [ON] badge */}
+        {/* Status Tag: LIVE or CLOSED */}
         <div className="flex items-center gap-1.5">
-          {paperMode ? (
-            <span
-              onClick={onTogglePaper}
-              title="Click to toggle Paper Mode"
-              className="text-[9px] font-bold px-2 py-0.5 rounded border transition-colors cursor-pointer bg-[#E8B84A]/10 text-[#E8B84A] border-[#E8B84A]/30 hover:bg-[#E8B84A]/20"
-            >
-              PAPER MODE
-            </span>
-          ) : (
-            <button
-              onClick={onTogglePaper}
-              disabled={isLoading}
-              title="Click to toggle Paper Mode"
-              className="text-[9px] font-bold px-2 py-0.5 rounded border transition-colors cursor-pointer bg-[#22e08a]/10 text-[#22e08a] border-[#22e08a]/30 hover:bg-[#22e08a]/20"
-            >
-              LIVE
-            </button>
-          )}
+          <span
+            className={`text-[9px] font-bold px-2 py-0.5 rounded border ${
+              isFeedDimmed
+                ? 'bg-[#ff3b6b]/10 text-[#ff3b6b] border-[#ff3b6b]/30'
+                : 'bg-[#22e08a]/10 text-[#22e08a] border-[#22e08a]/30'
+            }`}
+          >
+            {isFeedDimmed ? 'CLOSED' : 'LIVE'}
+          </span>
         </div>
       </div>
 

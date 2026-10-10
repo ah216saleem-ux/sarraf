@@ -5,14 +5,12 @@ import { ArrowUpRight, ArrowDownRight, CheckCircle2, XCircle, TrendingUp, Dollar
 interface SignalLogCardProps {
   history: CommandSignalLogEntry[];
   stats: SignalEngineStats;
-  paperMode: boolean;
   telegramStatus?: TelegramCommandStatus;
 }
 
 export const SignalLogCard: React.FC<SignalLogCardProps> = ({
   history,
   stats,
-  paperMode,
   telegramStatus,
 }) => {
   // Requirement 10: Win rate and averages only from TP/SL, exclude MANUAL exits, show "Not enough data" until 20 TP/SL exist
@@ -146,7 +144,6 @@ export const SignalLogCard: React.FC<SignalLogCardProps> = ({
                   <th className="py-1.5 px-2">EXIT</th>
                   <th className="py-1.5 px-2">RESULT</th>
                   <th className="py-1.5 px-2 text-right">DOLLARS PNL</th>
-                  <th className="py-1.5 px-2 text-center">MODE</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5 bg-[#070b14]/50">
@@ -193,17 +190,6 @@ export const SignalLogCard: React.FC<SignalLogCardProps> = ({
                         }`}
                       >
                         {item.pnlDollars >= 0 ? `+$${item.pnlDollars.toFixed(2)}` : `-$${Math.abs(item.pnlDollars).toFixed(2)}`}
-                      </td>
-                      <td className="py-1.5 px-2 text-center whitespace-nowrap">
-                        <span
-                          className={`px-1 py-0.2 rounded text-[7.5px] font-bold ${
-                            item.isPaper
-                              ? 'bg-[#E8B84A]/10 text-[#E8B84A] border border-[#E8B84A]/30'
-                              : 'bg-[#22e08a]/10 text-[#22e08a] border border-[#22e08a]/30'
-                          }`}
-                        >
-                          {item.isPaper ? 'PAPER' : 'LIVE'}
-                        </span>
                       </td>
                     </tr>
                   );
