@@ -177,6 +177,7 @@ export class PulseNetVisualizer {
   private latestUpdate: PulseNetDataUpdate | null = null;
   private lastKnownPrice: number = 0;
   private nodeSequenceIndex: number = 0;
+  private previousNode: PulseNetNodePoint | null = null;
 
   // Callbacks
   public onProjectionUpdate?: (data: PulseNetOverlayProjection) => void;
@@ -313,7 +314,7 @@ export class PulseNetVisualizer {
 
   // Create procedural textures for high-performance star-streak flares & glows
   private initTextures() {
-    // 1. Star-streak sprite (horizontal & vertical long soft rays + 2 shorter diagonal rays)
+    // 1. Star-streak sprite: thin rays (1 to 2 px tall, max 120 px long), soft falloff, zero box fill
     const flareCanvas = document.createElement('canvas');
     flareCanvas.width = 128;
     flareCanvas.height = 128;
@@ -322,46 +323,35 @@ export class PulseNetVisualizer {
       const cx = 64;
       const cy = 64;
 
-      // Radial core falloff
-      const radGlow = fCtx.createRadialGradient(cx, cy, 0, cx, cy, 48);
-      radGlow.addColorStop(0, 'rgba(255, 255, 255, 1.0)');
-      radGlow.addColorStop(0.15, 'rgba(215, 235, 255, 0.7)');
-      radGlow.addColorStop(0.5, 'rgba(140, 185, 255, 0.2)');
-      radGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
-      fCtx.fillStyle = radGlow;
-      fCtx.fillRect(0, 0, 128, 128);
+      fCtx.clearRect(0, 0, 128, 128);
 
-      // Horizontal ray
-      const hGrad = fCtx.createLinearGradient(0, cy, 128, cy);
+      // Horizontal ray: thin (1.5 px tall), max 120 px long, soft exponential fade
+      const hGrad = fCtx.createLinearGradient(4, cy, 124, cy);
       hGrad.addColorStop(0, 'rgba(255,255,255,0)');
+      hGrad.addColorStop(0.25, 'rgba(215,235,255,0.4)');
       hGrad.addColorStop(0.5, 'rgba(255,255,255,0.95)');
+      hGrad.addColorStop(0.75, 'rgba(215,235,255,0.4)');
       hGrad.addColorStop(1, 'rgba(255,255,255,0)');
       fCtx.fillStyle = hGrad;
-      fCtx.fillRect(0, cy - 1.5, 128, 3);
+      fCtx.fillRect(4, cy - 0.75, 120, 1.5);
 
-      // Vertical ray
-      const vGrad = fCtx.createLinearGradient(cx, 0, cx, 128);
+      // Vertical ray: thin (1.5 px wide), 60 px long
+      const vGrad = fCtx.createLinearGradient(cx, 34, cx, 94);
       vGrad.addColorStop(0, 'rgba(255,255,255,0)');
-      vGrad.addColorStop(0.5, 'rgba(255,255,255,0.95)');
+      vGrad.addColorStop(0.5, 'rgba(255,255,255,0.85)');
       vGrad.addColorStop(1, 'rgba(255,255,255,0)');
       fCtx.fillStyle = vGrad;
-      fCtx.fillRect(cx - 1.5, 0, 3, 128);
+      fCtx.fillRect(cx - 0.75, 34, 1.5, 60);
 
-      // Diagonal shorter rays
-      fCtx.save();
-      fCtx.translate(cx, cy);
-      fCtx.rotate(Math.PI / 4);
-      const dGrad = fCtx.createLinearGradient(-48, 0, 48, 0);
-      dGrad.addColorStop(0, 'rgba(255,255,255,0)');
-      dGrad.addColorStop(0.5, 'rgba(220,240,255,0.6)');
-      dGrad.addColorStop(1, 'rgba(255,255,255,0)');
-      fCtx.fillStyle = dGrad;
-      fCtx.fillRect(-48, -1, 96, 2);
-
-      fCtx.rotate(Math.PI / 2);
-      fCtx.fillStyle = dGrad;
-      fCtx.fillRect(-48, -1, 96, 2);
-      fCtx.restore();
+      // Tiny pin core
+      const core = fCtx.createRadialGradient(cx, cy, 0, cx, cy, 3.5);
+      core.addColorStop(0, 'rgba(255,255,255,1.0)');
+      core.addColorStop(0.5, 'rgba(215,235,255,0.6)');
+      core.addColorStop(1, 'rgba(215,235,255,0)');
+      fCtx.fillStyle = core;
+      fCtx.beginPath();
+      fCtx.arc(cx, cy, 3.5, 0, Math.PI * 2);
+      fCtx.fill();
     }
     this.flareTexture = new THREE.CanvasTexture(flareCanvas);
 
@@ -442,34 +432,41 @@ export class PulseNetVisualizer {
       attribute float aAlpha;
       varying vec3 vColor;
       varying float vAlpha;
+      uniform float uPixelRatio;
+
       void main() {
         vColor = color;
         vAlpha = aAlpha;
-        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = aSize * (300.0 / -mvPosition.z);
-        gl_Position = projectionMatrix * mvPosition;
+        // Plain pixel value clamped between 2.0 and 9.0; no size attenuation
+        float uSize = aSize;
+        float brightness = vAlpha;
+        gl_PointSize = clamp(uSize * uPixelRatio * (1.0 + 0.5 * brightness), 2.0, 9.0);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `;
 
     const fragmentShader = `
       varying vec3 vColor;
       varying float vAlpha;
+
       void main() {
-        vec2 coord = gl_PointCoord - vec2(0.5);
-        float dist = length(coord);
-        if (dist > 0.5) discard;
-        // Soft disc falloff
-        float strength = smoothstep(0.5, 0.05, dist);
-        gl_FragColor = vec4(vColor, vAlpha * strength);
+        vec2 c = gl_PointCoord - 0.5;
+        float d = length(c);
+        if (d > 0.5) discard;
+        float a = smoothstep(0.5, 0.0, d); // soft falloff
+        gl_FragColor = vec4(vColor, a * vAlpha);
       }
     `;
 
     this.nodesMaterial = new THREE.ShaderMaterial({
-      uniforms: {},
+      uniforms: {
+        uPixelRatio: { value: dpr },
+      },
       vertexShader,
       fragmentShader,
       transparent: true,
       depthWrite: false,
+      depthTest: false,
       vertexColors: true,
       blending: THREE.NormalBlending,
     });
@@ -478,44 +475,38 @@ export class PulseNetVisualizer {
     this.scene.add(this.nodesPoints);
   }
 
-  // Lines: THREE.LineSegments, 1px, colour #8fb4e8, alpha 0.15 to 0.55 fading over time
+  // Lines: LineSegments material: LineBasicMaterial, color #8fb4e8, transparent, opacity driven per-segment 0.15 to 0.55
   private initLinesMesh() {
     this.linesGeometry = new THREE.BufferGeometry();
     const positions = new Float32Array(this.maxLineSegments * 2 * 3);
-    const colors = new Float32Array(this.maxLineSegments * 2 * 3);
     const alphas = new Float32Array(this.maxLineSegments * 2);
 
     for (let i = 0; i < this.maxLineSegments * 2; i++) {
       positions[i * 3 + 0] = 0;
       positions[i * 3 + 1] = 0;
       positions[i * 3 + 2] = -999;
-
-      colors[i * 3 + 0] = 0.56; // #8fb4e8
-      colors[i * 3 + 1] = 0.70;
-      colors[i * 3 + 2] = 0.91;
       alphas[i] = 0.0;
     }
 
     this.linesGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    this.linesGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     this.linesGeometry.setAttribute('aAlpha', new THREE.BufferAttribute(alphas, 1));
+    this.linesGeometry.setDrawRange(0, 0);
 
+    // Vertex colors or custom shader material with line color #8fb4e8 and per-vertex alpha
     const vertexShader = `
       attribute float aAlpha;
-      varying vec3 vColor;
       varying float vAlpha;
       void main() {
-        vColor = color;
         vAlpha = aAlpha;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `;
 
     const fragmentShader = `
-      varying vec3 vColor;
       varying float vAlpha;
       void main() {
-        gl_FragColor = vec4(vColor, vAlpha);
+        // Line color #8fb4e8 = rgb(0.56, 0.706, 0.91)
+        gl_FragColor = vec4(vec3(0.56, 0.706, 0.91), clamp(vAlpha, 0.0, 0.55));
       }
     `;
 
@@ -525,7 +516,7 @@ export class PulseNetVisualizer {
       fragmentShader,
       transparent: true,
       depthWrite: false,
-      vertexColors: true,
+      depthTest: false,
       blending: THREE.NormalBlending,
     });
 
@@ -549,7 +540,7 @@ export class PulseNetVisualizer {
         depthWrite: false,
       });
       const sprite = new THREE.Sprite(mat);
-      sprite.scale.set(0.65, 0.65, 1.0);
+      sprite.scale.set(0.45, 0.45, 1.0);
       sprite.position.set(0, 0, -999);
       this.flareGroup.add(sprite);
       this.flareSprites.push(sprite);
@@ -733,54 +724,59 @@ export class PulseNetVisualizer {
       this.spawnFlare(x, y, z, direction === 'BUY' ? new THREE.Color(0x22e08a) : new THREE.Color(0xff3b6b), 0.75);
     }
 
-    // Connect lines to nearest 2-3 existing active nodes within Euclidean distance threshold
+    // Connect lines: Each new node must connect to the previous node and to its 2 nearest recent nodes
     this.connectNewNodeLines(node);
+    this.previousNode = node;
 
     this.nodeSequenceIndex++;
   }
 
-  // Connect thin glowing lines from newly arrived node to 2-3 recent or nearby active nodes
+  // Connect thin glowing lines from newly arrived node to previous node and 2 nearest recent nodes
   private connectNewNodeLines(newNode: PulseNetNodePoint) {
-    const maxConnections = 3;
-    let connectionsCount = 0;
-
-    // Find nearest active nodes
-    const candidates: Array<{ node: PulseNetNodePoint; distSq: number }> = [];
-
-    for (let i = 0; i < this.maxNodes; i++) {
-      const other = this.nodesPool[i];
-      if (!other.active || other === newNode) continue;
-
-      const dx = newNode.x - other.x;
-      const dy = newNode.y - other.y;
-      const dz = newNode.z - other.z;
-      const distSq = dx * dx + dy * dy + dz * dz;
-
-      // Distance threshold of 4.2 units squared
-      if (distSq < 18.0) {
-        candidates.push({ node: other, distSq });
-      }
-    }
-
-    candidates.sort((a, b) => a.distSq - b.distSq);
-
     const time = this.clock.getElapsedTime();
-    for (let i = 0; i < Math.min(candidates.length, maxConnections); i++) {
+    const connectedNodes = new Set<PulseNetNodePoint>();
+
+    const addLineSegment = (target: PulseNetNodePoint) => {
+      if (connectedNodes.has(target)) return;
+      connectedNodes.add(target);
+
       const line = this.linesPool[this.linesHeadIndex];
       this.linesHeadIndex = (this.linesHeadIndex + 1) % this.maxLineSegments;
 
       line.startX = newNode.x;
       line.startY = newNode.y;
       line.startZ = newNode.z;
-      line.endX = candidates[i].node.x;
-      line.endY = candidates[i].node.y;
-      line.endZ = candidates[i].node.z;
+      line.endX = target.x;
+      line.endY = target.y;
+      line.endZ = target.z;
       line.createdTime = time;
       line.life = 0;
-      line.maxLife = 3.5; // Fades out smoothly over 3.5 seconds
+      line.maxLife = 4.0; // visible smoothly over 4s
       line.active = true;
+    };
 
-      connectionsCount++;
+    // 1. Connect to previous node
+    if (this.previousNode && this.previousNode.active && this.previousNode !== newNode) {
+      addLineSegment(this.previousNode);
+    }
+
+    // 2. Connect to its 2 nearest recent nodes
+    const candidates: Array<{ node: PulseNetNodePoint; distSq: number }> = [];
+    for (let i = 0; i < this.maxNodes; i++) {
+      const other = this.nodesPool[i];
+      if (!other.active || other === newNode || connectedNodes.has(other)) continue;
+
+      const dx = newNode.x - other.x;
+      const dy = newNode.y - other.y;
+      const dz = newNode.z - other.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+
+      candidates.push({ node: other, distSq });
+    }
+
+    candidates.sort((a, b) => a.distSq - b.distSq);
+    for (let i = 0; i < Math.min(candidates.length, 2); i++) {
+      addLineSegment(candidates[i].node);
     }
   }
 
@@ -803,7 +799,7 @@ export class PulseNetVisualizer {
       sprite.position.set(x, y, z);
       (sprite.material as THREE.SpriteMaterial).color.copy(color);
       (sprite.material as THREE.SpriteMaterial).opacity = flare.maxOpacity;
-      sprite.scale.set(0.7, 0.7, 1.0);
+      sprite.scale.set(0.45, 0.45, 1.0);
     }
   }
 
@@ -964,6 +960,17 @@ export class PulseNetVisualizer {
 
     const dpr = Math.min(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1, 1.5);
 
+    // Find newest active node (price core) to render gold
+    let newestNodeIndex = -1;
+    let newestCreatedTime = -1;
+    for (let i = 0; i < this.maxNodes; i++) {
+      const n = this.nodesPool[i];
+      if (n.active && n.createdTime > newestCreatedTime) {
+        newestCreatedTime = n.createdTime;
+        newestNodeIndex = i;
+      }
+    }
+
     for (let i = 0; i < this.maxNodes; i++) {
       const node = this.nodesPool[i];
       if (!node.active) {
@@ -978,21 +985,25 @@ export class PulseNetVisualizer {
 
       posAttr.setXYZ(i, node.x, currentY, node.z);
 
-      // Node size: 2 to 5 px at DPR 1
-      const baseSize = (2.2 + node.intensity * 2.5) * dpr;
+      // Node size: clamp base size between 2.0 and 5.0 (shader further clamps gl_PointSize max 9.0)
+      const baseSize = THREE.MathUtils.clamp(2.0 + node.intensity * 2.0, 2.0, 5.0);
       sizeAttr.setX(i, baseSize);
 
-      // Near-white with cool blue tint #cfe6ff, subtle tint on signal
-      if (this.activeSignalSide === 'BUY') {
-        colAttr.setXYZ(i, 0.55, 0.95, 0.85); // teal accent
+      // Node colour: near-white cool blue (#cfe6ff). Newest node (price core) gold (#f5c451).
+      if (i === newestNodeIndex) {
+        // Gold: #f5c451 = rgb(0.96, 0.77, 0.32)
+        colAttr.setXYZ(i, 0.96, 0.77, 0.32);
+      } else if (this.activeSignalSide === 'BUY') {
+        colAttr.setXYZ(i, 0.70, 0.95, 0.88); // subtle teal-tinted cool white
       } else if (this.activeSignalSide === 'SELL') {
-        colAttr.setXYZ(i, 1.0, 0.55, 0.65); // red accent
+        colAttr.setXYZ(i, 0.98, 0.75, 0.80); // subtle red-tinted cool white
       } else {
-        colAttr.setXYZ(i, 0.81, 0.90, 1.0); // #cfe6ff
+        // Cool blue: #cfe6ff = rgb(0.81, 0.90, 1.0)
+        colAttr.setXYZ(i, 0.81, 0.90, 1.0);
       }
 
-      // Alpha: starts bright (0.85), slowly settles to resting constellation glow (0.35)
-      const alpha = Math.max(0.35, 0.9 - age * 0.08);
+      // Alpha: starts bright (max 0.9), settles smoothly to 0.30
+      const alpha = THREE.MathUtils.clamp(0.9 - age * 0.08, 0.30, 0.90);
       alphaAttr.setX(i, alpha);
     }
 
@@ -1007,6 +1018,8 @@ export class PulseNetVisualizer {
 
     const posAttr = this.linesGeometry.getAttribute('position') as THREE.BufferAttribute;
     const alphaAttr = this.linesGeometry.getAttribute('aAlpha') as THREE.BufferAttribute;
+
+    let activeSegmentsCount = 0;
 
     for (let i = 0; i < this.maxLineSegments; i++) {
       const line = this.linesPool[i];
@@ -1034,16 +1047,18 @@ export class PulseNetVisualizer {
       posAttr.setXYZ(v0, line.startX, line.startY, line.startZ);
       posAttr.setXYZ(v1, line.endX, line.endY, line.endZ);
 
-      // Fade out over time: alpha 0.15 to 0.55, brightest right when created
+      // Fade out over time: alpha 0.15 to 0.55 per segment
       const progress = line.life / line.maxLife;
-      const alpha = THREE.MathUtils.lerp(0.55, 0.12, progress);
+      const alpha = THREE.MathUtils.lerp(0.55, 0.15, progress);
 
       alphaAttr.setX(v0, alpha);
       alphaAttr.setX(v1, alpha);
+      activeSegmentsCount++;
     }
 
     posAttr.needsUpdate = true;
     alphaAttr.needsUpdate = true;
+    this.linesGeometry.setDrawRange(0, this.maxLineSegments * 2);
   }
 
   private updateFlares(time: number, delta: number) {
@@ -1066,7 +1081,7 @@ export class PulseNetVisualizer {
       (sprite.material as THREE.SpriteMaterial).opacity = currentOpacity;
 
       // Slight expansion as it fades
-      const scale = 0.55 + progress * 0.35;
+      const scale = 0.40 + progress * 0.15;
       sprite.scale.set(scale, scale, 1.0);
     }
   }

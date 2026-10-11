@@ -53,6 +53,9 @@ class CommandFeedStore {
   // 60-Second Rolling Tick Tape
   public tickTape: CommandTick[] = [];
 
+  // Rolling Tick History (last 300 real ticks, oldest -> newest)
+  public tickHistory: CommandTick[] = [];
+
   // Candle Stores per timeframe (from /api/candles)
   public candles: Record<Timeframe, Candle[]> = {
     M1: [],
@@ -484,6 +487,12 @@ class CommandFeedStore {
     this.tickTape.unshift(tick);
     const cutoff60s = now - 60000;
     this.tickTape = this.tickTape.filter((t) => t.timestamp >= cutoff60s);
+
+    // Update Rolling Tick History (last 300 real ticks, oldest -> newest)
+    this.tickHistory.push(tick);
+    if (this.tickHistory.length > 300) {
+      this.tickHistory.shift();
+    }
 
     // Update Flow & Volume Counters
     this.updateTickTapeStats();

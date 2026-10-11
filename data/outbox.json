@@ -384,5 +384,21 @@
     "messageText": "⚠️ Bot restarted",
     "lastAttemptAt": "2026-10-08T12:59:39.002Z",
     "lastError": "Waiting for target Telegram chat registration. Open @Sarraftelegrambot and send /start or enter Chat ID in dashboard Settings."
+  },
+  {
+    "eventId": "SUMMARY-D-2026-10-10",
+    "signalId": "SUMMARY-D-2026-10-10",
+    "type": "DAILY_SUMMARY",
+    "payload": {
+      "signalsCount": 0,
+      "tpCount": 0,
+      "slCount": 0,
+      "beCount": 0,
+      "totalDollars": 0,
+      "totalR": 0
+    },
+    "createdAt": "2026-10-10T22:30:07.925Z",
+    "status": "PENDING_DELIVERY",
+    "messageText": "Daily Summary 📊 No signals today."
   }
 ]

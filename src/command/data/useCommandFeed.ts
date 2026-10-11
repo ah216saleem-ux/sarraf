@@ -36,6 +36,7 @@ export interface UseCommandFeedResult {
   connection: FeedConnectionState;
   sparkline: number[];
   tickTape: CommandTick[];
+  tickHistory: CommandTick[];
   candles: Candle[];
   selectedTimeframe: Timeframe;
   setTimeframe: (tf: Timeframe) => void;
@@ -177,6 +178,7 @@ export function useCommandFeed(): UseCommandFeedResult {
     connection: commandStore.connection,
     sparkline: commandStore.sparkline,
     tickTape: commandStore.tickTape,
+    tickHistory: commandStore.tickHistory,
     candles: activeCandles,
     selectedTimeframe: commandStore.selectedTimeframe,
     setTimeframe: (tf: Timeframe) => commandStore.setTimeframe(tf),

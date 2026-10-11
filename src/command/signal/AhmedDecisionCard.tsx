@@ -7,6 +7,7 @@ interface AhmedDecisionCardProps {
   livePnL: number;
   currentPrice: number;
   isFeedDimmed: boolean;
+  isMarketClosed?: boolean;
   onManualClose: () => Promise<void>;
   onTriggerTest?: () => Promise<void>;
   isLoading: boolean;
@@ -17,6 +18,7 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
   livePnL,
   currentPrice,
   isFeedDimmed,
+  isMarketClosed = false,
   onManualClose,
   isLoading,
 }) => {
@@ -75,16 +77,16 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
           </div>
         </div>
 
-        {/* Status Tag: LIVE or CLOSED */}
+        {/* Status Tag: LIVE or CLOSED (grey #8a96a8 when market closed) */}
         <div className="flex items-center gap-1.5">
           <span
             className={`text-[9px] font-bold px-2 py-0.5 rounded border ${
-              isFeedDimmed
-                ? 'bg-[#ff3b6b]/10 text-[#ff3b6b] border-[#ff3b6b]/30'
+              isMarketClosed || isFeedDimmed
+                ? 'bg-neutral-800/40 text-[#8a9ba8] border-[#8a9ba8]/30'
                 : 'bg-[#22e08a]/10 text-[#22e08a] border-[#22e08a]/30'
             }`}
           >
-            {isFeedDimmed ? 'CLOSED' : 'LIVE'}
+            {isMarketClosed || isFeedDimmed ? 'CLOSED' : 'LIVE'}
           </span>
         </div>
       </div>
@@ -103,10 +105,12 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
             )}
           </div>
 
-          {/* Live PnL in dollars if ACTIVE */}
+          {/* Live PnL in dollars if ACTIVE (labelled "last price" while market closed) */}
           {lifecycle === 'ACTIVE' && activeSignal && (
             <div className="flex items-baseline gap-1.5 pl-2 border-l border-white/10">
-              <span className="text-[10px] text-[#8a96a8]">PNL:</span>
+              <span className="text-[10px] text-[#8a96a8]">
+                {isMarketClosed ? 'LAST PRICE:' : 'PNL:'}
+              </span>
               <span className={`text-base sm:text-lg font-bold tracking-tight ${pnlColor}`}>
                 {effectivePnL >= 0 ? `+$${effectivePnL.toFixed(2)}` : `-$${Math.abs(effectivePnL).toFixed(2)}`}
               </span>
