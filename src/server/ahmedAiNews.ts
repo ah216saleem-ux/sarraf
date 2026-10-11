@@ -393,9 +393,26 @@ export function getEventPlaybook(title: string, isSpeech: boolean): EventPlayboo
   };
 }
 
+export function isNoConsensusEvent(title: string, isSpeech?: boolean): boolean {
+  if (isSpeech) return true;
+  const t = title.toLowerCase();
+  return (
+    t.includes('adp weekly') ||
+    t.includes('api ') ||
+    t.includes('eia') ||
+    t.includes('inventor') ||
+    t.includes('beige book') ||
+    t.includes('speaks') ||
+    t.includes('speech') ||
+    t.includes('testifies') ||
+    t.includes('fomc press conference') ||
+    t.includes('fomc minutes')
+  );
+}
+
 // Pre-News Lean Computation Rule
 export interface PreNewsLeanResult {
-  lean: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'TONE-DEPENDENT' | 'WAITING';
+  lean: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'TONE-DEPENDENT' | 'WAITING' | 'WAITING_FORECAST' | 'NO_CONSENSUS';
   label: string;
   explanation: string;
 }
@@ -407,27 +424,20 @@ export function computePreNewsLean(
   isSpeech: boolean
 ): PreNewsLeanResult {
   const t = title.toLowerCase();
-  const isPowell = t.includes('powell') || t.includes('fed chair');
-  const isFomcTone =
-    isPowell ||
-    t.includes('fomc statement') ||
-    t.includes('fomc minutes') ||
-    t.includes('rate decision') ||
-    t.includes('fed funds rate');
+  const noConsensus = isNoConsensusEvent(title, isSpeech);
 
-  if (isFomcTone || isSpeech) {
+  if (forecastNum === null || previousNum === null || noConsensus) {
+    if (noConsensus) {
+      return {
+        lean: 'NO_CONSENSUS',
+        label: 'NO LEAN · see playbook',
+        explanation: 'No consensus for this event',
+      };
+    }
     return {
-      lean: 'TONE-DEPENDENT',
-      label: 'TONE-DEPENDENT',
-      explanation: 'Tone-dependent, low reliability',
-    };
-  }
-
-  if (forecastNum === null || previousNum === null) {
-    return {
-      lean: 'WAITING',
-      label: 'WAITING',
-      explanation: 'Forecast not available yet',
+      lean: 'WAITING_FORECAST',
+      label: 'WAITING FORECAST',
+      explanation: 'Forecast due ~24h before',
     };
   }
 
@@ -547,16 +557,11 @@ export function getAhmedAiServerStatus(): AhmedAiServerStatus {
     return 'OFF_RULES_MODE';
   }
 
-  if (lastAiCallFailed && !hasAiSessionSuccess) {
-    return 'RETRYING';
-  }
-
   if (hasAiSessionSuccess) {
     return 'ON';
   }
 
-  // Key exists, ready or waiting for first session call
-  return lastAiCallFailed ? 'RETRYING' : 'ON';
+  return 'RETRYING';
 }
 
 export function isAhmedAiOnline(): boolean {

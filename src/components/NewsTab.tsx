@@ -38,10 +38,27 @@ interface GoldScenario {
 }
 
 interface PreNewsLean {
-  lean: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'TONE-DEPENDENT' | 'WAITING';
+  lean: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'TONE-DEPENDENT' | 'WAITING' | 'WAITING_FORECAST' | 'NO_CONSENSUS';
   label: string;
   explanation: string;
 }
+
+const isNoConsensusEvent = (title: string, isSpeech?: boolean): boolean => {
+  if (isSpeech) return true;
+  const t = title.toLowerCase();
+  return (
+    t.includes('adp weekly') ||
+    t.includes('api ') ||
+    t.includes('eia') ||
+    t.includes('inventor') ||
+    t.includes('beige book') ||
+    t.includes('speaks') ||
+    t.includes('speech') ||
+    t.includes('testifies') ||
+    t.includes('fomc press conference') ||
+    t.includes('fomc minutes')
+  );
+};
 
 interface EventPlaybook {
   what_it_is: string;
@@ -593,12 +610,30 @@ export const NewsTab: React.FC<NewsTabProps> = () => {
         }
       }
 
+      const lowerTitle = e.title.toLowerCase();
+      const isReversed = lowerTitle.includes('claim') || lowerTitle.includes('unemploy');
+      const isSpeech = e.isSpeech || lowerTitle.includes('speaks') || lowerTitle.includes('speech') || lowerTitle.includes('testifies');
+
+      let footerNote: string;
+      if (lean === 'bull') {
+        footerNote = 'leans bullish if as forecast';
+      } else if (lean === 'bear') {
+        footerNote = 'leans bearish if as forecast';
+      } else if (isSpeech) {
+        footerNote = 'guidance & market tone steer reaction';
+      } else if (isReversed) {
+        footerNote = 'Higher -> BULLISH · Lower -> BEARISH';
+      } else {
+        footerNote = 'Higher -> BEARISH · Lower -> BULLISH';
+      }
+
       return {
         id: e.id,
         title: shortenTitle(e.title),
         tier: (e.ahmedTier === 1 ? 1 : e.ahmedTier === 2 ? 2 : 3) as 1 | 2 | 3,
         lean,
         ts: new Date(e.timeUtc).getTime(),
+        footerNote,
       };
     });
   }, [events]);
@@ -759,7 +794,7 @@ export const NewsTab: React.FC<NewsTabProps> = () => {
       );
     }
 
-    // 3. Before release: check if forecast is missing -> show WAITING
+    // 3. Before release: check if forecast is missing
     const hasNoForecast =
       evt.forecastNum === null ||
       !evt.forecastStr ||
@@ -768,13 +803,26 @@ export const NewsTab: React.FC<NewsTabProps> = () => {
       evt.forecastStr === 'N/A' ||
       evt.forecastStr === 'Tentative';
 
-    if (hasNoForecast) {
+    const noConsensus = isNoConsensusEvent(evt.title, evt.isSpeech);
+
+    if (hasNoForecast || noConsensus) {
+      if (noConsensus) {
+        return (
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border bg-neutral-800/80 border-neutral-700 text-neutral-300 shrink-0 whitespace-nowrap"
+            title="No consensus forecast for this event"
+          >
+            <span>NO LEAN · see playbook</span>
+          </span>
+        );
+      }
+
       return (
         <span
           className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border bg-neutral-800/80 border-neutral-700 text-neutral-400 shrink-0 whitespace-nowrap"
-          title="Forecast not available yet"
+          title="Forecast due ~24h before"
         >
-          <span>WAITING</span>
+          <span>WAITING FORECAST</span>
         </span>
       );
     }
@@ -833,13 +881,24 @@ export const NewsTab: React.FC<NewsTabProps> = () => {
     // Fallback to rules-only preLean if decision not yet attached
     const preLean = getPreNewsLean(evt);
 
-    if (preLean.lean === 'WAITING') {
+    if (preLean.lean === 'NO_CONSENSUS') {
+      return (
+        <span
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border bg-neutral-800/80 border-neutral-700 text-neutral-300 shrink-0 whitespace-nowrap"
+          title="No consensus for this event"
+        >
+          <span>NO LEAN · see playbook</span>
+        </span>
+      );
+    }
+
+    if (preLean.lean === 'WAITING_FORECAST' || preLean.lean === 'WAITING') {
       return (
         <span
           className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border bg-neutral-800/80 border-neutral-700 text-neutral-400 shrink-0 whitespace-nowrap"
-          title="Forecast not available yet"
+          title="Forecast due ~24h before"
         >
-          <span>WAITING</span>
+          <span>WAITING FORECAST</span>
         </span>
       );
     }
@@ -974,7 +1033,9 @@ export const NewsTab: React.FC<NewsTabProps> = () => {
             </div>
           ) : evt.scenarios?.type === 'NO_FORECAST' ? (
             <div className="p-2 rounded-xl bg-neutral-900/60 border border-neutral-800 text-center text-xs text-neutral-400">
-              Forecast not available yet
+              {isNoConsensusEvent(evt.title, evt.isSpeech)
+                ? 'No consensus for this event'
+                : 'Forecast due ~24h before'}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">

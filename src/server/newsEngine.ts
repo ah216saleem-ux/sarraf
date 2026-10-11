@@ -28,9 +28,10 @@ import {
   AhmedAiBriefOutput,
   GoldDirectionScenario,
   StructuredEventPayload,
-  PreNewsLeanResult,
-  EventPlaybook,
+  isNoConsensusEvent,
 } from './ahmedAiNews.ts';
+
+export { isNoConsensusEvent };
 
 export type NewsImpact = 'High' | 'Medium' | 'Low' | 'Holiday';
 export type NewsTier = 'TIER_1' | 'TIER_2' | 'NONE';

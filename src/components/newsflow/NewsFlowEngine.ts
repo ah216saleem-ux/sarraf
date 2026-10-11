@@ -8,6 +8,7 @@ export interface NFEvent {
   tier: 1 | 2 | 3;      // HIGH / MED / LOW
   lean: NFLean;         // from deterministic rules; 'wait' when no forecast yet
   ts: number;           // event time, epoch ms
+  footerNote?: string;  // optional footer text
 }
 export interface NFOpts { lite?: boolean; onSelect?: (id: string) => void; }
 
@@ -202,7 +203,14 @@ export class NewsFlowEngine {
     g.fillStyle = rgb(RED, Math.max(0.5, bearA)); g.fillText('BEARISH', W - 8, dnY + H * 0.15);
     g.font = '500 9px ui-monospace,Menlo,monospace';
     g.fillStyle = 'rgba(148,163,184,0.85)';
-    g.fillText(lean === 'bull' ? 'leans bullish if as forecast' : lean === 'bear' ? 'leans bearish if as forecast' : 'waiting for forecast', W - 8, H - 8);
+    const defaultNote = lean === 'bull'
+      ? 'leans bullish if as forecast'
+      : lean === 'bear'
+      ? 'leans bearish if as forecast'
+      : (next && (next.title.toLowerCase().includes('claim') || next.title.toLowerCase().includes('unemploy')))
+      ? 'Higher -> BULLISH · Lower -> BEARISH'
+      : 'Higher -> BEARISH · Lower -> BULLISH';
+    g.fillText(next?.footerNote || defaultNote, W - 8, H - 8);
 
     if (!this.ev.length) {
       g.textAlign = 'center'; g.fillStyle = 'rgba(148,163,184,0.8)'; g.font = '600 12px ui-monospace,Menlo,monospace';
