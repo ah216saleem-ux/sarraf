@@ -13,6 +13,19 @@ const NEWS_30DAYS_FILE = path.resolve(DATA_DIR, 'news_30days.json');
 const NEWS_MANUAL_FILE = path.resolve(DATA_DIR, 'news_manual.json');
 const HEADS_UP_LOG_FILE = path.resolve(DATA_DIR, 'news_heads_up_log.json');
 
+import {
+  getAhmedEventTier,
+  isSpeechEvent,
+  buildGoldDirectionScenarios,
+  buildRuleBasedBrief,
+  getOrGenerateAhmedAiBrief,
+  pregenerateUpcomingBriefs,
+  AhmedEventTier,
+  AhmedAiBriefOutput,
+  GoldDirectionScenario,
+  StructuredEventPayload,
+} from './ahmedAiNews.ts';
+
 export type NewsImpact = 'High' | 'Medium' | 'Low' | 'Holiday';
 export type NewsTier = 'TIER_1' | 'TIER_2' | 'NONE';
 export type GoldImpact =
@@ -38,6 +51,10 @@ export interface NewsEvent {
   country: string;
   impact: NewsImpact;
   tier: NewsTier;
+  ahmedTier?: AhmedEventTier; // 1 | 2 | 3
+  isSpeech?: boolean;
+  scenarios?: GoldDirectionScenario;
+  brief?: AhmedAiBriefOutput;
   timeUtc: string; // UTC ISO string
   displayTime: string; // e.g., formatted in UTC or DISPLAY_TZ
   rawDate: string;
@@ -339,6 +356,9 @@ export function transformRawEvent(raw: RawForexFactoryEvent, existingArchive?: N
 
   const isHigh = isHighImpactUsdEvent(raw.country, raw.impact, raw.title);
   const tier = categorizeEventTier(raw.country, raw.impact, raw.title);
+  const ahmedTier = getAhmedEventTier(raw.title);
+  const isSpeech = isSpeechEvent(raw.title);
+  const scenarios = buildGoldDirectionScenarios(raw.title, forecastNum, previousNum, actualNum, isReleased);
   const goldImpact = computeGoldImpact(raw.title, forecastNum, actualNum, isReleased);
 
   // Check change notes against archive
@@ -356,6 +376,9 @@ export function transformRawEvent(raw: RawForexFactoryEvent, existingArchive?: N
     country: raw.country,
     impact: (raw.impact as NewsImpact) || 'Low',
     tier,
+    ahmedTier,
+    isSpeech,
+    scenarios,
     timeUtc,
     displayTime: new Date(timeUtc).toUTCString(),
     rawDate: raw.date,
@@ -603,9 +626,15 @@ export function getNewsFeedStatus(displayTz: string = 'UTC'): NewsFeedStatus {
 
     const goldImpact = computeGoldImpact(evt.title, evt.forecastNum, actualNum, isReleased);
     const lockEval = evaluateTieredLock({ ...evt, minutesUntil, isReleased }, settings);
+    const ahmedTier = evt.ahmedTier || getAhmedEventTier(evt.title);
+    const isSpeech = evt.isSpeech ?? isSpeechEvent(evt.title);
+    const scenarios = buildGoldDirectionScenarios(evt.title, evt.forecastNum, evt.previousNum, actualNum, isReleased);
 
     return {
       ...evt,
+      ahmedTier,
+      isSpeech,
+      scenarios,
       minutesUntil,
       isReleased,
       isInsideLockWindow: lockEval.isLocked,
@@ -664,9 +693,15 @@ export function getNewsEventsForUI(): NewsEvent[] {
 
     const goldImpact = computeGoldImpact(evt.title, evt.forecastNum, actualNum, isReleased);
     const lockEval = evaluateTieredLock({ ...evt, minutesUntil, isReleased });
+    const ahmedTier = evt.ahmedTier || getAhmedEventTier(evt.title);
+    const isSpeech = evt.isSpeech ?? isSpeechEvent(evt.title);
+    const scenarios = buildGoldDirectionScenarios(evt.title, evt.forecastNum, evt.previousNum, actualNum, isReleased);
 
     return {
       ...evt,
+      ahmedTier,
+      isSpeech,
+      scenarios,
       minutesUntil,
       isReleased,
       isInsideLockWindow: lockEval.isLocked,

@@ -245,6 +245,22 @@ class CommandFeedStore {
       const now = Date.now();
 
       let activeImpact: MarketRegimeData['newsImpact'] = 'CALM';
+      let nextTierNews: any = null;
+
+      // Find next Tier 1 or 2 event in next 60m for the header chip
+      const upcomingTier1or2 = events.filter((e: any) => {
+        const tier = e.ahmedTier || (e.tier === 'TIER_1' ? 1 : e.tier === 'TIER_2' ? 2 : 3);
+        return (tier === 1 || tier === 2) && e.minutesUntil >= 0 && e.minutesUntil <= 60;
+      }).sort((a: any, b: any) => a.minutesUntil - b.minutesUntil);
+
+      if (upcomingTier1or2.length > 0) {
+        nextTierNews = {
+          id: upcomingTier1or2[0].id,
+          title: upcomingTier1or2[0].title,
+          minutesUntil: upcomingTier1or2[0].minutesUntil,
+          tier: upcomingTier1or2[0].ahmedTier || 1,
+        };
+      }
 
       if (nextEvent && nextEvent.timeUtc) {
         const eventTime = new Date(nextEvent.timeUtc).getTime();
@@ -264,6 +280,7 @@ class CommandFeedStore {
       }
 
       this.regime.newsImpact = activeImpact;
+      this.regime.nextTierNews = nextTierNews;
       this.notify();
     } catch {
       this.regime.newsImpact = 'N/A';

@@ -92,6 +92,11 @@ import {
   lookupActualValueWithGemini,
 } from './src/server/newsEngine.ts';
 import {
+  getOrGenerateAhmedAiBrief,
+  buildRuleBasedBrief,
+  pregenerateUpcomingBriefs,
+} from './src/server/ahmedAiNews.ts';
+import {
   loadSettingsFromDisk,
   saveSettingsToDisk,
   getCurrentSettings,
@@ -1401,15 +1406,47 @@ app.get('/api/google-chat/tests', requireAdminAuth, (_req, res) => {
 // PHASE 5: NEWS, SETTINGS, PERFORMANCE & SYSTEM ENDPOINTS
 // -------------------------------------------------------------
 
-// GET /api/news - Live Forex Factory calendar, feed status, countdowns
+// GET /api/news - Live Forex Factory calendar, feed status, countdowns, and pregeneration trigger
 app.get('/api/news', (_req, res) => {
   const status = getNewsFeedStatus();
   const events = getNewsEventsForUI();
+  // Asynchronously trigger pregeneration for Tier 1 and 2 events in next 72h
+  pregenerateUpcomingBriefs(events as any[]).catch(() => {});
   return res.json({
     status: 'SUCCESS',
     feed: status,
     events,
   });
+});
+
+// POST /api/news/brief - Get or lazily generate AHMED AI News Brief for an event
+app.post('/api/news/brief', async (req, res) => {
+  const { eventId } = req.body || {};
+  if (!eventId) {
+    return res.status(400).json({ error: 'eventId is required.' });
+  }
+
+  const events = getNewsEventsForUI();
+  const target = events.find((e) => e.id === eventId);
+  if (!target) {
+    return res.status(404).json({ error: 'Event not found.' });
+  }
+
+  try {
+    const brief = await getOrGenerateAhmedAiBrief(target as any);
+    return res.json({
+      status: 'SUCCESS',
+      eventId,
+      brief,
+    });
+  } catch {
+    const fallback = buildRuleBasedBrief(target as any);
+    return res.json({
+      status: 'SUCCESS',
+      eventId,
+      brief: fallback,
+    });
+  }
 });
 
 // POST /api/news/manual-actual - Admin enter manual actual for released event
@@ -1432,7 +1469,7 @@ app.post('/api/news/manual-actual', requireAdminAuth, (req, res) => {
   });
 });
 
-// POST /api/news/lookup-actual - Gemini-assisted lookup of actual value
+// POST /api/news/lookup-actual - AHMED AI assisted lookup of actual value
 app.post('/api/news/lookup-actual', requireAdminAuth, async (req, res) => {
   const { eventId } = req.body || {};
   const events = getNewsEventsForUI();
@@ -1443,7 +1480,7 @@ app.post('/api/news/lookup-actual', requireAdminAuth, async (req, res) => {
 
   const lookup = await lookupActualValueWithGemini(target);
   if (!lookup) {
-    return res.status(500).json({ error: 'Gemini lookup unavailable or event unreleased.' });
+    return res.status(500).json({ error: 'AHMED AI lookup unavailable or event unreleased.' });
   }
 
   return res.json({

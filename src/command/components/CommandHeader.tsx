@@ -1,17 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { Timeframe, FeedConnectionState } from '../data/commandTypes';
-import { Coins, AlertTriangle } from 'lucide-react';
+import { Timeframe, FeedConnectionState, UpcomingTierNewsEvent } from '../data/commandTypes';
+import { Coins, AlertTriangle, Bell } from 'lucide-react';
 
 interface CommandHeaderProps {
   connection: FeedConnectionState;
   selectedTimeframe: Timeframe;
   onTimeframeChange: (tf: Timeframe) => void;
+  nextTierNews?: UpcomingTierNewsEvent | null;
 }
 
 export const CommandHeader: React.FC<CommandHeaderProps> = ({
   connection,
   selectedTimeframe,
   onTimeframeChange,
+  nextTierNews,
 }) => {
   const [clock, setClock] = useState('');
 
@@ -30,6 +32,12 @@ export const CommandHeader: React.FC<CommandHeaderProps> = ({
 
   const timeframes: Timeframe[] = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1'];
   const isDrop = connection.status === 'RECONNECTING' || connection.status === 'OFFLINE';
+
+  const showNewsChip =
+    nextTierNews &&
+    typeof nextTierNews.minutesUntil === 'number' &&
+    nextTierNews.minutesUntil >= 0 &&
+    nextTierNews.minutesUntil <= 60;
 
   return (
     <header className="relative w-full rounded-lg bg-[#070b14] border border-[#38bdf8]/20 px-3 py-2.5 select-none overflow-hidden">
@@ -67,11 +75,23 @@ export const CommandHeader: React.FC<CommandHeaderProps> = ({
           </span>
         </div>
 
-        {/* Right: XAUUSD Gold Chip */}
-        <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#04060b] border border-[#38bdf8]/20 text-[10px] font-mono text-[#e8edf5]">
-          <Coins className="w-3 h-3 text-[#E8B84A]" />
-          <span className="font-bold tracking-wider text-[#E8B84A]">XAU/USD</span>
-          <span className="text-[8px] text-[#8a96a8] border-l border-[#38bdf8]/20 pl-1">SPOT</span>
+        {/* Right: News In Xm + XAUUSD Gold Chip */}
+        <div className="flex items-center gap-2">
+          {showNewsChip && (
+            <div
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/40 text-[9px] font-mono font-bold text-amber-300 animate-pulse"
+              title={`${nextTierNews.title} due in ${nextTierNews.minutesUntil}m`}
+            >
+              <Bell className="w-2.5 h-2.5 text-amber-400" />
+              <span>NEWS IN {nextTierNews.minutesUntil === 0 ? 'NOW' : `${nextTierNews.minutesUntil}m`}</span>
+            </div>
+          )}
+
+          <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#04060b] border border-[#38bdf8]/20 text-[10px] font-mono text-[#e8edf5]">
+            <Coins className="w-3 h-3 text-[#E8B84A]" />
+            <span className="font-bold tracking-wider text-[#E8B84A]">XAU/USD</span>
+            <span className="text-[8px] text-[#8a96a8] border-l border-[#38bdf8]/20 pl-1">SPOT</span>
+          </div>
         </div>
       </div>
 

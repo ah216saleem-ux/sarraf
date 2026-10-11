@@ -1,9 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Radio,
   Clock,
-  Flame,
-  AlertTriangle,
   Sparkles,
   RefreshCw,
   ChevronDown,
@@ -11,11 +9,63 @@ import {
   TrendingUp,
   TrendingDown,
   Edit3,
-  CheckCircle2,
-  HelpCircle,
   ShieldAlert,
   Info,
+  Calendar,
+  AlertTriangle,
+  Zap,
 } from 'lucide-react';
+
+interface BriefData {
+  headline: string;
+  what_it_is: string;
+  why_gold_cares: string;
+  watch_for: string;
+  source: 'AHMED_AI' | 'RULES';
+}
+
+interface GoldScenario {
+  higher: string;
+  lower: string;
+  type: 'STANDARD' | 'REVERSED' | 'TONE_DEPENDENT' | 'SPEECH' | 'NO_FORECAST';
+  surpriseChip?: {
+    sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    size: 'SMALL' | 'MODERATE' | 'LARGE';
+    diffPct: number;
+  };
+}
+
+interface NewsEventItem {
+  id: string;
+  title: string;
+  country: string;
+  impact: 'High' | 'Medium' | 'Low' | 'Holiday';
+  tier: 'TIER_1' | 'TIER_2' | 'NONE';
+  ahmedTier: 1 | 2 | 3;
+  isSpeech: boolean;
+  scenarios: GoldScenario;
+  brief?: BriefData;
+  timeUtc: string;
+  displayTime: string;
+  rawDate: string;
+  forecastStr: string;
+  previousStr: string;
+  actualStr: string | null;
+  forecastNum: number | null;
+  previousNum: number | null;
+  actualNum: number | null;
+  actualSource: 'FEED' | 'MANUAL' | 'UNVERIFIED' | null;
+  goldImpact: string;
+  goldImpactExplanation?: string;
+  isHighImpactUsd: boolean;
+  isTentative: boolean;
+  isAllDay: boolean;
+  isCancelledOrRemoved: boolean;
+  changeNote?: string;
+  minutesUntil: number;
+  isReleased: boolean;
+  isInsideLockWindow: boolean;
+}
 
 interface NewsTabProps {
   currentPrice: number | null;
@@ -23,16 +73,22 @@ interface NewsTabProps {
 
 export const NewsTab: React.FC<NewsTabProps> = ({ currentPrice }) => {
   const [feedStatus, setFeedStatus] = useState<any>(null);
-  const [events, setEvents] = useState<any[]>([]);
+  const [events, setEvents] = useState<NewsEventItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
-  const [showMediumImpact, setShowMediumImpact] = useState(false);
 
-  // Manual Actual Entry State
+  // Lazy Brief Fetching Cache in React state
+  const [briefs, setBriefs] = useState<Record<string, BriefData>>({});
+  const [loadingBriefId, setLoadingBriefId] = useState<string | null>(null);
+
+  // Collapsed speeches state (by day string key)
+  const [expandedSpeechesDays, setExpandedSpeechesDays] = useState<Record<string, boolean>>({});
+
+  // Admin Actual Entry State
   const [editingActualId, setEditingActualId] = useState<string | null>(null);
   const [manualActualInput, setManualActualInput] = useState('');
   const [isSavingActual, setIsSavingActual] = useState(false);
-  const [isLookingUpGemini, setIsLookingUpGemini] = useState(false);
+  const [isLookingUpAi, setIsLookingUpAi] = useState(false);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
 
   const fetchNews = useCallback(async () => {
@@ -50,9 +106,35 @@ export const NewsTab: React.FC<NewsTabProps> = ({ currentPrice }) => {
 
   useEffect(() => {
     fetchNews();
-    const timer = setInterval(fetchNews, 4000);
+    const timer = setInterval(fetchNews, 6000);
     return () => clearInterval(timer);
   }, [fetchNews]);
+
+  // Request or lazily generate AHMED AI brief
+  const fetchBriefForEvent = useCallback(
+    async (eventId: string) => {
+      if (briefs[eventId] || loadingBriefId === eventId) return;
+      setLoadingBriefId(eventId);
+      try {
+        const res = await fetch('/api/news/brief', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ eventId }),
+        });
+        if (res.ok) {
+          const json = await res.json();
+          if (json.brief) {
+            setBriefs((prev) => ({ ...prev, [eventId]: json.brief }));
+          }
+        }
+      } catch {
+        // fallback handled gracefully
+      } finally {
+        setLoadingBriefId((curr) => (curr === eventId ? null : curr));
+      }
+    },
+    [briefs, loadingBriefId]
+  );
 
   const handleManualActualSubmit = async (eventId: string) => {
     if (!manualActualInput.trim()) return;
@@ -77,8 +159,8 @@ export const NewsTab: React.FC<NewsTabProps> = ({ currentPrice }) => {
     }
   };
 
-  const handleGeminiLookup = async (eventId: string) => {
-    setIsLookingUpGemini(true);
+  const handleAiLookup = async (eventId: string) => {
+    setIsLookingUpAi(true);
     try {
       const res = await fetch('/api/news/lookup-actual', {
         method: 'POST',
@@ -88,16 +170,12 @@ export const NewsTab: React.FC<NewsTabProps> = ({ currentPrice }) => {
       if (res.ok) {
         const json = await res.json();
         setManualActualInput(json.lookup.actual || '');
-        setActionNotice(`Gemini retrieved: ${json.lookup.actual} (Marked UNVERIFIED until confirmed)`);
+        setActionNotice(`AHMED AI retrieved: ${json.lookup.actual} (Marked UNVERIFIED until confirmed)`);
       }
     } finally {
-      setIsLookingUpGemini(false);
+      setIsLookingUpAi(false);
     }
   };
-
-  const nextEvent = feedStatus?.nextEvent;
-  const highImpactUsd = events.filter((e) => e.isHighImpactUsd);
-  const mediumImpactEvents = events.filter((e) => e.impact === 'Medium' && !e.isHighImpactUsd);
 
   // Format countdown string
   const formatCountdown = (mins: number) => {
@@ -113,11 +191,255 @@ export const NewsTab: React.FC<NewsTabProps> = ({ currentPrice }) => {
     return `in ${hrs}h ${mins % 60}m`;
   };
 
+  // 1. Compute 24h Risk level: LOW / MEDIUM / HIGH
+  const riskAssessment = useMemo(() => {
+    const next24hEvents = events.filter((e) => {
+      return e.minutesUntil >= 0 && e.minutesUntil <= 1440;
+    });
+    const tier1Count = next24hEvents.filter((e) => e.ahmedTier === 1).length;
+    const tier2Count = next24hEvents.filter((e) => e.ahmedTier === 2).length;
+
+    if (tier1Count >= 2 || (tier1Count >= 1 && tier2Count >= 2)) {
+      return {
+        level: 'HIGH',
+        color: 'text-rose-400',
+        bg: 'bg-rose-950/40 border-rose-500/40',
+        badge: 'bg-rose-500/20 text-rose-300 border-rose-500/50',
+        sentence: `Heavy institutional volatility expected with ${tier1Count} Tier 1 release${tier1Count > 1 ? 's' : ''} scheduled within 24 hours.`,
+      };
+    }
+    if (tier1Count === 1 || tier2Count >= 2) {
+      return {
+        level: 'MEDIUM',
+        color: 'text-amber-400',
+        bg: 'bg-amber-950/40 border-amber-500/40',
+        badge: 'bg-amber-500/20 text-amber-300 border-amber-500/50',
+        sentence: `Moderate macro catalyst exposure ahead (${tier1Count > 0 ? `${tier1Count} Tier 1, ` : ''}${tier2Count} Tier 2). Expect localized spikes around releases.`,
+      };
+    }
+    return {
+      level: 'LOW',
+      color: 'text-emerald-400',
+      bg: 'bg-emerald-950/30 border-emerald-500/30',
+      badge: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50',
+      sentence: 'No major tier-one catalysts due in the next 24 hours. Price action driven primarily by technical order flow.',
+    };
+  }, [events]);
+
+  // 2. Compute NEXT KEY CATALYST: next tier 1 or 2 event (not a speech unless nothing else exists)
+  const nextKeyCatalyst = useMemo(() => {
+    const upcoming = events.filter((e) => e.minutesUntil > -90 && !e.isCancelledOrRemoved);
+    // Prefer non-speech Tier 1 or Tier 2
+    const nonSpeechTier1or2 = upcoming
+      .filter((e) => (e.ahmedTier === 1 || e.ahmedTier === 2) && !e.isSpeech)
+      .sort((a, b) => a.minutesUntil - b.minutesUntil);
+
+    if (nonSpeechTier1or2.length > 0) return nonSpeechTier1or2[0];
+
+    // Fallback to any upcoming Tier 1 or 2
+    const anyTier1or2 = upcoming
+      .filter((e) => e.ahmedTier === 1 || e.ahmedTier === 2)
+      .sort((a, b) => a.minutesUntil - b.minutesUntil);
+
+    if (anyTier1or2.length > 0) return anyTier1or2[0];
+
+    // Fallback to nextEvent from feed
+    return feedStatus?.nextEvent || null;
+  }, [events, feedStatus?.nextEvent]);
+
+  // Auto-fetch brief for next key catalyst
+  useEffect(() => {
+    if (nextKeyCatalyst?.id && !briefs[nextKeyCatalyst.id]) {
+      fetchBriefForEvent(nextKeyCatalyst.id);
+    }
+  }, [nextKeyCatalyst?.id, briefs, fetchBriefForEvent]);
+
+  // 3. Group events by day for Timeline
+  const timelineGroups = useMemo(() => {
+    const groups: {
+      dayKey: string;
+      dayLabel: string;
+      standardEvents: NewsEventItem[];
+      speechEvents: NewsEventItem[];
+    }[] = [];
+
+    const map = new Map<string, { standard: NewsEventItem[]; speeches: NewsEventItem[]; label: string }>();
+
+    for (const evt of events) {
+      const d = new Date(evt.timeUtc);
+      const dayKey = isNaN(d.getTime()) ? 'unknown' : d.toISOString().slice(0, 10);
+      const dayLabel = isNaN(d.getTime())
+        ? 'Upcoming Releases'
+        : d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+
+      if (!map.has(dayKey)) {
+        map.set(dayKey, { standard: [], speeches: [], label: dayLabel });
+      }
+
+      const grp = map.get(dayKey)!;
+      // Speeches in Tier 3 collapsed
+      if (evt.ahmedTier === 3 && evt.isSpeech) {
+        grp.speeches.push(evt);
+      } else {
+        grp.standard.push(evt);
+      }
+    }
+
+    for (const [dayKey, val] of map.entries()) {
+      groups.push({
+        dayKey,
+        dayLabel: val.label,
+        standardEvents: val.standard,
+        speechEvents: val.speeches,
+      });
+    }
+
+    return groups;
+  }, [events]);
+
+  const toggleEventExpand = (evt: NewsEventItem) => {
+    if (expandedEventId === evt.id) {
+      setExpandedEventId(null);
+    } else {
+      setExpandedEventId(evt.id);
+      if (!briefs[evt.id]) {
+        fetchBriefForEvent(evt.id);
+      }
+    }
+  };
+
+  const toggleDaySpeeches = (dayKey: string) => {
+    setExpandedSpeechesDays((prev) => ({
+      ...prev,
+      [dayKey]: !prev[dayKey],
+    }));
+  };
+
+  // Render Brief Section
+  const renderBriefCard = (evt: NewsEventItem) => {
+    const brief = briefs[evt.id] || evt.brief;
+    const isBriefLoading = loadingBriefId === evt.id;
+
+    return (
+      <div className="mt-3 p-3.5 sm:p-4 rounded-xl bg-black/60 border border-white/10 space-y-3 font-mono">
+        {/* Brief Header with AHMED AI or RULES Tag */}
+        <div className="flex items-center justify-between border-b border-white/10 pb-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-bold tracking-wider text-[#FFD97A] uppercase">
+              AHMED AI NEWS BRIEF
+            </span>
+            {brief?.source === 'AHMED_AI' ? (
+              <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-[#E8B84A]/20 border border-[#E8B84A]/40 text-[#FFD97A]">
+                AHMED AI
+              </span>
+            ) : (
+              <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-neutral-800 border border-neutral-600 text-neutral-400">
+                RULES
+              </span>
+            )}
+          </div>
+
+          {isBriefLoading && (
+            <div className="flex items-center gap-1.5 text-[9px] text-[#FFD97A]">
+              <Sparkles className="w-3 h-3 animate-spin" />
+              <span>Generating brief...</span>
+            </div>
+          )}
+        </div>
+
+        {/* 3-line AHMED AI brief content */}
+        <div className="space-y-2 text-xs">
+          {brief ? (
+            <>
+              <div>
+                <span className="text-[10px] text-neutral-400 uppercase font-bold block">
+                  HEADLINE
+                </span>
+                <span className="text-white font-semibold">{brief.headline}</span>
+              </div>
+              <div>
+                <span className="text-[10px] text-neutral-400 uppercase font-bold block">
+                  WHAT IT IS
+                </span>
+                <span className="text-neutral-300">{brief.what_it_is}</span>
+              </div>
+              <div>
+                <span className="text-[10px] text-neutral-400 uppercase font-bold block">
+                  WHY GOLD CARES
+                </span>
+                <span className="text-neutral-300">{brief.why_gold_cares}</span>
+              </div>
+              <div>
+                <span className="text-[10px] text-neutral-400 uppercase font-bold block">
+                  WATCH FOR
+                </span>
+                <span className="text-[#FFD97A]">{brief.watch_for}</span>
+              </div>
+            </>
+          ) : (
+            <div className="py-2 text-neutral-400 text-xs italic flex items-center gap-2">
+              <Sparkles className="w-3.5 h-3.5 text-[#FFD97A] animate-pulse" />
+              <span>Preparing institutional gold brief...</span>
+            </div>
+          )}
+        </div>
+
+        {/* Admin Actual Entry Component */}
+        <div className="pt-2 border-t border-white/10 space-y-2">
+          <div className="flex items-center justify-between text-[11px] text-neutral-300">
+            <span className="font-bold text-white flex items-center gap-1.5">
+              <Edit3 className="w-3.5 h-3.5 text-[#FFD97A]" />
+              <span>Admin Actual Value Entry:</span>
+            </span>
+            <button
+              onClick={() => handleAiLookup(evt.id)}
+              disabled={isLookingUpAi}
+              className="px-2 py-0.5 bg-[#E8B84A]/10 hover:bg-[#E8B84A]/20 border border-[#E8B84A]/30 text-[#FFD97A] rounded text-[10px] cursor-pointer flex items-center gap-1"
+            >
+              <Sparkles className="w-3 h-3" />
+              <span>AHMED AI Lookup</span>
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              placeholder='e.g. "3.2%" or "215K"'
+              value={editingActualId === evt.id ? manualActualInput : evt.actualStr || ''}
+              onFocus={() => {
+                setEditingActualId(evt.id);
+                setManualActualInput(evt.actualStr || '');
+              }}
+              onChange={(e) => {
+                setEditingActualId(evt.id);
+                setManualActualInput(e.target.value);
+              }}
+              className="flex-1 bg-black/60 border border-white/15 rounded-lg px-3 py-1.5 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-[#E8B84A]"
+            />
+            <button
+              onClick={() => handleManualActualSubmit(evt.id)}
+              disabled={isSavingActual || !manualActualInput.trim()}
+              className="px-3 py-1.5 bg-[#E8B84A] text-black font-bold text-xs rounded-lg hover:bg-[#FFD97A] cursor-pointer disabled:opacity-50"
+            >
+              Save Actual
+            </button>
+          </div>
+        </div>
+
+        {/* Footer line */}
+        <div className="pt-2 border-t border-white/5 text-[9px] text-neutral-500 flex items-center justify-between">
+          <span>AHMED AI explains the news. It does not place or change signals.</span>
+          <span>Lock: -30m / +15m</span>
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6 font-mono select-none">
       {/* Top Action Notification */}
       {actionNotice && (
-        <div className="bg-[#E8B84A]/10 border border-[#E8B84A]/30 rounded-xl p-3 flex items-center justify-between font-mono text-xs text-[#FFD97A]">
+        <div className="bg-[#E8B84A]/10 border border-[#E8B84A]/30 rounded-xl p-3 flex items-center justify-between text-xs text-[#FFD97A]">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-[#E8B84A]" />
             <span>{actionNotice}</span>
@@ -128,353 +450,324 @@ export const NewsTab: React.FC<NewsTabProps> = ({ currentPrice }) => {
         </div>
       )}
 
-      {/* Header Feed Banner */}
-      <div className="glass-panel p-5 sm:p-6 rounded-2xl border border-[#E8B84A]/25 relative overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="p-2 rounded-xl bg-[#E8B84A]/10 border border-[#E8B84A]/30 text-[#FFD97A]">
-                <Radio className="w-5 h-5 animate-pulse" />
-              </span>
-              <div>
-                <h2 className="font-mono text-base font-bold text-white tracking-wide flex items-center gap-2">
-                  FOREX FACTORY REAL-TIME USD RADAR
-                  <span
-                    className={`text-[10px] px-2 py-0.5 rounded-full font-mono border ${
-                      feedStatus?.status === 'LIVE'
-                        ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-400'
-                        : feedStatus?.status === 'STALE'
-                        ? 'bg-amber-950/60 border-amber-500/50 text-amber-300'
-                        : 'bg-rose-950/60 border-rose-500/50 text-rose-400'
-                    }`}
-                  >
-                    ● {feedStatus?.status || 'INITIALIZING'}
-                  </span>
-                </h2>
-                <p className="text-xs text-neutral-400 font-mono">
-                  Live institutional macro calendar with automated pre/post news locks & Gold impact classification.
-                </p>
-              </div>
-            </div>
+      {/* 1. TOP CARD: TODAY'S GOLD NEWS RISK */}
+      <div className={`p-4 sm:p-5 rounded-2xl border ${riskAssessment.bg} relative overflow-hidden shadow-lg`}>
+        <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-white/10">
+          <div className="flex items-center gap-2">
+            <Zap className={`w-4 h-4 ${riskAssessment.color}`} />
+            <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-white">
+              TODAY'S GOLD NEWS RISK
+            </h2>
           </div>
 
-          <div className="flex items-center gap-3 font-mono text-xs">
-            <div className="text-right">
-              <span className="text-[10px] text-neutral-500 block uppercase">LAST FEED SYNC</span>
-              <span className="text-white font-bold">
-                {feedStatus?.lastSuccessfulFetchAt
-                  ? new Date(feedStatus.lastSuccessfulFetchAt).toLocaleTimeString()
-                  : 'Pending'}
-              </span>
-            </div>
-            <button
-              onClick={() => {
-                setIsLoading(true);
-                fetchNews().finally(() => setIsLoading(false));
-              }}
-              disabled={isLoading}
-              className="p-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-neutral-300 hover:text-white transition-colors cursor-pointer"
-              title="Refresh News Feed"
-            >
-              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-            </button>
+          <div className="flex items-center gap-2">
+            <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold border ${riskAssessment.badge}`}>
+              ● {riskAssessment.level} RISK
+            </span>
           </div>
         </div>
 
-        {/* News Lock Active Banner */}
-        {feedStatus?.isLockActive && (
-          <div className="mt-4 p-3 rounded-xl bg-amber-950/50 border border-amber-700/60 flex items-center gap-3 font-mono text-xs text-amber-300">
-            <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
-            <div>
-              <strong>NEWS LOCK ACTIVE: </strong>
-              <span>
-                "{feedStatus.activeLockEvent?.title}" ({formatCountdown(feedStatus.activeLockEvent?.minutesUntil ?? 0)}). New signal entries are locked to prevent spread slippage. Active trades remain protected.
-              </span>
-            </div>
+        <div className="mt-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <p className="text-xs sm:text-sm text-neutral-200">
+            {riskAssessment.sentence}
+          </p>
+          <div className="flex items-center gap-2 text-[10px] text-neutral-400 shrink-0">
+            <Radio className="w-3 h-3 text-[#FFD97A]" />
+            <span>Forex Factory USD Feed</span>
           </div>
-        )}
+        </div>
       </div>
 
-      {/* NEXT EVENT HERO CARD */}
-      {nextEvent ? (
-        <div className="glass-panel p-5 sm:p-6 rounded-2xl border border-[#E8B84A]/40 bg-gradient-to-r from-black/80 via-[#E8B84A]/5 to-black/80 shadow-[0_0_20px_rgba(232,184,74,0.15)] relative overflow-hidden">
-          <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-white/10">
+      {/* 2. NEXT KEY CATALYST CARD */}
+      {nextKeyCatalyst && (
+        <div className="p-4 sm:p-5 rounded-2xl border border-[#E8B84A]/40 bg-gradient-to-r from-black/85 via-[#E8B84A]/5 to-black/85 shadow-[0_0_20px_rgba(232,184,74,0.12)] space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-white/10">
             <div className="flex items-center gap-2">
-              <span className="px-2 py-0.5 rounded bg-[#E8B84A]/20 border border-[#E8B84A]/40 text-[#FFD97A] font-mono text-xs font-bold">
+              <span className="px-2 py-0.5 rounded bg-[#E8B84A]/20 border border-[#E8B84A]/40 text-[#FFD97A] text-[10px] font-bold">
                 NEXT KEY CATALYST
               </span>
-              <span className="text-xs font-mono text-neutral-400">
-                {nextEvent.country} • {nextEvent.impact.toUpperCase()} IMPACT
+              <span className="text-[10px] text-neutral-400">
+                TIER {nextKeyCatalyst.ahmedTier || 1} • {nextKeyCatalyst.country}
               </span>
             </div>
 
-            <div className="flex items-center gap-2 font-mono">
-              <Clock className="w-4 h-4 text-[#FFD97A]" />
-              <span className="text-lg font-bold text-[#FFD97A] tracking-wider">
-                {formatCountdown(nextEvent.minutesUntil)}
+            <div className="flex items-center gap-2">
+              <Clock className="w-3.5 h-3.5 text-[#FFD97A]" />
+              <span className="text-base sm:text-lg font-bold text-[#FFD97A]">
+                {formatCountdown(nextKeyCatalyst.minutesUntil)}
               </span>
             </div>
           </div>
 
-          <div className="mt-4 grid grid-cols-1 lg:grid-cols-12 gap-4 items-center font-mono">
-            <div className="lg:col-span-6 space-y-1">
-              <h3 className="text-lg sm:text-xl font-bold text-white tracking-wide">
-                {nextEvent.title}
+          {/* Event Title & Metadata */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-base sm:text-lg font-bold text-white tracking-wide">
+                {nextKeyCatalyst.title}
               </h3>
-              <p className="text-xs text-neutral-400">
-                Release Time: <strong className="text-white">{new Date(nextEvent.timeUtc).toUTCString()}</strong>
+              <p className="text-[11px] text-neutral-400 mt-0.5">
+                Release: <span className="text-white">{new Date(nextKeyCatalyst.timeUtc).toUTCString()}</span>
               </p>
             </div>
 
-            <div className="lg:col-span-6 grid grid-cols-3 gap-2 text-center text-xs">
-              <div className="p-3 rounded-xl bg-black/50 border border-white/10">
-                <span className="text-[10px] text-neutral-500 block uppercase">FORECAST</span>
-                <span className="text-sm font-bold text-white">
-                  {nextEvent.forecastStr || 'No Forecast'}
-                </span>
-              </div>
-              <div className="p-3 rounded-xl bg-black/50 border border-white/10">
-                <span className="text-[10px] text-neutral-500 block uppercase">PREVIOUS</span>
-                <span className="text-sm font-bold text-neutral-300">
-                  {nextEvent.previousStr || '-'}
-                </span>
-              </div>
-              <div className="p-3 rounded-xl bg-black/50 border border-white/10">
-                <span className="text-[10px] text-neutral-500 block uppercase">GOLD BIAS</span>
-                <span
-                  className={`text-xs font-bold block ${
-                    nextEvent.goldImpact === 'BULLISH'
-                      ? 'text-emerald-400'
-                      : nextEvent.goldImpact === 'BEARISH'
-                      ? 'text-rose-400'
-                      : 'text-[#FFD97A]'
-                  }`}
-                >
-                  {nextEvent.goldImpact}
-                </span>
-              </div>
+            {/* Lock chip: Signals paused: -30m to +15m */}
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[10px] font-bold text-amber-300">
+              <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+              <span>Signals paused: -30m to +15m</span>
             </div>
           </div>
 
-          <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between text-[11px] font-mono text-neutral-400">
-            <div className="flex items-center gap-1.5">
-              <Info className="w-3.5 h-3.5 text-[#E8B84A]" />
-              <span>Gold reaction is not guaranteed. Directional probability based on real rates correlation.</span>
+          {/* Forecast / Previous / Actual Grid */}
+          <div className="grid grid-cols-3 gap-2 text-center text-xs">
+            <div className="p-2 sm:p-2.5 rounded-xl bg-black/60 border border-white/10">
+              <span className="text-[9px] text-neutral-500 block uppercase">FORECAST</span>
+              <span className="text-xs sm:text-sm font-bold text-white">
+                {nextKeyCatalyst.forecastStr || 'No Forecast'}
+              </span>
+            </div>
+            <div className="p-2 sm:p-2.5 rounded-xl bg-black/60 border border-white/10">
+              <span className="text-[9px] text-neutral-500 block uppercase">PREVIOUS</span>
+              <span className="text-xs sm:text-sm font-bold text-neutral-300">
+                {nextKeyCatalyst.previousStr || '-'}
+              </span>
+            </div>
+            <div className="p-2 sm:p-2.5 rounded-xl bg-black/60 border border-white/10">
+              <span className="text-[9px] text-neutral-500 block uppercase">ACTUAL</span>
+              <span className="text-xs sm:text-sm font-bold text-[#FFD97A]">
+                {nextKeyCatalyst.actualStr || 'Pending'}
+              </span>
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="glass-panel p-6 rounded-2xl border border-white/10 text-center font-mono text-xs text-neutral-400">
-          No upcoming USD high-impact events scheduled for the rest of this session.
+
+          {/* Coloured Scenario Chips or Surprise Result Chip */}
+          <div className="space-y-1.5">
+            {nextKeyCatalyst.scenarios?.surpriseChip ? (
+              <div className="p-2.5 rounded-xl bg-black/60 border border-white/15 flex items-center justify-between">
+                <span className="text-xs font-bold text-neutral-300">RELEASE SURPRISE:</span>
+                <span
+                  className={`px-2.5 py-0.5 rounded text-xs font-bold border ${
+                    nextKeyCatalyst.scenarios.surpriseChip.sentiment === 'BULLISH'
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
+                      : nextKeyCatalyst.scenarios.surpriseChip.sentiment === 'BEARISH'
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/50'
+                      : 'bg-neutral-800 text-neutral-300 border-neutral-600'
+                  }`}
+                >
+                  {nextKeyCatalyst.scenarios.surpriseChip.sentiment} (
+                  {nextKeyCatalyst.scenarios.surpriseChip.size} • Δ
+                  {nextKeyCatalyst.scenarios.surpriseChip.diffPct}%)
+                </span>
+              </div>
+            ) : nextKeyCatalyst.scenarios?.type === 'NO_FORECAST' ? (
+              <div className="p-2 rounded-xl bg-neutral-900/60 border border-neutral-800 text-center text-xs text-neutral-400">
+                Forecast not available yet
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                <div className="p-2 rounded-xl bg-rose-950/40 border border-rose-500/40 text-rose-300 flex items-center gap-2">
+                  <TrendingDown className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                  <span>{nextKeyCatalyst.scenarios.higher}</span>
+                </div>
+                <div className="p-2 rounded-xl bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 flex items-center gap-2">
+                  <TrendingUp className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>{nextKeyCatalyst.scenarios.lower}</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 3-Line AHMED AI Brief Card */}
+          {renderBriefCard(nextKeyCatalyst)}
         </div>
       )}
 
-      {/* 3D FLOATING GLASS TIMELINE */}
-      <div className="glass-panel p-5 sm:p-6 rounded-2xl border border-white/10 space-y-4">
-        <div className="flex items-center justify-between pb-3 border-b border-white/10">
+      {/* 3. TIMELINE: GROUPED BY DAY */}
+      <div className="space-y-4">
+        <div className="flex items-center justify-between pb-2 border-b border-white/10">
           <div className="flex items-center gap-2">
-            <Flame className="w-4 h-4 text-[#FFD97A]" />
-            <h3 className="font-mono text-sm font-bold text-white tracking-wider">
-              HIGH-IMPACT USD TIMELINE ({highImpactUsd.length} EVENTS)
+            <Calendar className="w-4 h-4 text-[#FFD97A]" />
+            <h3 className="text-sm font-bold text-white uppercase tracking-wider">
+              ECONOMIC TIMELINE
             </h3>
           </div>
-          <span className="text-[11px] font-mono text-neutral-400">
-            Forex Factory Live Feed
-          </span>
-        </div>
-
-        <div className="space-y-3">
-          {highImpactUsd.map((evt) => {
-            const isExpanded = expandedEventId === evt.id;
-            const isPast = evt.minutesUntil < 0;
-            const isBullish = evt.goldImpact === 'BULLISH';
-            const isBearish = evt.goldImpact === 'BEARISH';
-
-            return (
-              <div
-                key={evt.id}
-                className={`p-4 rounded-xl border transition-all font-mono ${
-                  evt.isInsideLockWindow
-                    ? 'bg-amber-950/20 border-amber-500/50 shadow-[0_0_15px_rgba(245,158,11,0.2)]'
-                    : isBullish
-                    ? 'bg-emerald-950/15 border-emerald-800/40'
-                    : isBearish
-                    ? 'bg-rose-950/15 border-rose-800/40'
-                    : 'bg-black/40 border-white/10 hover:border-white/20'
-                }`}
-              >
-                <div
-                  onClick={() => setExpandedEventId(isExpanded ? null : evt.id)}
-                  className="flex flex-wrap items-center justify-between gap-3 cursor-pointer select-none"
-                >
-                  <div className="flex items-center gap-3">
-                    {/* Glowing Node Indicator */}
-                    <div
-                      className={`w-3.5 h-3.5 rounded-full ${
-                        evt.isInsideLockWindow
-                          ? 'bg-amber-400 shadow-[0_0_10px_#f59e0b] animate-ping'
-                          : isBullish
-                          ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]'
-                          : isBearish
-                          ? 'bg-rose-400 shadow-[0_0_8px_#f43f5e]'
-                          : 'bg-[#E8B84A] shadow-[0_0_8px_#E8B84A]'
-                      }`}
-                    />
-
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-white">{evt.title}</span>
-                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-white/5 text-neutral-400 border border-white/10">
-                          {evt.country}
-                        </span>
-                        {evt.isInsideLockWindow && (
-                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-950 border border-amber-700/60 text-amber-300 font-bold">
-                            LOCK ACTIVE
-                          </span>
-                        )}
-                      </div>
-                      <span className="text-[11px] text-neutral-400">
-                        {new Date(evt.timeUtc).toUTCString()} ({formatCountdown(evt.minutesUntil)})
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Right Metric Highlights */}
-                  <div className="flex items-center gap-4 text-xs">
-                    <div className="hidden sm:block text-right">
-                      <span className="text-[10px] text-neutral-500 block">FCAST / PREV</span>
-                      <span className="text-neutral-300">
-                        {evt.forecastStr || '-'} / {evt.previousStr || '-'}
-                      </span>
-                    </div>
-
-                    <div className="text-right">
-                      <span className="text-[10px] text-neutral-500 block">GOLD IMPACT</span>
-                      <span
-                        className={`font-bold ${
-                          isBullish
-                            ? 'text-emerald-400'
-                            : isBearish
-                            ? 'text-rose-400'
-                            : 'text-[#FFD97A]'
-                        }`}
-                      >
-                        {evt.goldImpact}
-                      </span>
-                    </div>
-
-                    {isExpanded ? (
-                      <ChevronUp className="w-4 h-4 text-neutral-400" />
-                    ) : (
-                      <ChevronDown className="w-4 h-4 text-neutral-400" />
-                    )}
-                  </div>
-                </div>
-
-                {/* Expanded Card Details */}
-                {isExpanded && (
-                  <div className="mt-4 pt-4 border-t border-white/10 space-y-4 text-xs">
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-black/60 p-3 rounded-xl border border-white/5">
-                      <div>
-                        <span className="text-neutral-500 block text-[10px]">EVENT ID</span>
-                        <span className="text-white font-mono">{evt.id}</span>
-                      </div>
-                      <div>
-                        <span className="text-neutral-500 block text-[10px]">REPORTED ACTUAL</span>
-                        <span className="text-[#FFD97A] font-bold">
-                          {evt.actualStr ? `${evt.actualStr} (${evt.actualSource})` : 'Not yet entered'}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-neutral-500 block text-[10px]">GOLD DIRECTION</span>
-                        <span className="text-white font-medium">
-                          {isBullish ? '🟢 Bullish for XAU/USD' : isBearish ? '🔴 Bearish for XAU/USD' : '⚪ Neutral / Pending'}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-neutral-500 block text-[10px]">LOCK WINDOW</span>
-                        <span className="text-white">-30m to +15m</span>
-                      </div>
-                    </div>
-
-                    {/* Manual Actual Input Portal */}
-                    <div className="p-3 rounded-xl bg-white/5 border border-white/10 space-y-2">
-                      <div className="flex items-center justify-between text-[11px] text-neutral-300">
-                        <span className="font-bold text-white flex items-center gap-1.5">
-                          <Edit3 className="w-3.5 h-3.5 text-[#FFD97A]" />
-                          <span>Admin Actual Value Entry:</span>
-                        </span>
-                        <button
-                          onClick={() => handleGeminiLookup(evt.id)}
-                          disabled={isLookingUpGemini}
-                          className="px-2 py-0.5 bg-[#E8B84A]/10 hover:bg-[#E8B84A]/20 border border-[#E8B84A]/30 text-[#FFD97A] rounded text-[10px] cursor-pointer flex items-center gap-1"
-                        >
-                          <Sparkles className="w-3 h-3" />
-                          <span>Gemini AI Lookup</span>
-                        </button>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          placeholder='e.g. "3.2%" or "215K"'
-                          value={editingActualId === evt.id ? manualActualInput : evt.actualStr || ''}
-                          onFocus={() => {
-                            setEditingActualId(evt.id);
-                            setManualActualInput(evt.actualStr || '');
-                          }}
-                          onChange={(e) => {
-                            setEditingActualId(evt.id);
-                            setManualActualInput(e.target.value);
-                          }}
-                          className="flex-1 bg-black/60 border border-white/15 rounded-lg px-3 py-1.5 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-[#E8B84A]"
-                        />
-                        <button
-                          onClick={() => handleManualActualSubmit(evt.id)}
-                          disabled={isSavingActual || !manualActualInput.trim()}
-                          className="px-3 py-1.5 bg-[#E8B84A] text-black font-bold text-xs rounded-lg hover:bg-[#FFD97A] cursor-pointer disabled:opacity-50"
-                        >
-                          Save Actual
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Collapsible Medium Impact List */}
-        <div className="pt-2 border-t border-white/10">
           <button
-            onClick={() => setShowMediumImpact(!showMediumImpact)}
-            className="w-full py-2.5 bg-black/40 hover:bg-black/60 border border-white/5 rounded-xl font-mono text-xs text-neutral-400 hover:text-white flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            onClick={() => {
+              setIsLoading(true);
+              fetchNews().finally(() => setIsLoading(false));
+            }}
+            disabled={isLoading}
+            className="p-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-neutral-300 hover:text-white transition-colors cursor-pointer"
+            title="Refresh News Feed"
           >
-            <span>{showMediumImpact ? 'Hide' : 'Show'} Medium Impact Events ({mediumImpactEvents.length})</span>
-            {showMediumImpact ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
           </button>
-
-          {showMediumImpact && (
-            <div className="mt-3 space-y-2 font-mono text-xs max-h-[300px] overflow-y-auto pr-1">
-              {mediumImpactEvents.map((m) => (
-                <div
-                  key={m.id}
-                  className="p-3 rounded-lg bg-black/40 border border-white/5 flex items-center justify-between text-neutral-300"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-amber-500/70" />
-                    <span>{m.title}</span>
-                    <span className="text-[10px] text-neutral-500">{m.country}</span>
-                  </div>
-                  <span className="text-[11px] text-neutral-400">
-                    {formatCountdown(m.minutesUntil)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
+
+        {timelineGroups.map((group) => {
+          const isSpeechesExpanded = !!expandedSpeechesDays[group.dayKey];
+
+          return (
+            <div key={group.dayKey} className="space-y-2">
+              {/* Day Header Badge */}
+              <div className="flex items-center gap-2 pt-2">
+                <span className="text-[11px] font-bold text-[#FFD97A] uppercase tracking-wider">
+                  {group.dayLabel}
+                </span>
+                <div className="flex-1 h-[1px] bg-white/10" />
+              </div>
+
+              {/* Standard Tier 1, Tier 2, and Non-Speech Tier 3 events */}
+              <div className="space-y-2">
+                {group.standardEvents.map((evt) => {
+                  const isExpanded = expandedEventId === evt.id;
+                  const tierBadge =
+                    evt.ahmedTier === 1
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                      : evt.ahmedTier === 2
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      : 'bg-neutral-800 text-neutral-400 border-neutral-700';
+
+                  return (
+                    <div
+                      key={evt.id}
+                      className="rounded-xl border border-white/10 bg-black/40 hover:bg-black/60 transition-colors overflow-hidden"
+                    >
+                      {/* Clickable Header Row */}
+                      <div
+                        onClick={() => toggleEventExpand(evt)}
+                        className="p-3 sm:p-3.5 flex flex-wrap items-center justify-between gap-2 cursor-pointer select-none"
+                      >
+                        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                          {/* Tier Badge */}
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[9px] font-bold border shrink-0 ${tierBadge}`}
+                          >
+                            T{evt.ahmedTier || 3}
+                          </span>
+
+                          <div className="min-w-0">
+                            <span className="text-xs sm:text-sm font-bold text-white block truncate">
+                              {evt.title}
+                            </span>
+                            <span className="text-[10px] text-neutral-400">
+                              {new Date(evt.timeUtc).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • F: {evt.forecastStr || '--'} | P: {evt.previousStr || '--'} | A: {evt.actualStr || '--'}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2.5 shrink-0">
+                          <span className="text-[11px] font-bold text-neutral-300">
+                            {formatCountdown(evt.minutesUntil)}
+                          </span>
+                          {isExpanded ? (
+                            <ChevronUp className="w-4 h-4 text-neutral-400" />
+                          ) : (
+                            <ChevronDown className="w-4 h-4 text-neutral-400" />
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Expanded Section with Scenarios and Brief */}
+                      {isExpanded && (
+                        <div className="p-3 sm:p-3.5 pt-0 border-t border-white/5 space-y-3">
+                          {/* Scenarios */}
+                          {evt.scenarios?.surpriseChip ? (
+                            <div className="p-2 rounded-lg bg-black/60 border border-white/10 flex items-center justify-between text-xs">
+                              <span className="text-neutral-400 font-bold">OUTCOME:</span>
+                              <span
+                                className={`px-2 py-0.5 rounded font-bold border ${
+                                  evt.scenarios.surpriseChip.sentiment === 'BULLISH'
+                                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
+                                    : evt.scenarios.surpriseChip.sentiment === 'BEARISH'
+                                    ? 'bg-rose-500/20 text-rose-300 border-rose-500/50'
+                                    : 'bg-neutral-800 text-neutral-300 border-neutral-600'
+                                }`}
+                              >
+                                {evt.scenarios.surpriseChip.sentiment} (Δ
+                                {evt.scenarios.surpriseChip.diffPct}%)
+                              </span>
+                            </div>
+                          ) : evt.scenarios?.type === 'NO_FORECAST' ? (
+                            <div className="p-2 rounded-lg bg-neutral-900/60 border border-neutral-800 text-center text-[11px] text-neutral-400">
+                              Forecast not available yet
+                            </div>
+                          ) : (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                              <div className="p-2 rounded-lg bg-rose-950/30 border border-rose-500/30 text-rose-300">
+                                {evt.scenarios.higher}
+                              </div>
+                              <div className="p-2 rounded-lg bg-emerald-950/30 border border-emerald-500/30 text-emerald-300">
+                                {evt.scenarios.lower}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* AHMED AI Brief Card */}
+                          {renderBriefCard(evt)}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Tier 3 Speeches Collapsible Section */}
+              {group.speechEvents.length > 0 && (
+                <div className="pt-1">
+                  <button
+                    onClick={() => toggleDaySpeeches(group.dayKey)}
+                    className="w-full py-2 px-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 flex items-center justify-between text-[11px] text-neutral-400 hover:text-white transition-colors cursor-pointer"
+                  >
+                    <span>Speeches ({group.speechEvents.length})</span>
+                    {isSpeechesExpanded ? (
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+
+                  {isSpeechesExpanded && (
+                    <div className="mt-2 space-y-1.5 pl-2 border-l border-white/10">
+                      {group.speechEvents.map((sp) => {
+                        const isExpanded = expandedEventId === sp.id;
+                        return (
+                          <div
+                            key={sp.id}
+                            className="rounded-lg border border-white/5 bg-black/30 p-2.5 text-xs text-neutral-300"
+                          >
+                            <div
+                              onClick={() => toggleEventExpand(sp)}
+                              className="flex items-center justify-between cursor-pointer"
+                            >
+                              <div>
+                                <span className="font-semibold text-white block">
+                                  {sp.title}
+                                </span>
+                                <span className="text-[10px] text-neutral-500">
+                                  {new Date(sp.timeUtc).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • Tone-dependent, low reliability
+                                </span>
+                              </div>
+                              <span className="text-[10px] text-neutral-400">
+                                {formatCountdown(sp.minutesUntil)}
+                              </span>
+                            </div>
+
+                            {isExpanded && renderBriefCard(sp)}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* 4. FOOTER NOTE */}
+      <div className="p-3 rounded-xl bg-black/40 border border-white/5 text-center text-[10px] text-neutral-500">
+        Gold reaction is not guaranteed. Directional probability based on real rates correlation.
       </div>
     </div>
   );

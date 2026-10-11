@@ -117,6 +117,7 @@ export const SarrafCommandView: React.FC = () => {
           connection={feed.connection}
           selectedTimeframe={feed.selectedTimeframe}
           onTimeframeChange={feed.setTimeframe}
+          nextTierNews={feed.regime?.nextTierNews}
         />
 
         {/* Reconnecting Banner if Feed Dropped */}

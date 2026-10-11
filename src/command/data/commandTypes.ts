@@ -64,6 +64,13 @@ export interface OriginLevel {
   displacementsCount: number;
 }
 
+export interface UpcomingTierNewsEvent {
+  id: string;
+  title: string;
+  minutesUntil: number;
+  tier: 1 | 2 | 3;
+}
+
 export interface MarketRegimeData {
   trend: 'STRONG BULLISH' | 'BULLISH' | 'NEUTRAL' | 'BEARISH' | 'STRONG BEARISH' | 'N/A' | 'collecting data';
   structure: 'BOS (BREAK OF STRUCTURE)' | 'CHOCH (CHANGE OF CHARACTER)' | 'CONSOLIDATION RANGE' | 'N/A' | 'collecting data';
@@ -71,6 +78,7 @@ export interface MarketRegimeData {
   session: 'ASIAN' | 'LONDON' | 'NEW YORK' | 'LONDON/NY OVERLAP' | 'SESSION CLOSE';
   newsImpact: 'CALM' | 'MODERATE' | 'HIGH USD IMMINENT' | 'POST-RELEASE VOLATILITY' | 'N/A' | 'collecting data';
   htfBias: 'BULLISH CONTINUATION' | 'BEARISH RETRACEMENT' | 'NEUTRAL RANGE' | 'N/A' | 'collecting data';
+  nextTierNews?: UpcomingTierNewsEvent | null;
 }
 
 export interface ConfidenceBreakdown {
