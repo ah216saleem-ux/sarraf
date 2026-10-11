@@ -1,0 +1,112 @@
+{
+  "decisions": {
+    "EVT-2026-10-14-USD-core_cpi_m_m": {
+      "eventId": "EVT-2026-10-14-USD-core_cpi_m_m",
+      "systemVote": "BULLISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BULLISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-11T17:39:32.279Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-14-USD-core_cpi_y_y": {
+      "eventId": "EVT-2026-10-14-USD-core_cpi_y_y",
+      "systemVote": "BEARISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BEARISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-11T17:39:32.279Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-14-USD-cpi_m_m": {
+      "eventId": "EVT-2026-10-14-USD-cpi_m_m",
+      "systemVote": "BEARISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BEARISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-11T17:39:32.279Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-14-USD-cpi_y_y": {
+      "eventId": "EVT-2026-10-14-USD-cpi_y_y",
+      "systemVote": "BEARISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BEARISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-11T17:39:32.279Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-15-USD-core_ppi_m_m": {
+      "eventId": "EVT-2026-10-15-USD-core_ppi_m_m",
+      "systemVote": "BEARISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BEARISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-11T17:39:32.279Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-15-USD-core_retail_sales_m_m": {
+      "eventId": "EVT-2026-10-15-USD-core_retail_sales_m_m",
+      "systemVote": "BULLISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BULLISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-11T17:39:32.279Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-15-USD-ppi_m_m": {
+      "eventId": "EVT-2026-10-15-USD-ppi_m_m",
+      "systemVote": "BEARISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BEARISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-11T17:39:32.279Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-15-USD-retail_sales_m_m": {
+      "eventId": "EVT-2026-10-15-USD-retail_sales_m_m",
+      "systemVote": "BULLISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BULLISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-11T17:39:32.279Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-15-USD-unemployment_claims": {
+      "eventId": "EVT-2026-10-15-USD-unemployment_claims",
+      "systemVote": "BEARISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BEARISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-11T17:39:32.279Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    }
+  }
+}

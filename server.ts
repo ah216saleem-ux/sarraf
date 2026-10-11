@@ -90,11 +90,15 @@ import {
   getNewsEventsForUI,
   setManualActualValue,
   lookupActualValueWithGemini,
+  evaluateNewsDecisions,
+  getNewsDecisionAccuracy,
 } from './src/server/newsEngine.ts';
 import {
   getOrGenerateAhmedAiBrief,
   buildRuleBasedBrief,
   pregenerateUpcomingBriefs,
+  isAhmedAiOnline,
+  getAhmedAiServerStatus,
 } from './src/server/ahmedAiNews.ts';
 import {
   loadSettingsFromDisk,
@@ -1406,16 +1410,32 @@ app.get('/api/google-chat/tests', requireAdminAuth, (_req, res) => {
 // PHASE 5: NEWS, SETTINGS, PERFORMANCE & SYSTEM ENDPOINTS
 // -------------------------------------------------------------
 
-// GET /api/news - Live Forex Factory calendar, feed status, countdowns, and pregeneration trigger
-app.get('/api/news', (_req, res) => {
+// GET /api/news - Live Forex Factory calendar, feed status, countdowns, pregeneration trigger, and decision lock
+app.get('/api/news', async (_req, res) => {
   const status = getNewsFeedStatus();
   const events = getNewsEventsForUI();
+  const ahmedAiStatus = getAhmedAiServerStatus();
+
+  // Evaluate decisions (locks at T-60m and scores HIT/MISS post-release)
+  try {
+    await evaluateNewsDecisions(events);
+  } catch (err: any) {
+    console.warn('[NEWS ROUTE] evaluateNewsDecisions error:', err.message);
+  }
+
+  // Refreshed events with decisions
+  const refreshedEvents = getNewsEventsForUI();
+  const accuracy = getNewsDecisionAccuracy();
+
   // Asynchronously trigger pregeneration for Tier 1 and 2 events in next 72h
-  pregenerateUpcomingBriefs(events as any[]).catch(() => {});
+  pregenerateUpcomingBriefs(refreshedEvents as any[]).catch(() => {});
   return res.json({
     status: 'SUCCESS',
     feed: status,
-    events,
+    events: refreshedEvents,
+    ahmedAiStatus,
+    ahmedAiOnline: ahmedAiStatus === 'ON',
+    accuracy,
   });
 });
 
