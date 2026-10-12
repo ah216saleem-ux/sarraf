@@ -15,6 +15,8 @@ interface TopAreaPlaceholdersProps {
 }
 
 export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
+  buyRatio,
+  sellRatio,
   isDimmed,
 }) => {
   const feed = useCommandFeed();
@@ -26,6 +28,8 @@ export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
       <QuantumVortex
         onRegisterHooks={signalEngine.registerVortexHooks}
         signalEngine={signalEngine}
+        buyRatio={buyRatio}
+        sellRatio={sellRatio}
       />
 
       {/* 2-Column Responsive Row: DECISION & AHMED SNIPER CHAIN */}

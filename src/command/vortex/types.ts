@@ -35,6 +35,8 @@ export interface QuantumVortexProps {
   className?: string;
   onRegisterHooks?: (hooks: QuantumVortexHooks) => void;
   variant?: 'command' | 'hero';
+  buyRatio?: number;
+  sellRatio?: number;
   signalEngine?: {
     state: {
       lifecycle: 'WAIT' | 'SIGNAL' | 'ACTIVE' | 'RESULT' | 'COOLDOWN' | string;

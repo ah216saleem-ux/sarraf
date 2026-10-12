@@ -19,18 +19,18 @@ import { CoreLabel, CoreMode, CoreSignal, CoreTick, Tone } from './NeuralCoreEng
 import { useCommandSignal } from '../signal/useCommandSignal';
 
 export const AHMED_GATES_ORDER = [
-  { id: 'gate_1', name: 'HTF Trend Bias', shortName: 'HTF', timeframe: 'H4/H1' },
-  { id: 'gate_2', name: 'Liquidity Sweep', shortName: 'SWP', timeframe: 'M15' },
-  { id: 'gate_3', name: 'Structural Shift (MSS)', shortName: 'MSS', timeframe: 'M15' },
-  { id: 'gate_4', name: 'Order Block (OB)', shortName: 'OB', timeframe: 'M15' },
-  { id: 'gate_5', name: 'Fair Value Gap (FVG)', shortName: 'FVG', timeframe: 'M5' },
-  { id: 'gate_6', name: 'Momentum Alignment', shortName: 'MOM', timeframe: 'M5' },
-  { id: 'gate_7', name: 'Tick Volume Surge', shortName: 'VOL', timeframe: 'M1' },
-  { id: 'gate_8', name: 'BiQuote Spread & Execution', shortName: 'EXE', timeframe: 'M1' },
+  { id: 'g1', name: 'W1/D1 Context', shortName: 'D1', timeframe: 'D1' },
+  { id: 'g2', name: 'H4 Bias', shortName: 'H4', timeframe: 'H4' },
+  { id: 'g3', name: 'H1 Confirmation', shortName: 'H1', timeframe: 'H1' },
+  { id: 'g4', name: 'M30 Refinement', shortName: 'M30', timeframe: 'M30' },
+  { id: 'g5', name: 'M15 Body Close', shortName: 'M15', timeframe: 'M15' },
+  { id: 'g6', name: 'M5 Retest', shortName: 'M5R', timeframe: 'M5' },
+  { id: 'g7', name: 'M5 Confirmation', shortName: 'M5C', timeframe: 'M5' },
+  { id: 'g8', name: 'Entry Trigger', shortName: 'TICK', timeframe: 'TICK' },
 ];
 
 export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
-  ({ className = '', onRegisterHooks, variant = 'command', signalEngine: externalSignalEngine }, ref) => {
+  ({ className = '', onRegisterHooks, variant = 'command', signalEngine: externalSignalEngine, buyRatio: propBuyRatio, sellRatio: propSellRatio }, ref) => {
     const feed = useCommandFeed();
     const internalSignal = useCommandSignal();
     const signalEngine = externalSignalEngine || internalSignal;
@@ -171,6 +171,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
       return { text: 'LIVE', color: 'text-[#22e08a]', border: 'border-[#22e08a]/40', bg: 'bg-[#22e08a]/10', dot: 'bg-[#22e08a] animate-ping' };
     }, [mode]);
 
+    // Window: 60-second rolling tick tape window
     // Buy/Sell Flow Share (sum 100, null when collecting data)
     const totalTicks60 = (feed.buyTicks60s || 0) + (feed.sellTicks60s || 0);
     const buyPct: number | null = totalTicks60 >= 5 ? feed.buyRatio : null;
@@ -179,17 +180,25 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     // Real labels mapping with tones (bull green, bear red, neutral grey, na dark grey) and real details
     const labels: CoreLabel[] = useMemo(() => {
       // 1. SENTIMENT
+      // Window: 60-second rolling tick tape window
       let sentVal = 'N/A';
       let sentTone: Tone = 'na';
       let sentDetail: string | undefined = undefined;
       if (totalTicks60 >= 5) {
         const b = feed.buyRatio;
-        sentVal = `${b >= 50 ? '+' : '-'}${Math.abs(b - 50).toFixed(0)}% ${b >= 50 ? 'BUY' : 'SELL'}`;
-        sentTone = b > 52 ? 'bull' : b < 48 ? 'bear' : 'neutral';
+        const diff = b - 50;
+        if (Math.abs(diff) < 0.01) {
+          sentVal = 'NEUTRAL';
+          sentTone = 'neutral';
+        } else {
+          sentVal = `${diff > 0 ? '+' : '-'}${Math.abs(diff).toFixed(0)}% ${diff > 0 ? 'BUY' : 'SELL'}`;
+          sentTone = diff > 2 ? 'bull' : diff < -2 ? 'bear' : 'neutral';
+        }
         sentDetail = `60s flow share: ${b.toFixed(1)}% buyers vs ${(100 - b).toFixed(1)}% sellers across ${totalTicks60} ticks.`;
       }
 
       // 2. MOMENTUM
+      // Window: 60-second rolling tick tape window
       let momVal = 'N/A';
       let momTone: Tone = 'na';
       let momDetail: string | undefined = undefined;
@@ -348,6 +357,7 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
       if (!isFinite(sig.entry) || !isFinite(sig.sl) || !isFinite(sig.tp1) || !isFinite(sig.tp2) || !isFinite(sig.tp3)) {
         return null;
       }
+
       return {
         side: sig.side,
         entry: sig.entry,
@@ -481,10 +491,13 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
 
             <div className="flex items-center justify-between text-[9px] text-[#8a9ba8]">
               <div>
-                <span>
-                  WAITING FOR ALIGNMENT{' '}
-                  <span className="text-[#ffd97a] font-bold">{passCount}/8 PASS</span>
-                </span>
+                {activeCoreSignal ? (
+                  <span className="text-[#22e08a] font-bold">SIGNAL ACTIVE</span>
+                ) : (
+                  <span>
+                    ALIGNMENT <span className="text-[#ffd97a] font-bold">{passCount}/8 PASS</span>
+                  </span>
+                )}
               </div>
 
               <div className="text-[8px] text-[#5b6577]">

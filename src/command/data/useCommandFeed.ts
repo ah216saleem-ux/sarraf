@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useSyncExternalStore } from 'react';
 import { commandStore } from './commandFeedStore';
 import {
   CommandTick,
@@ -75,63 +75,28 @@ export function formatFreshness(timestamp: number): string {
   return `updated ${ageSec}s ago`;
 }
 
+// Window: 60-second rolling tick tape window
+export function compute60sFlowRatios(buyTicks: number, sellTicks: number): { buyRatio: number; sellRatio: number; totalTicks: number } {
+  const total = buyTicks + sellTicks;
+  if (total <= 0) {
+    return { buyRatio: 50, sellRatio: 50, totalTicks: 0 };
+  }
+  const buyRatio = Number(((buyTicks / total) * 100).toFixed(1));
+  const sellRatio = Number((100 - buyRatio).toFixed(1));
+  return { buyRatio, sellRatio, totalTicks: total };
+}
+
 export function useCommandFeed(): UseCommandFeedResult {
-  // Snapshot version state
-  const [, setTick] = useState(0);
+  // Synchronous subscription to single commandStore state so all components re-render in the exact same tick
+  useSyncExternalStore(
+    (onStoreChange) => commandStore.subscribe(onStoreChange),
+    () => commandStore.version
+  );
 
-  // requestAnimationFrame throttling to max 10 updates per second (100ms)
-  const lastPaintTimeRef = useRef<number>(0);
-  const pendingRafRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    const handleStoreChange = () => {
-      // Pause updates completely when tab is hidden
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-        return;
-      }
-
-      const now = performance.now();
-      const elapsed = now - lastPaintTimeRef.current;
-
-      // Throttle UI paint to max 10/sec (100ms window)
-      if (elapsed < 100) {
-        if (!pendingRafRef.current) {
-          pendingRafRef.current = requestAnimationFrame(() => {
-            pendingRafRef.current = null;
-            lastPaintTimeRef.current = performance.now();
-            setTick((t) => (t + 1) % 1000000);
-          });
-        }
-        return;
-      }
-
-      lastPaintTimeRef.current = now;
-      setTick((t) => (t + 1) % 1000000);
-    };
-
-    const unsubscribe = commandStore.subscribe(handleStoreChange);
-
-    // Visibility change handler to resume smoothly when tab becomes visible again
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        handleStoreChange();
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibility);
-
-    return () => {
-      unsubscribe();
-      document.removeEventListener('visibilitychange', handleVisibility);
-      if (pendingRafRef.current) {
-        cancelAnimationFrame(pendingRafRef.current);
-      }
-    };
-  }, []);
-
-  // Compute derived ratios from real ticks
+  // Window: 60-second rolling tick tape window
+  const buyRatio = commandStore.buyRatio;
+  const sellRatio = commandStore.sellRatio;
   const total60 = commandStore.buyTicks60s + commandStore.sellTicks60s;
-  const buyRatio = total60 > 0 ? Number(((commandStore.buyTicks60s / total60) * 100).toFixed(1)) : 50;
-  const sellRatio = total60 > 0 ? Number((100 - buyRatio).toFixed(1)) : 50;
 
   // Liquidity grade derived from live spread & tick rate
   let liquidityGrade: 'HIGH' | 'MED' | 'LOW' = 'HIGH';

@@ -1,7 +1,8 @@
 // src/command/vortex/NeuralCoreEngine.ts
 // SARRAF NEURAL CORE - pure Canvas2D engine (no WebGL, no three.js, no shaders).
 // Every coloured node / halo / label value is caused by a real event pushed in by the host.
-// The only decorative thing is the dim grey scaffold lattice (deterministic fibonacci sphere).
+// Decorative only (always neutral blue-grey, never green/red): dim scaffold lattice + ambient drifting dots + slow heartbeat ring,
+// so the core keeps moving between ticks. Green/red only ever come from real ticks.
 
 export type Tone = 'bull' | 'bear' | 'neutral' | 'na';
 export type CoreMode = 'live' | 'replay' | 'reconnecting' | 'closed';
@@ -19,8 +20,8 @@ const RED = '#ff4f78';
 const NEUTRAL = '#8fa6c8';
 const GOLD = '#f5c451';
 const BG = '#03050a';
-const MAX_NODES = 220;
-const MAX_LINKS = 520;
+const MAX_NODES = 300;
+const MAX_LINKS = 760;
 const LABEL_ORDER = ['momentum', 'sentiment', 'tickData', 'poc', 'absorption', 'fvgob', 'regime', 'structure', 'tickImpact'];
 const LABEL_ANGLE: Record<string, number> = {
   momentum: -42, sentiment: -112, poc: -2, absorption: 36, tickData: 72,
@@ -82,6 +83,8 @@ export class NeuralCoreEngine {
   private ro: ResizeObserver | null = null;
   private replayTimer: number | null = null;
   private seedTimers: number[] = [];
+  private amb: { l: number; t: number; sp: number }[] = [];
+  private lastFrame = 0;
   private signal: CoreSignal | null = null;
   private lastBoxes: { key: string; x: number; y: number; w: number; h: number; mx: number; my: number }[] = [];
   private selected: { key: string; until: number } | null = null;
@@ -244,6 +247,10 @@ export class NeuralCoreEngine {
       d.sort((p, q) => p[0] - q[0]);
       for (let k = 0; k < 3; k++) if (i < d[k][1]) this.scaffoldLinks.push([i, d[k][1]]);
     }
+    // ambient drifting dots along scaffold links (decorative, neutral colour)
+    this.amb = [];
+    const na = this.opts.lite ? 12 : 30;
+    for (let i = 0; i < na; i++) this.amb.push({ l: Math.floor(this.rnd() * this.scaffoldLinks.length), t: this.rnd(), sp: 0.35 + this.rnd() * 0.55 });
   }
 
   resize() {
@@ -280,9 +287,9 @@ export class NeuralCoreEngine {
     const sc = this.R / 150;
     const b = Math.min(1, Math.max(0, bigness));
     n.x = x * rr; n.y = y * rr; n.z = z * rr; n.kind = kind;
-    n.size = (kind === 0 ? 1.8 : 2.6 + b * 5.5) * Math.max(0.7, sc);
+    n.size = (kind === 0 ? 1.8 : 3.2 + b * 7.5) * Math.max(0.7, sc);
     n.halo = kind === 0 ? 0 : (0.25 + b * 0.75);
-    n.born = now; n.life = kind === 0 ? 14000 : 42000; n.alive = true;
+    n.born = now; n.life = kind === 0 ? 45000 : 150000; n.alive = true;
     this.spawnCount++;
     // links to the 2-3 nearest alive nodes (kills links that point at the recycled slot)
     for (const l of this.links) if (l.alive && (l.a === idx || l.b === idx)) l.alive = false;
@@ -325,6 +332,7 @@ export class NeuralCoreEngine {
     const t = (now - this.t0) / 1000;
     const W = this.W, H = this.H, cx = this.cx, cy = this.cy, R = this.R;
     const energy = Math.min(1, this.ticksPerMin() / 40);
+    const dt = this.lastFrame ? Math.min(0.05, (now - this.lastFrame) / 1000) : 0.016; this.lastFrame = now;
     const red = this.reduced();
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.globalAlpha = 1;
@@ -338,8 +346,8 @@ export class NeuralCoreEngine {
     // colour washes: green left / red right, strength follows the real buy/sell share
     const hasFlow = this.buyPct !== null && this.sellPct !== null;
     const gs = hasFlow ? this.buyPct! / 100 : 0.5;
-    const washG = hasFlow ? 0.07 + 0.16 * gs : 0.04;
-    const washR = hasFlow ? 0.07 + 0.16 * (1 - gs) : 0.04;
+    const washG = hasFlow ? 0.09 + 0.2 * gs : 0.05;
+    const washR = hasFlow ? 0.09 + 0.2 * (1 - gs) : 0.05;
     this.wash(ctx, cx - R * 0.42, cy, R * 0.95, hasFlow ? GREEN : NEUTRAL, washG);
     this.wash(ctx, cx + R * 0.42, cy, R * 0.95, hasFlow ? RED : NEUTRAL, washR);
     if (now < this.tintUntil) {
@@ -348,7 +356,7 @@ export class NeuralCoreEngine {
     }
 
     // rotation: slow sway so green stays left and red stays right
-    const speed = 0.22 + 0.35 * energy;
+    const speed = 0.65 + 0.55 * energy;   // always moving, faster with more real ticks
     const yaw = red ? 0 : Math.sin(t * speed) * 0.5;
     const pitch = -0.22 + (red ? 0 : Math.sin(t * speed * 0.7 + 1) * 0.06);
     const cyw = Math.cos(yaw), syw = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
@@ -379,9 +387,35 @@ export class NeuralCoreEngine {
       ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.stroke();
     }
     ctx.fillStyle = '#8fa6c8';
-    for (const p of sp2) {
-      ctx.globalAlpha = 0.16 + 0.22 * ((p[2] + 1) / 2);
+    for (let si = 0; si < sp2.length; si++) {
+      const p = sp2[si];
+      const tw = red ? 1 : 0.7 + 0.3 * Math.sin(t * 1.8 + si * 1.7);
+      ctx.globalAlpha = (0.16 + 0.22 * ((p[2] + 1) / 2)) * tw;
       ctx.beginPath(); ctx.arc(p[0], p[1], 1.1, 0, Math.PI * 2); ctx.fill();
+    }
+    if (!red) {
+      // heartbeat ring (neutral, very faint) + ambient dots drifting along the lattice
+      const bp = ((now - this.t0) % 3200) / 3200;
+      ctx.lineWidth = 1.2; ctx.strokeStyle = NEUTRAL; ctx.globalAlpha = (1 - bp) * 0.10;
+      ctx.beginPath(); ctx.arc(cx, cy, R * (0.12 + 0.9 * bp), 0, Math.PI * 2); ctx.stroke();
+      for (let k = 0; k < 2; k++) {
+        const rot = (k ? 0.6 : -0.5) + t * (k ? 0.07 : -0.05);
+        ctx.globalAlpha = 0.09; ctx.lineWidth = 1; ctx.strokeStyle = NEUTRAL;
+        ctx.beginPath(); ctx.ellipse(cx, cy, R * 1.04, R * 0.36, rot, 0, Math.PI * 2); ctx.stroke();
+        const ang = t * (k ? 0.9 : 1.25) + k * Math.PI, lx = R * 1.04 * Math.cos(ang), ly = R * 0.36 * Math.sin(ang);
+        const ox = cx + lx * Math.cos(rot) - ly * Math.sin(rot), oy = cy + lx * Math.sin(rot) + ly * Math.cos(rot);
+        ctx.globalAlpha = 0.18; ctx.drawImage(this.halos.n, ox - 9, oy - 9, 18, 18);
+        ctx.globalAlpha = 0.8; ctx.fillStyle = '#cfe0ff'; ctx.beginPath(); ctx.arc(ox, oy, 2, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.fillStyle = '#a9c4f0';
+      for (const a of this.amb) {
+        a.t += dt * a.sp * 1.4;
+        if (a.t >= 1) { a.t -= 1; a.l = Math.floor(this.rnd() * this.scaffoldLinks.length); a.sp = 0.35 + this.rnd() * 0.55; }
+        const [ia, ib] = this.scaffoldLinks[a.l]; const pa = sp2[ia], pb = sp2[ib];
+        const depth = (pa[2] + pb[2] + 2) / 4;
+        ctx.globalAlpha = Math.sin(a.t * Math.PI) * (0.25 + 0.5 * depth);
+        ctx.beginPath(); ctx.arc(pa[0] + (pb[0] - pa[0]) * a.t, pa[1] + (pb[1] - pa[1]) * a.t, 1.5, 0, Math.PI * 2); ctx.fill();
+      }
     }
 
     // node screen positions + alpha
@@ -400,40 +434,62 @@ export class NeuralCoreEngine {
     }
 
     // links
-    ctx.lineWidth = 0.9;
     for (const l of this.links) {
       if (!l.alive) continue;
       const na = this.nodes[l.a], nb = this.nodes[l.b];
       if (!na.alive || !nb.alive || !pos[l.a] || !pos[l.b]) { l.alive = false; continue; }
       const pa = pos[l.a], pb = pos[l.b];
-      const fresh = Math.max(0, 1 - (now - l.born) / 700);
+      const fresh = Math.max(0, 1 - (now - l.born) / 1500);
       const depth = (pa[2] + pb[2] + 2) / 4;
-      ctx.globalAlpha = Math.min(al[l.a], al[l.b]) * (0.16 + 0.26 * depth + 0.3 * fresh);
+      ctx.globalAlpha = Math.min(al[l.a], al[l.b]) * (0.22 + 0.34 * depth + 0.4 * fresh);
+      ctx.lineWidth = 1.2;
       ctx.strokeStyle = nb.kind === 1 ? GREEN : nb.kind === -1 ? RED : NEUTRAL;
       if (na.kind !== nb.kind && na.kind !== 0 && nb.kind !== 0) ctx.strokeStyle = '#b9a0c8';
       ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.stroke();
+      if (fresh > 0.15 && nb.kind !== 0) {   // soft glow on freshly created links
+        const ga = ctx.globalAlpha; ctx.globalAlpha = Math.min(al[l.a], al[l.b]) * 0.16 * fresh; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.stroke(); ctx.globalAlpha = ga; ctx.lineWidth = 1.2;
+      }
+      if (!red && nb.kind !== 0) {
+        // a bright dot keeps travelling along every live link (same colour as the link)
+        const u = (((now - l.born) / 1000) * 0.7) % 1;
+        ctx.globalAlpha = Math.min(al[l.a], al[l.b]) * Math.sin(u * Math.PI) * 0.9;
+        ctx.fillStyle = ctx.strokeStyle as string;
+        ctx.beginPath(); ctx.arc(pa[0] + (pb[0] - pa[0]) * u, pa[1] + (pb[1] - pa[1]) * u, 1.9, 0, Math.PI * 2); ctx.fill();
+        const u2 = (u + 0.5) % 1;
+        ctx.globalAlpha = Math.min(al[l.a], al[l.b]) * Math.sin(u2 * Math.PI) * 0.7;
+        ctx.beginPath(); ctx.arc(pa[0] + (pb[0] - pa[0]) * u2, pa[1] + (pb[1] - pa[1]) * u2, 1.5, 0, Math.PI * 2); ctx.fill();
+      }
     }
 
     // halos then nodes, back to front
     const order: number[] = [];
     for (let i = 0; i < MAX_NODES; i++) if (al[i] > 0.01) order.push(i);
     order.sort((a, b) => pos[a][2] - pos[b][2]);
-    const maxHalo = R * 0.2;
+    const maxHalo = R * 0.32;
     for (const i of order) {
       const n = this.nodes[i];
       if (n.halo <= 0) continue;
       const age = now - n.born;
       const pop = age < 250 ? 0.4 + 0.6 * (age / 250) : 1;
-      const hr = Math.min(maxHalo, n.size * (3.2 + n.halo * 3)) * pop;
+      const hr = Math.min(maxHalo, n.size * (3.6 + n.halo * 3.8)) * pop;
       const sprite = this.halos[n.kind === 1 ? 'g' : n.kind === -1 ? 'r' : 'n'];
-      ctx.globalAlpha = al[i] * (0.28 + 0.4 * n.halo) * (0.55 + 0.45 * (pos[i][2] + 1) / 2);
+      ctx.globalAlpha = al[i] * (0.3 + 0.45 * n.halo) * (0.55 + 0.45 * (pos[i][2] + 1) / 2);
       ctx.drawImage(sprite, pos[i][0] - hr, pos[i][1] - hr, hr * 2, hr * 2);
+      if (n.halo > 0.55 && !this.opts.lite) {   // translucent bubble with a thin rim for the strongest ticks
+        const br2 = n.size * 2.3 * pop, col = n.kind === 1 ? GREEN : RED;
+        ctx.globalAlpha = al[i] * 0.12; ctx.fillStyle = col;
+        ctx.beginPath(); ctx.arc(pos[i][0], pos[i][1], br2, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = al[i] * 0.4; ctx.strokeStyle = col; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(pos[i][0], pos[i][1], br2, 0, Math.PI * 2); ctx.stroke();
+      }
     }
     for (const i of order) {
       const n = this.nodes[i];
       const age = now - n.born;
       const pop = age < 250 ? (age / 250) * 1.15 : 1;
-      const r = Math.max(1.2, n.size * Math.min(1.1, pop) * (0.8 + 0.25 * (pos[i][2] + 1) / 2));
+      const br = red || n.kind === 0 ? 1 : 1 + 0.12 * Math.sin(t * 2.4 + i * 0.9);   // live nodes breathe
+      const r = Math.max(1.2, n.size * Math.min(1.1, pop) * (0.8 + 0.25 * (pos[i][2] + 1) / 2) * br);
       ctx.globalAlpha = al[i] * (0.65 + 0.35 * (pos[i][2] + 1) / 2);
       ctx.fillStyle = n.kind === 1 ? GREEN : n.kind === -1 ? RED : NEUTRAL;
       ctx.beginPath(); ctx.arc(pos[i][0], pos[i][1], r, 0, Math.PI * 2); ctx.fill();

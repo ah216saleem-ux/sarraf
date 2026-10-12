@@ -20,6 +20,9 @@ class CommandFeedStore {
   // Monotonic sequence ID for ticks (no Math.random)
   private tickSeq: number = 0;
 
+  // Monotonic store version for synchronous React re-renders across all panels and Neural Core
+  public version: number = 0;
+
   // Has received first real tick from BiQuote
   public hasReceivedTick: boolean = false;
 
@@ -36,6 +39,10 @@ class CommandFeedStore {
   public change24h: number = 0;
   public changePercent24h: number = 0;
   public tickDirection: 'BUY' | 'SELL' | 'FLAT' = 'FLAT';
+
+  // 60-Second Flow Ratios (single source of truth for Panel 2, Panel 4, and Neural Core)
+  public buyRatio: number = 50;
+  public sellRatio: number = 50;
 
   // Connection State
   public connection: FeedConnectionState = {
@@ -144,6 +151,7 @@ class CommandFeedStore {
   }
 
   private notify() {
+    this.version++;
     for (const listener of this.listeners) {
       listener();
     }
@@ -158,6 +166,7 @@ class CommandFeedStore {
 
   public startDataFeed() {
     this.isSubscribed = true;
+    this.fetchTickBuffer5m();
     this.seedHistoricalCandles();
     this.fetchNewsImpact();
     this.connectSse();
@@ -167,6 +176,70 @@ class CommandFeedStore {
     this.newsIntervalId = setInterval(() => {
       this.fetchNewsImpact();
     }, 60000);
+  }
+
+  // Fetch memory-only rolling 5-minute tick history from server on connect
+  private async fetchTickBuffer5m() {
+    try {
+      const res = await fetch('/api/command/ticks');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data?.ticks) && data.ticks.length > 0) {
+          this.seedTickBuffer5m(data.ticks);
+        }
+      }
+    } catch {}
+  }
+
+  // Seed rolling tick history (last 5 minutes) from memory buffer on connect
+  public seedTickBuffer5m(rawTicks: any[]) {
+    if (!Array.isArray(rawTicks) || rawTicks.length === 0) return;
+    const now = Date.now();
+    const mapped: CommandTick[] = [];
+    for (let i = 0; i < rawTicks.length; i++) {
+      const t = rawTicks[i];
+      const prevPrice = i > 0 ? rawTicks[i - 1].price : t.price;
+      const delta = Number((t.price - prevPrice).toFixed(2));
+      const direction: 'BUY' | 'SELL' | 'FLAT' = delta > 0 ? 'BUY' : delta < 0 ? 'SELL' : 'FLAT';
+      const ts = t.lastReceivedAt || (t.timestamp ? new Date(t.timestamp).getTime() : now);
+      mapped.push({
+        id: `tick-${ts}-${i}`,
+        price: Number(t.price.toFixed(2)),
+        bid: Number((t.bid || t.price - 0.15).toFixed(2)),
+        ask: Number((t.ask || t.price + 0.15).toFixed(2)),
+        spread: Number((t.spread || 0.3).toFixed(2)),
+        timestamp: ts,
+        isoTime: t.timestamp || new Date(ts).toISOString(),
+        direction,
+        delta,
+        volume: 1,
+      });
+    }
+
+    if (mapped.length === 0) return;
+
+    this.hasReceivedTick = true;
+    const newest = mapped[mapped.length - 1];
+    if (this.currentPrice <= 0) {
+      this.currentPrice = newest.price;
+      this.bid = newest.bid;
+      this.ask = newest.ask;
+      this.spread = newest.spread;
+    }
+
+    if (this.tickHistory.length < mapped.length) {
+      this.tickHistory = mapped.slice(-300);
+    }
+
+    const cutoff60s = now - 60000;
+    const ticks60s = mapped.filter((t) => t.timestamp >= cutoff60s);
+    if (ticks60s.length > 0) {
+      this.tickTape = [...ticks60s].reverse();
+    } else {
+      this.tickTape = mapped.slice(-20).reverse();
+    }
+    this.updateTickTapeStats();
+    this.notify();
   }
 
   public stopDataFeed() {
@@ -424,6 +497,10 @@ class CommandFeedStore {
   public processIncomingFeedQuote(raw: any) {
     if (!raw || typeof raw.price !== 'number' || raw.price <= 0) return;
 
+    if (Array.isArray(raw.ticks5m) && raw.ticks5m.length > 0 && this.tickHistory.length < 10) {
+      this.seedTickBuffer5m(raw.ticks5m);
+    }
+
     const now = Date.now();
     this.lastFetchTime = now;
     this.lastTickTimestamp = now;
@@ -554,6 +631,16 @@ class CommandFeedStore {
     this.sellDeltaSum60s = Number(sellDeltaSum.toFixed(2));
     this.buyVolumeDollar60s = this.buyDeltaSum60s;
     this.sellVolumeDollar60s = this.sellDeltaSum60s;
+
+    // Window: 60-second rolling tick tape window
+    const total = buy + sell;
+    if (total <= 0) {
+      this.buyRatio = 50;
+      this.sellRatio = 50;
+    } else {
+      this.buyRatio = Number(((buy / total) * 100).toFixed(1));
+      this.sellRatio = Number((100 - this.buyRatio).toFixed(1));
+    }
   }
 
   private ingestTickIntoCandles(price: number, now: number, vol: number) {

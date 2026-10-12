@@ -271,6 +271,19 @@ function getRolling24hHighLow(currentPrice: number): { high: number; low: number
   return { high: finalHigh, low: finalLow };
 }
 
+// Memory-only rolling buffer of last 5 minutes of real BiQuote ticks
+const tickBuffer5m: PersistedTickData[] = [];
+const FIVE_MIN_MS = 5 * 60 * 1000;
+
+export function get5MinTickBuffer(): PersistedTickData[] {
+  const now = Date.now();
+  const cutoff = now - FIVE_MIN_MS;
+  while (tickBuffer5m.length > 0 && tickBuffer5m[0].lastReceivedAt < cutoff) {
+    tickBuffer5m.shift();
+  }
+  return tickBuffer5m;
+}
+
 // Record an incoming real tick from feed
 export function recordLiveTick(tick: {
   symbol?: string;
@@ -318,6 +331,13 @@ export function recordLiveTick(tick: {
     source: tick.source || 'biquote.io (MetaTrader 5)',
     marketState: tick.marketState,
   };
+
+  // Push to 5-minute memory buffer
+  tickBuffer5m.push(lastValidTick);
+  const cutoff = now - FIVE_MIN_MS;
+  while (tickBuffer5m.length > 0 && tickBuffer5m[0].lastReceivedAt < cutoff) {
+    tickBuffer5m.shift();
+  }
 
   return lastValidTick;
 }

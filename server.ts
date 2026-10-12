@@ -21,6 +21,7 @@ import {
   getLastValidTick,
   evaluateMarketPriceStatus,
   getMarketSchedule,
+  get5MinTickBuffer,
   LAST_TICK_FILE,
 } from './src/server/marketPriceEngine.ts';
 import {
@@ -512,6 +513,7 @@ app.get('/api/price/xauusd', (_req, res) => {
     source: tick.source,
     marketState: tick.marketState || (evalResult.status === 'MARKET_CLOSED' ? 'CLOSED' : 'OPEN'),
     engine: engineStatus,
+    ticks5m: get5MinTickBuffer(),
   });
 });
 
@@ -520,6 +522,14 @@ app.get('/api/candles', (_req, res) => {
   res.json({
     store: getCandleStore(),
     status: getEngineStatus(),
+  });
+});
+
+// GET /api/command/ticks - Get rolling 5-minute memory tick history
+app.get('/api/command/ticks', (_req, res) => {
+  return res.json({
+    status: 'SUCCESS',
+    ticks: get5MinTickBuffer(),
   });
 });
 
@@ -532,7 +542,8 @@ app.get('/api/command/feed-stream', (req, res) => {
   });
   res.write(': connected\n\n');
   if (latestLiveQuote) {
-    res.write(`data: ${JSON.stringify(latestLiveQuote)}\n\n`);
+    const payload = { ...latestLiveQuote, ticks5m: get5MinTickBuffer() };
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
   }
   commandSseClients.add(res);
   req.on('close', () => {
