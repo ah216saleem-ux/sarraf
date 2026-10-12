@@ -39,6 +39,7 @@ import { PerformanceTab } from './PerformanceTab';
 import { GoLiveChecklistTab } from './GoLiveChecklistTab';
 import { SarrafCommandView } from '../command/SarrafCommandView';
 import { SpyOptionsView } from '../spy/SpyOptionsView';
+import { useCommandFeed } from '../command/data/useCommandFeed';
 
 export const DashboardView: React.FC = () => {
   const { priceData, user, logout, macroEvents } = useMarket();
@@ -182,7 +183,10 @@ export const DashboardView: React.FC = () => {
     }
   }, [priceData.price, priceData.status]);
 
-  const currentPrice = priceData.price;
+  const commandFeed = useCommandFeed();
+  const currentPrice = commandFeed.currentPrice > 0 ? commandFeed.currentPrice : priceData.price;
+  const headerStatus = commandFeed.currentPrice > 0 ? commandFeed.connection.status : priceData.status;
+  const headerBadgeText = commandFeed.currentPrice > 0 ? (commandFeed.connection.badgeText || commandFeed.connection.status) : priceData.status;
   const minPrice = chartPoints.length > 0 ? Math.min(...chartPoints, (currentPrice ?? 4150) - 4) : 4150;
   const maxPrice = chartPoints.length > 0 ? Math.max(...chartPoints, (currentPrice ?? 4180) + 4) : 4180;
   const range = maxPrice - minPrice || 1;
@@ -637,30 +641,36 @@ export const DashboardView: React.FC = () => {
                 <span className="text-neutral-400">XAU/USD:</span>
                 <span
                   className={`text-base font-bold ${
-                    priceData.status === 'LIVE'
+                    headerStatus === 'LIVE'
                       ? 'text-[#FFD97A]'
-                      : priceData.status === 'MARKET_CLOSED'
+                      : headerStatus === 'MARKET_CLOSED'
                       ? 'text-amber-300'
+                      : headerStatus === 'STALE'
+                      ? 'text-amber-400'
                       : 'text-neutral-300'
                   }`}
                 >
                   ${(currentPrice ?? 4165.5).toFixed(2)}
                 </span>
-                {priceData.status === 'LIVE' ? (
+                {headerStatus === 'LIVE' ? (
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-[9px] text-emerald-400 font-semibold">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
                     LIVE
                   </span>
-                ) : priceData.status === 'MARKET_CLOSED' ? (
+                ) : headerStatus === 'MARKET_CLOSED' ? (
                   <span
                     className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/40 text-[9px] text-amber-300 font-semibold"
                     title="Market Closed - Last Price"
                   >
                     CLOSED
                   </span>
+                ) : headerStatus === 'STALE' ? (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/40 text-[9px] text-amber-300 font-semibold animate-pulse">
+                    {headerBadgeText}
+                  </span>
                 ) : (
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-rose-950/60 border border-rose-500/40 text-[9px] text-rose-300 font-semibold">
-                    {priceData.status === 'FEED_STALE' ? 'STALE' : 'OFFLINE'}
+                    {headerBadgeText || 'RECONNECTING'}
                   </span>
                 )}
               </div>

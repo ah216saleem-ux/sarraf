@@ -46,11 +46,11 @@ class CommandFeedStore {
   public buyRatio: number = 50;
   public sellRatio: number = 50;
 
-  // Connection State
   public connection: FeedConnectionState = {
     status: 'LIVE',
     isLive: true,
     lastTickTime: 0,
+    lastTickAgeSeconds: 0,
     quoteAgeSeconds: 0,
     reconnectAttempts: 0,
     source: 'biquote.io (MetaTrader 5)',
@@ -126,15 +126,30 @@ class CommandFeedStore {
   public buyVolumeDollar60s: number = 0;
   public sellVolumeDollar60s: number = 0;
 
-  // Freshness Timestamps
+  // Freshness Timestamps & Live Feed Connection State
   public lastTickTimestamp: number = 0;
   public lastCandleTimestamp: number = 0;
   public lastNewsTimestamp: number = 0;
   public lastDerivedTimestamp: number = 0;
 
-  // Background Poll/SSE references
+  public lastMsgAt: number = 0;
+  public lastTickAt: number = 0;
+  public reconnectCount: number = 0;
+  public marketOpen: boolean = true;
+  public upstream: 'up' | 'down' = 'up';
+  public isConnected: boolean = false;
+  public sseFailuresCount: number = 0;
+  public isPollingFallback: boolean = false;
+  private reconnectBackoffIdx: number = 0;
+  private readonly CLIENT_BACKOFF_STEPS = [500, 1000, 2000, 4000, 8000];
+  private watchdogTimerId: any = null;
+  private reconnectTimerId: any = null;
+  private fallbackPollTimerId: any = null;
+  private statusTickerId: any = null;
+  private resumeHandlersRegistered: boolean = false;
+
+  // Background SSE references
   private sseSource: EventSource | null = null;
-  private pollIntervalId: any = null;
   private newsIntervalId: any = null;
   private isSubscribed: boolean = false;
   private lastFetchTime: number = 0;
@@ -212,14 +227,17 @@ class CommandFeedStore {
 
   public startDataFeed() {
     this.isSubscribed = true;
+    this.registerResumeHandlers();
+    this.startWatchdog();
+    this.startStatusTicker();
     this.fetchTickBuffer5m();
     this.seedHistoricalCandles();
     this.fetchUnifiedZones();
     this.fetchNewsImpact();
     this.connectSse();
-    this.startPolling();
 
     // Refresh news calendar every 60s
+    if (this.newsIntervalId) clearInterval(this.newsIntervalId);
     this.newsIntervalId = setInterval(() => {
       this.fetchNewsImpact();
       this.fetchUnifiedZones();
@@ -293,12 +311,26 @@ class CommandFeedStore {
   public stopDataFeed() {
     this.isSubscribed = false;
     if (this.sseSource) {
-      this.sseSource.close();
+      try {
+        this.sseSource.close();
+      } catch {}
       this.sseSource = null;
     }
-    if (this.pollIntervalId) {
-      clearInterval(this.pollIntervalId);
-      this.pollIntervalId = null;
+    if (this.watchdogTimerId) {
+      clearInterval(this.watchdogTimerId);
+      this.watchdogTimerId = null;
+    }
+    if (this.reconnectTimerId) {
+      clearTimeout(this.reconnectTimerId);
+      this.reconnectTimerId = null;
+    }
+    if (this.fallbackPollTimerId) {
+      clearInterval(this.fallbackPollTimerId);
+      this.fallbackPollTimerId = null;
+    }
+    if (this.statusTickerId) {
+      clearInterval(this.statusTickerId);
+      this.statusTickerId = null;
     }
     if (this.newsIntervalId) {
       clearInterval(this.newsIntervalId);
@@ -483,68 +515,242 @@ class CommandFeedStore {
     }
   }
 
+  // Register resilient listeners: reconnect immediately (if last message older than 5 s) on:
+  // window "online", document "visibilitychange" (visible), "pageshow", "focus"
+  private registerResumeHandlers() {
+    if (typeof window === 'undefined' || this.resumeHandlersRegistered) return;
+    this.resumeHandlersRegistered = true;
+    const handleResume = () => {
+      const now = Date.now();
+      if (this.lastMsgAt === 0 || now - this.lastMsgAt > 5000) {
+        this.reconnect('resume_event');
+      }
+    };
+    window.addEventListener('online', handleResume);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') handleResume();
+    });
+    window.addEventListener('pageshow', handleResume);
+    window.addEventListener('focus', handleResume);
+  }
+
+  // Watchdog every 2 s: if now - lastMsgAt > 10 s, close the EventSource and reconnect immediately.
+  // Reconnect with backoff 0.5s, 1s, 2s, 4s, 8s (cap 8s), unlimited retries, never give up, never require a page reload.
+  private startWatchdog() {
+    if (this.watchdogTimerId) clearInterval(this.watchdogTimerId);
+    this.watchdogTimerId = setInterval(() => {
+      const now = Date.now();
+      if (this.isSubscribed && this.lastMsgAt > 0 && now - this.lastMsgAt > 10000) {
+        this.reconnect('watchdog_timeout');
+      }
+      this.updateConnectionStatus();
+    }, 2000);
+  }
+
+  private startStatusTicker() {
+    if (this.statusTickerId) clearInterval(this.statusTickerId);
+    this.statusTickerId = setInterval(() => {
+      this.updateConnectionStatus();
+    }, 1000);
+  }
+
+  // Reconnect immediately and fetch snapshot so no gap is left in ticks/candles/zones
+  public async reconnect(reason?: string) {
+    this.reconnectCount++;
+    if (this.reconnectTimerId) {
+      clearTimeout(this.reconnectTimerId);
+      this.reconnectTimerId = null;
+    }
+    if (this.sseSource) {
+      try {
+        this.sseSource.close();
+      } catch {}
+      this.sseSource = null;
+    }
+    this.isConnected = false;
+    this.updateConnectionStatus();
+
+    // After every reconnect call /api/command/snapshot and merge it so no gap is left in ticks/candles/zones
+    await this.fetchSnapshotAndMerge();
+
+    this.connectSse();
+  }
+
+  private scheduleReconnect(delayMs: number) {
+    if (this.reconnectTimerId) clearTimeout(this.reconnectTimerId);
+    this.reconnectTimerId = setTimeout(() => {
+      this.reconnect('backoff');
+    }, delayMs);
+  }
+
+  // Fetch /api/command/snapshot to merge ticks/candles/zones without gaps
+  public async fetchSnapshotAndMerge() {
+    try {
+      const res = await fetch('/api/command/snapshot');
+      if (!res.ok) return;
+      const data = await res.json();
+      this.lastMsgAt = Date.now();
+      if (typeof data.marketOpen === 'boolean') {
+        this.marketOpen = data.marketOpen;
+      }
+      if (data.upstream) {
+        this.upstream = data.upstream;
+      }
+      if (typeof data.price === 'number' && data.price > 0) {
+        this.processIncomingFeedQuote(data);
+      }
+      if (Array.isArray(data.ticks5m) && data.ticks5m.length > 0) {
+        this.seedTickBuffer5m(data.ticks5m);
+      }
+      this.fetchUnifiedZones();
+    } catch {
+      // Handled by retry/fallback
+    }
+  }
+
+  // Fallback to polling /api/command/snapshot every 2s if SSE fails 3 times in a row
+  private startPollingFallback() {
+    if (this.fallbackPollTimerId) return;
+    this.isPollingFallback = true;
+    this.fallbackPollTimerId = setInterval(async () => {
+      await this.fetchSnapshotAndMerge();
+    }, 2000);
+  }
+
+  private stopPollingFallback() {
+    if (this.fallbackPollTimerId) {
+      clearInterval(this.fallbackPollTimerId);
+      this.fallbackPollTimerId = null;
+    }
+    this.isPollingFallback = false;
+  }
+
   // Connect SSE for streaming BiQuote ticks
   private connectSse() {
     if (typeof window === 'undefined') return;
     try {
-      this.sseSource = new EventSource('/api/command/feed-stream');
-      this.sseSource.onmessage = (event) => {
+      if (this.sseSource) {
         try {
-          const raw = JSON.parse(event.data);
-          this.processIncomingFeedQuote(raw);
-        } catch {
-          // Ignore parse errors
-        }
+          this.sseSource.close();
+        } catch {}
+        this.sseSource = null;
+      }
+
+      this.sseSource = new EventSource('/api/command/feed-stream');
+
+      this.sseSource.onopen = () => {
+        this.isConnected = true;
+        this.sseFailuresCount = 0;
+        this.reconnectBackoffIdx = 0;
+        this.stopPollingFallback();
+        this.lastMsgAt = Date.now();
+        this.updateConnectionStatus();
       };
 
+      this.sseSource.onmessage = (event) => {
+        try {
+          this.lastMsgAt = Date.now();
+          const raw = JSON.parse(event.data);
+          this.processIncomingFeedQuote(raw);
+          this.isConnected = true;
+          this.sseFailuresCount = 0;
+          this.stopPollingFallback();
+          this.updateConnectionStatus();
+        } catch {}
+      };
+
+      this.sseSource.addEventListener('hb', (event: any) => {
+        try {
+          this.lastMsgAt = Date.now();
+          const hb = JSON.parse(event.data);
+          if (typeof hb.marketOpen === 'boolean') {
+            this.marketOpen = hb.marketOpen;
+          }
+          if (hb.upstream) {
+            this.upstream = hb.upstream;
+          }
+          this.isConnected = true;
+          this.sseFailuresCount = 0;
+          this.stopPollingFallback();
+          this.updateConnectionStatus();
+        } catch {}
+      });
+
       this.sseSource.onerror = () => {
-        if (this.connection.status === 'LIVE') {
-          this.connection.status = 'RECONNECTING';
-          this.connection.isLive = false;
-          this.connection.reconnectAttempts += 1;
-          this.notify();
+        this.isConnected = false;
+        this.sseFailuresCount++;
+
+        // If SSE fails 3 times in a row, fall back to polling /api/command/snapshot every 2 s until SSE works again
+        if (this.sseFailuresCount >= 3) {
+          this.startPollingFallback();
         }
+
+        try {
+          if (this.sseSource) {
+            this.sseSource.close();
+            this.sseSource = null;
+          }
+        } catch {}
+
+        const backoff = this.CLIENT_BACKOFF_STEPS[Math.min(this.reconnectBackoffIdx, this.CLIENT_BACKOFF_STEPS.length - 1)];
+        this.reconnectBackoffIdx++;
+        this.scheduleReconnect(backoff);
+        this.updateConnectionStatus();
       };
     } catch {
-      // HTTP polling handles fallback
+      this.startPollingFallback();
     }
   }
 
-  // Fast HTTP Polling loop (every 700ms) with tab visibility awareness
-  private startPolling() {
-    const poll = async () => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-        return;
-      }
+  // Update honest connection state & badge:
+  // LIVE only if market open and now - lastTickAt < 6 s.
+  // If connected but lastTickAt is 6-30 s old show amber "STALE 12s".
+  // Show red OFFLINE/RECONNECTING only when there is no connection.
+  // Market closed shows CLOSED/REPLAY as today.
+  public updateConnectionStatus() {
+    const now = Date.now();
+    const tickAgeSec = this.lastTickAt > 0 ? Math.max(0, Math.floor((now - this.lastTickAt) / 1000)) : 999;
+    const msgAgeSec = this.lastMsgAt > 0 ? Math.max(0, Math.floor((now - this.lastMsgAt) / 1000)) : 999;
 
-      try {
-        const res = await fetch('/api/price/xauusd');
-        if (!res.ok) {
-          this.handleFeedDrop();
-          return;
-        }
+    let status: 'LIVE' | 'STALE' | 'RECONNECTING' | 'MARKET_CLOSED' | 'OFFLINE';
+    let badgeText = 'LIVE';
 
-        const data = await res.json();
-        this.processIncomingFeedQuote(data);
-      } catch {
-        this.handleFeedDrop();
-      }
+    if (!this.marketOpen) {
+      status = 'MARKET_CLOSED';
+      badgeText = 'CLOSED';
+    } else if (!this.isConnected && !this.isPollingFallback) {
+      status = 'RECONNECTING';
+      badgeText = 'RECONNECTING';
+    } else if (msgAgeSec > 10) {
+      status = 'RECONNECTING';
+      badgeText = 'RECONNECTING';
+    } else if (tickAgeSec < 6) {
+      status = 'LIVE';
+      badgeText = 'LIVE';
+    } else if (tickAgeSec <= 30) {
+      status = 'STALE';
+      badgeText = `STALE ${tickAgeSec}s`;
+    } else {
+      status = 'RECONNECTING';
+      badgeText = 'RECONNECTING';
+    }
+
+    const prevStatus = this.connection.status;
+    const prevText = this.connection.badgeText;
+    const prevAge = this.connection.lastTickAgeSeconds;
+
+    this.connection = {
+      status,
+      badgeText,
+      isLive: status === 'LIVE',
+      lastTickTime: this.lastTickAt,
+      lastTickAgeSeconds: tickAgeSec,
+      quoteAgeSeconds: tickAgeSec,
+      reconnectAttempts: this.reconnectCount,
+      source: 'biquote.io (MetaTrader 5)',
     };
 
-    poll();
-    this.pollIntervalId = setInterval(poll, 700);
-  }
-
-  private handleFeedDrop() {
-    const now = Date.now();
-    const ageSec = Math.round((now - this.lastFetchTime) / 1000);
-    this.connection.quoteAgeSeconds = ageSec;
-
-    // Never show stale data as live: if > 3s without response, switch to RECONNECTING
-    if (ageSec > 3 || this.lastFetchTime === 0) {
-      this.connection.status = 'RECONNECTING';
-      this.connection.isLive = false;
-      this.connection.reconnectAttempts += 1;
+    if (prevStatus !== status || prevText !== badgeText || prevAge !== tickAgeSec) {
       this.notify();
     }
   }
@@ -559,7 +765,18 @@ class CommandFeedStore {
 
     const now = Date.now();
     this.lastFetchTime = now;
-    this.lastTickTimestamp = now;
+    this.lastMsgAt = now;
+
+    const rawTime = raw.lastReceivedAt || (raw.timestamp ? new Date(raw.timestamp).getTime() : now);
+    this.lastTickAt = rawTime > 0 && Math.abs(now - rawTime) < 300000 ? rawTime : now;
+    this.lastTickTimestamp = this.lastTickAt;
+
+    if (typeof raw.marketOpen === 'boolean') {
+      this.marketOpen = raw.marketOpen;
+    }
+    if (raw.upstream) {
+      this.upstream = raw.upstream;
+    }
 
     const newPrice = Number(raw.price.toFixed(2));
     const oldPrice = this.hasReceivedTick ? this.currentPrice : newPrice;
@@ -569,7 +786,7 @@ class CommandFeedStore {
 
     const priceDelta = Number((newPrice - oldPrice).toFixed(2));
 
-    // Fix 1: Tick classification - a tick with delta 0 must be FLAT (grey), never DOWN or UP
+    // Tick classification: delta 0 is FLAT, delta > 0 is BUY, delta < 0 is SELL
     let direction: 'BUY' | 'SELL' | 'FLAT' = 'FLAT';
     if (priceDelta > 0) {
       direction = 'BUY';
@@ -593,15 +810,8 @@ class CommandFeedStore {
       this.changePercent24h = Number(((this.change24h / this.previousClose) * 100).toFixed(2));
     }
 
-    const rawStatus = raw.status || 'LIVE';
-    this.connection = {
-      status: rawStatus === 'MARKET_CLOSED' ? 'MARKET_CLOSED' : 'LIVE',
-      isLive: rawStatus === 'LIVE',
-      lastTickTime: now,
-      quoteAgeSeconds: typeof raw.quoteAgeSeconds === 'number' ? raw.quoteAgeSeconds : 0,
-      reconnectAttempts: 0,
-      source: raw.source || 'biquote.io (MetaTrader 5)',
-    };
+    // Refresh honest status
+    this.updateConnectionStatus();
 
     // Append to sparkline
     this.sparkline.push(newPrice);

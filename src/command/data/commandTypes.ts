@@ -91,9 +91,11 @@ export interface ConfidenceBreakdown {
 }
 
 export interface FeedConnectionState {
-  status: 'LIVE' | 'RECONNECTING' | 'MARKET_CLOSED' | 'OFFLINE';
+  status: 'LIVE' | 'STALE' | 'RECONNECTING' | 'MARKET_CLOSED' | 'OFFLINE';
+  badgeText?: string;
   isLive: boolean;
   lastTickTime: number;
+  lastTickAgeSeconds: number;
   quoteAgeSeconds: number;
   reconnectAttempts: number;
   source: string;

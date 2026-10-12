@@ -120,6 +120,7 @@ export const SarrafCommandView: React.FC = () => {
           selectedTimeframe={feed.selectedTimeframe}
           onTimeframeChange={feed.setTimeframe}
           nextTierNews={feed.regime?.nextTierNews}
+          currentPrice={feed.currentPrice}
         />
 
         {/* Reconnecting Banner if Feed Dropped */}
@@ -403,6 +404,27 @@ export const SarrafCommandView: React.FC = () => {
             />
           </div>
         </div>
+
+        {/* Tiny muted feed line at the bottom of the Command tab (Requirement 3) */}
+        {(() => {
+          const feedStatusWord =
+            feed.connection.status === 'LIVE'
+              ? 'live'
+              : feed.connection.status === 'STALE'
+              ? 'stale'
+              : feed.connection.status === 'MARKET_CLOSED'
+              ? 'closed'
+              : 'reconnecting';
+          const nowTs = Date.now();
+          const lastTickAge =
+            feed.lastTickTimestamp > 0 ? Math.max(0, Math.floor((nowTs - feed.lastTickTimestamp) / 1000)) : null;
+          const lastTickStr = lastTickAge !== null ? `${lastTickAge}s ago` : 'never';
+          return (
+            <div className="pt-3 pb-2 text-center text-[10px] text-[#5b6577] font-mono tracking-wider select-none">
+              feed: {feedStatusWord} · last tick {lastTickStr} · reconnects {feed.reconnectCount}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

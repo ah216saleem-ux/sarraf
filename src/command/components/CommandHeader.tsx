@@ -1,12 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Timeframe, FeedConnectionState, UpcomingTierNewsEvent } from '../data/commandTypes';
-import { Coins, AlertTriangle, Bell } from 'lucide-react';
+import { Coins, AlertTriangle, Bell, Eye } from 'lucide-react';
 
 interface CommandHeaderProps {
   connection: FeedConnectionState;
   selectedTimeframe: Timeframe;
   onTimeframeChange: (tf: Timeframe) => void;
   nextTierNews?: UpcomingTierNewsEvent | null;
+  currentPrice?: number;
 }
 
 export const CommandHeader: React.FC<CommandHeaderProps> = ({
@@ -14,8 +15,16 @@ export const CommandHeader: React.FC<CommandHeaderProps> = ({
   selectedTimeframe,
   onTimeframeChange,
   nextTierNews,
+  currentPrice,
 }) => {
   const [clock, setClock] = useState('');
+  const [isWakeLock, setIsWakeLock] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('sarraf_keep_awake') === 'true';
+    }
+    return false;
+  });
+  const wakeLockRef = useRef<any>(null);
 
   useEffect(() => {
     const updateTime = () => {
@@ -29,6 +38,58 @@ export const CommandHeader: React.FC<CommandHeaderProps> = ({
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
   }, []);
+
+  // Screen Wake Lock Handler
+  useEffect(() => {
+    if (!isWakeLock || typeof navigator === 'undefined' || !('wakeLock' in navigator)) {
+      if (wakeLockRef.current) {
+        try { wakeLockRef.current.release(); } catch {}
+        wakeLockRef.current = null;
+      }
+      return;
+    }
+
+    const acquireLock = async () => {
+      try {
+        if (document.visibilityState === 'visible' && !wakeLockRef.current) {
+          wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+          wakeLockRef.current.addEventListener('release', () => {
+            wakeLockRef.current = null;
+          });
+        }
+      } catch {}
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        acquireLock();
+      } else if (wakeLockRef.current) {
+        try { wakeLockRef.current.release(); } catch {}
+        wakeLockRef.current = null;
+      }
+    };
+
+    acquireLock();
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      if (wakeLockRef.current) {
+        try { wakeLockRef.current.release(); } catch {}
+        wakeLockRef.current = null;
+      }
+    };
+  }, [isWakeLock]);
+
+  const toggleWakeLock = () => {
+    setIsWakeLock((prev) => {
+      const next = !prev;
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('sarraf_keep_awake', String(next));
+      }
+      return next;
+    });
+  };
 
   const timeframes: Timeframe[] = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1'];
   const isDrop = connection.status === 'RECONNECTING' || connection.status === 'OFFLINE';
@@ -52,19 +113,24 @@ export const CommandHeader: React.FC<CommandHeaderProps> = ({
             SARRAF COMMAND
           </h1>
 
-          {/* Connection dot / badge */}
+          {/* Honest connection badge */}
           {isDrop ? (
             <span className="inline-flex items-center gap-1 text-[9px] font-mono font-bold text-[#ff3b6b] bg-[#ff3b6b]/10 border border-[#ff3b6b]/30 px-1.5 py-0.5 rounded animate-pulse">
               <AlertTriangle className="w-2.5 h-2.5" />
-              RECONNECTING
+              {connection.badgeText || 'RECONNECTING'}
             </span>
           ) : connection.status === 'MARKET_CLOSED' ? (
             <span className="inline-flex items-center gap-1 text-[9px] font-mono text-[#f5a524] bg-[#f5a524]/10 border border-[#f5a524]/30 px-1.5 py-0.5 rounded">
               <span className="w-1.5 h-1.5 rounded-full bg-[#f5a524]" />
-              CLOSED
+              {connection.badgeText || 'CLOSED'}
+            </span>
+          ) : connection.status === 'STALE' ? (
+            <span className="inline-flex items-center gap-1 text-[9px] font-mono font-bold text-amber-400 bg-amber-500/10 border border-amber-500/40 px-1.5 py-0.5 rounded animate-pulse">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+              {connection.badgeText || `STALE ${connection.lastTickAgeSeconds || 12}s`}
             </span>
           ) : (
-            <span className="inline-flex items-center gap-1 text-[9px] font-mono text-[#22e08a] bg-[#22e08a]/10 border border-[#22e08a]/30 px-1.5 py-0.5 rounded">
+            <span className="inline-flex items-center gap-1 text-[9px] font-mono font-bold text-[#22e08a] bg-[#22e08a]/10 border border-[#22e08a]/30 px-1.5 py-0.5 rounded">
               <span className="w-1.5 h-1.5 rounded-full bg-[#22e08a] animate-ping" />
               LIVE
             </span>
@@ -75,7 +141,7 @@ export const CommandHeader: React.FC<CommandHeaderProps> = ({
           </span>
         </div>
 
-        {/* Right: News In Xm + XAUUSD Gold Chip */}
+        {/* Right: News In Xm + XAUUSD Gold Chip with live price */}
         <div className="flex items-center gap-2">
           {showNewsChip && (
             <div
@@ -90,12 +156,15 @@ export const CommandHeader: React.FC<CommandHeaderProps> = ({
           <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#04060b] border border-[#38bdf8]/20 text-[10px] font-mono text-[#e8edf5]">
             <Coins className="w-3 h-3 text-[#E8B84A]" />
             <span className="font-bold tracking-wider text-[#E8B84A]">XAU/USD</span>
+            {currentPrice && currentPrice > 0 ? (
+              <span className="font-bold text-[#FFD97A] tabular-nums pl-0.5">${currentPrice.toFixed(2)}</span>
+            ) : null}
             <span className="text-[8px] text-[#8a96a8] border-l border-[#38bdf8]/20 pl-1">SPOT</span>
           </div>
         </div>
       </div>
 
-      {/* Timeframe switch row */}
+      {/* Timeframe switch row + screen awake */}
       <div className="flex items-center justify-between gap-1 mt-2 pt-2 border-t border-[#38bdf8]/10 overflow-x-auto">
         <div className="flex items-center gap-1">
           {timeframes.map((tf) => {
@@ -116,9 +185,24 @@ export const CommandHeader: React.FC<CommandHeaderProps> = ({
           })}
         </div>
 
-        <span className="text-[9px] font-mono text-[#8a96a8] tabular-nums hidden sm:inline">
-          BIQUOTE XAUUSD · 10Hz RAF
-        </span>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={toggleWakeLock}
+            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono transition-all cursor-pointer border ${
+              isWakeLock
+                ? 'bg-[#38bdf8]/15 border-[#38bdf8]/40 text-[#38bdf8]'
+                : 'bg-transparent border-white/10 text-[#8a96a8] hover:text-[#e8edf5]'
+            }`}
+            title="Keep screen awake while Command tab is open"
+          >
+            <Eye className="w-2.5 h-2.5" />
+            <span>Awake {isWakeLock ? 'ON' : 'OFF'}</span>
+          </button>
+
+          <span className="text-[9px] font-mono text-[#8a96a8] tabular-nums hidden sm:inline">
+            BIQUOTE XAUUSD · 10Hz RAF
+          </span>
+        </div>
       </div>
     </header>
   );

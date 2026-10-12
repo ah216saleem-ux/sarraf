@@ -72,6 +72,9 @@ export interface UseCommandFeedResult {
   lastCandleTimestamp: number;
   lastNewsTimestamp: number;
   lastDerivedTimestamp: number;
+  lastTickAt: number;
+  lastMsgAt: number;
+  reconnectCount: number;
 }
 
 export function formatFreshness(timestamp: number): string {
@@ -183,5 +186,8 @@ export function useCommandFeed(): UseCommandFeedResult {
     lastCandleTimestamp: commandStore.lastCandleTimestamp,
     lastNewsTimestamp: commandStore.lastNewsTimestamp,
     lastDerivedTimestamp: commandStore.lastDerivedTimestamp,
+    lastTickAt: commandStore.lastTickAt,
+    lastMsgAt: commandStore.lastMsgAt,
+    reconnectCount: commandStore.reconnectCount,
   };
 }

@@ -334,14 +334,35 @@ function broadcastCommandTick(tick: any) {
   }
 }
 
-// Resilient background tick fetcher with exponential backoff & raw field logging
+// Track upstream feed health & watchdog
+let lastUpstreamTickAt = 0;
+let upstreamStatus: 'up' | 'down' = 'down';
+const BACKOFF_STEPS_MS = [1000, 2000, 5000, 10000];
+let upstreamBackoffIdx = 0;
+let upstreamFetchTimeoutId: any = null;
+let currentUpstreamAbortController: AbortController | null = null;
+
+function logReconnectReason(category: 'silent' | 'closed' | 'error') {
+  console.log(`[SARRAF FEED] reconnecting: reason=${category}`);
+}
+
+function scheduleNextBiquoteTick(delayMs: number) {
+  if (upstreamFetchTimeoutId) {
+    clearTimeout(upstreamFetchTimeoutId);
+  }
+  upstreamFetchTimeoutId = setTimeout(fetchBiquoteTick, delayMs);
+}
+
+// Resilient background tick fetcher with upstream watchdog & exponential backoff
 async function fetchBiquoteTick() {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3500);
+    currentUpstreamAbortController = new AbortController();
+    const timeout = setTimeout(() => {
+      if (currentUpstreamAbortController) currentUpstreamAbortController.abort();
+    }, 4000);
 
     const res = await fetch('https://biquote.io/api/XAUUSD', {
-      signal: controller.signal,
+      signal: currentUpstreamAbortController.signal,
       headers: {
         Accept: 'application/json',
         'User-Agent': 'SARRAF-Terminal/1.0',
@@ -349,35 +370,23 @@ async function fetchBiquoteTick() {
     });
 
     clearTimeout(timeout);
+    currentUpstreamAbortController = null;
 
     if (!res.ok) {
-      throw new Error(`biquote.io responded with HTTP ${res.status}`);
+      throw new Error(`HTTP_${res.status}`);
     }
 
     const rawData = await res.json();
 
     if (!rawData || typeof rawData.bid !== 'number' || typeof rawData.ask !== 'number') {
-      throw new Error('Malformed quote data payload from biquote.io');
+      throw new Error('MALFORMED_PAYLOAD');
     }
-
-    // Requirement 2: Log raw feed fields so user can confirm XAUUSD spot and not futures
-    console.log('[SARRAF REAL FEED] Raw XAUUSD tick fields:', {
-      symbol: rawData.symbol,
-      description: rawData.description,
-      source: rawData.source,
-      exchange: rawData.exchange,
-      marketState: rawData.marketState,
-      bid: rawData.bid,
-      ask: rawData.ask,
-      mid: rawData.mid,
-      spread: rawData.spread,
-      direction: rawData.direction,
-      timestamp: rawData.timestamp,
-      quoteAgeSeconds: rawData.quoteAgeSeconds,
-    });
 
     const mid = typeof rawData.mid === 'number' ? rawData.mid : (rawData.bid + rawData.ask) / 2;
     const now = Date.now();
+    lastUpstreamTickAt = now;
+    upstreamStatus = 'up';
+    upstreamBackoffIdx = 0;
     const quoteTime = rawData.timestamp ? new Date(rawData.timestamp).getTime() : now;
     const computedAgeSeconds = Math.max(0, Math.round((now - quoteTime) / 1000));
     const effectiveAgeSeconds = typeof rawData.quoteAgeSeconds === 'number' ? rawData.quoteAgeSeconds : computedAgeSeconds;
@@ -433,7 +442,6 @@ async function fetchBiquoteTick() {
     }
 
     // Feed tick into the high-precision Signal Manager state machine
-    // A1 Rule: The last price is DISPLAY ONLY. The analysis engine, signal manager and TP/SL tracking must use only isLive = true data.
     processSignalManagerTick(
       latestLiveQuote.price,
       latestLiveQuote.bid,
@@ -460,22 +468,27 @@ async function fetchBiquoteTick() {
     // Broadcast tick immediately to SARRAF COMMAND clients
     broadcastCommandTick(latestLiveQuote);
 
-    // Reset backoff on success
+    // Reset backoff on success and schedule fast polling (700ms)
     consecutiveFailures = 0;
-    backoffDelayMs = 1200;
+    backoffDelayMs = 700;
   } catch (err: any) {
+    currentUpstreamAbortController = null;
+    upstreamStatus = 'down';
     consecutiveFailures += 1;
-    // Exponential backoff up to 10 seconds: 1.2s -> 2.4s -> 4.8s -> 9.6s -> max 10s
-    backoffDelayMs = Math.min(10000, 1200 * Math.pow(1.8, Math.min(consecutiveFailures, 4)));
 
-    console.warn(`[SARRAF FEED WORKER] Fetch error (${consecutiveFailures} in a row): ${err.message}. Retrying in ${Math.round(backoffDelayMs)}ms...`);
+    const reasonCategory: 'silent' | 'closed' | 'error' =
+      err?.name === 'AbortError' ? 'silent' : err?.message?.includes('HTTP_') ? 'closed' : 'error';
+    logReconnectReason(reasonCategory);
+
+    const backoff = BACKOFF_STEPS_MS[Math.min(upstreamBackoffIdx, BACKOFF_STEPS_MS.length - 1)];
+    upstreamBackoffIdx = Math.min(upstreamBackoffIdx + 1, BACKOFF_STEPS_MS.length - 1);
+    backoffDelayMs = backoff;
 
     const marketEval = evaluateMarketPriceStatus();
     if (marketEval.status === 'FEED_OFFLINE' && isGoldMarketOpen(new Date())) {
       sendAdminAlert('FEED_OFFLINE');
     }
 
-    // Signal manager receives OFFLINE to freeze tracking
     processSignalManagerTick(
       marketEval.tick.price,
       marketEval.tick.bid,
@@ -486,9 +499,38 @@ async function fetchBiquoteTick() {
     );
   }
 
-  // Schedule next tick loop
-  setTimeout(fetchBiquoteTick, backoffDelayMs);
+  scheduleNextBiquoteTick(backoffDelayMs);
 }
+
+// Upstream watchdog for the BiQuote feed: track lastTickAt. If the market is open and no tick arrived for 15 s,
+// close the upstream connection and reconnect with backoff 1s, 2s, 5s, 10s (cap 10s, retry forever).
+// Log ONE line per reconnect with a reason category only (silent / closed / error), never URLs or keys.
+// Market-closed hours (real schedule) must not count as stale.
+const serverStartupAt = Date.now();
+let lastWatchdogTriggerAt = 0;
+
+setInterval(() => {
+  const schedule = getMarketSchedule();
+  if (schedule.isOpen) {
+    const now = Date.now();
+    const referenceTime = lastUpstreamTickAt > 0 ? lastUpstreamTickAt : serverStartupAt;
+    const tickAgeMs = now - referenceTime;
+    if (tickAgeMs > 15000 && now - lastWatchdogTriggerAt >= 10000) {
+      lastWatchdogTriggerAt = now;
+      upstreamStatus = 'down';
+      logReconnectReason('silent');
+      if (currentUpstreamAbortController) {
+        try {
+          currentUpstreamAbortController.abort();
+        } catch {}
+        currentUpstreamAbortController = null;
+      }
+      const backoff = BACKOFF_STEPS_MS[Math.min(upstreamBackoffIdx, BACKOFF_STEPS_MS.length - 1)];
+      upstreamBackoffIdx = Math.min(upstreamBackoffIdx + 1, BACKOFF_STEPS_MS.length - 1);
+      scheduleNextBiquoteTick(backoff);
+    }
+  }
+}, 2000);
 
 // GET /api/price/xauusd - Unified price endpoint with market status (A1)
 app.get('/api/price/xauusd', (_req, res) => {
@@ -572,22 +614,99 @@ app.get('/api/command/liquidity-panel', (req, res) => {
   });
 });
 
+// GET /api/command/snapshot - Full feed snapshot + last 5 minutes of ticks for gapless re-sync
+app.get('/api/command/snapshot', (_req, res) => {
+  const schedule = getMarketSchedule();
+  const ticks5m = get5MinTickBuffer();
+  const now = Date.now();
+  const lastTickAgeMs = lastUpstreamTickAt > 0 ? now - lastUpstreamTickAt : 0;
+
+  const payload = {
+    status: latestLiveQuote?.status || (schedule.isOpen ? 'LIVE' : 'MARKET_CLOSED'),
+    ...(latestLiveQuote || {}),
+    ticks5m,
+    marketOpen: schedule.isOpen,
+    upstream: upstreamStatus,
+    lastTickAgeMs,
+    serverTime: now,
+  };
+  return res.json(payload);
+});
+
 // GET /api/command/feed-stream - Real-time SSE streaming ticks for SARRAF COMMAND
 app.get('/api/command/feed-stream', (req, res) => {
+  // Prevent any compression middleware from buffering or delaying SSE chunks
+  (res as any)._noCompression = true;
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
   });
-  res.write(': connected\n\n');
-  if (latestLiveQuote) {
-    const payload = { ...latestLiveQuote, ticks5m: get5MinTickBuffer() };
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  if (typeof (res as any).flushHeaders === 'function') {
+    (res as any).flushHeaders();
   }
+
+  // Instruction: Send retry: 2000
+  res.write('retry: 2000\n\n');
+
+  const schedule = getMarketSchedule();
+  const now = Date.now();
+  const lastTickAgeMs = lastUpstreamTickAt > 0 ? now - lastUpstreamTickAt : 0;
+  const initialPayload = {
+    status: latestLiveQuote?.status || (schedule.isOpen ? 'LIVE' : 'MARKET_CLOSED'),
+    ...(latestLiveQuote || {}),
+    ticks5m: get5MinTickBuffer(),
+    marketOpen: schedule.isOpen,
+    upstream: upstreamStatus,
+    lastTickAgeMs,
+    serverTime: now,
+  };
+  res.write(`data: ${JSON.stringify(initialPayload)}\n\n`);
+
   commandSseClients.add(res);
-  req.on('close', () => {
+
+  // Heartbeat every 5s: event "hb" with {ts, lastTickAgeMs, upstream: "up"|"down", marketOpen}
+  const hbInterval = setInterval(() => {
+    try {
+      const hbNow = Date.now();
+      const hbTickAge = lastUpstreamTickAt > 0 ? hbNow - lastUpstreamTickAt : 0;
+      const hbSchedule = getMarketSchedule();
+      const hbData = JSON.stringify({
+        ts: hbNow,
+        lastTickAgeMs: hbTickAge,
+        upstream: upstreamStatus,
+        marketOpen: hbSchedule.isOpen,
+      });
+      res.write(`event: hb\ndata: ${hbData}\n\n`);
+    } catch {
+      cleanup();
+    }
+  }, 5000);
+
+  // Comment line ": ping" every 15s to keep any intermediate proxies alive
+  const pingInterval = setInterval(() => {
+    try {
+      res.write(': ping\n\n');
+    } catch {
+      cleanup();
+    }
+  }, 15000);
+
+  let isCleanedUp = false;
+  const cleanup = () => {
+    if (isCleanedUp) return;
+    isCleanedUp = true;
+    clearInterval(hbInterval);
+    clearInterval(pingInterval);
     commandSseClients.delete(res);
-  });
+  };
+
+  req.on('close', cleanup);
+  req.on('error', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
 });
 
 // -------------------------------------------------------------
@@ -982,13 +1101,26 @@ app.get('/api/signal/tests', requireAdminAuth, (_req, res) => {
 // PHASE 4: TELEGRAM, GEMINI VALIDATION & AI CHAT API (Sections 1, 5, 6, 7, 8)
 // -------------------------------------------------------------
 
-// GET /api/health - Public healthcheck endpoint for Railway, Docker & load balancers (returns full metrics when authenticated)
-app.get(['/api/health', '/health'], (req, res) => {
+// GET /api/health - Public monitoring endpoint: {ok:true, upstream, lastTickAgeMs, clients, uptimeSec}
+app.get(['/api/health', '/health'], (_req, res) => {
+  const now = Date.now();
+  const lastTickAgeMs = lastUpstreamTickAt > 0 ? now - lastUpstreamTickAt : now;
+  return res.status(200).json({
+    ok: true,
+    upstream: upstreamStatus,
+    lastTickAgeMs,
+    clients: commandSseClients.size,
+    uptimeSec: Math.floor(process.uptime()),
+  });
+});
+
+// GET /api/system/health - Full internal telemetry endpoint (authenticated)
+app.get('/api/system/health', (req, res) => {
   const token = req.cookies?.sarraf_session;
   const isAuth = Boolean(token && activeSessions.has(token));
 
   if (!isAuth) {
-    return res.status(200).json({ status: 'ok', uptime: Math.floor(process.uptime()), timestamp: new Date().toISOString() });
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 
   const health = getSystemHealth();
@@ -2148,6 +2280,17 @@ function handleGracefulShutdown(signal: string) {
   releaseInstanceLease();
   process.exit(0);
 }
+
+process.on('uncaughtException', (err: any) => {
+  const cat = err?.name || 'Error';
+  const code = err?.code || 'UNCAUGHT';
+  console.error(`[PROCESS EXCEPTION] category=${cat} code=${code}`);
+});
+
+process.on('unhandledRejection', (reason: any) => {
+  const cat = reason?.name || (typeof reason === 'string' ? reason.slice(0, 30) : 'UnhandledRejection');
+  console.error(`[PROCESS REJECTION] category=${cat}`);
+});
 
 process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
