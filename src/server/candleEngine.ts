@@ -24,6 +24,8 @@ export interface CandleStore {
   symbol: string;
   lastUpdated: string;
   htfBootstrapMethod: string;
+  M1: Candle[];
+  M5: Candle[];
   M15: Candle[];
   M30: Candle[];
   H1: Candle[];
@@ -37,6 +39,8 @@ let store: CandleStore = {
   symbol: 'XAUUSD',
   lastUpdated: new Date().toISOString(),
   htfBootstrapMethod: 'NATIVE_BIQUOTE_OHLC_INTERVALS',
+  M1: [],
+  M5: [],
   M15: [],
   M30: [],
   H1: [],
@@ -95,13 +99,42 @@ export function detectGaps(candles: Candle[], expectedIntervalMinutes: number): 
 
 // Run gap detection across all active stores
 export function runGapDetectionAudit() {
+  const m1Gaps = detectGaps(store.M1, 1);
+  const m5Gaps = detectGaps(store.M5, 5);
   const m15Gaps = detectGaps(store.M15, 15);
   const m30Gaps = detectGaps(store.M30, 30);
   const h1Gaps = detectGaps(store.H1, 60);
   const h4Gaps = detectGaps(store.H4, 240);
   const d1Gaps = detectGaps(store.D1, 1440);
 
-  return { m15Gaps, m30Gaps, h1Gaps, h4Gaps, d1Gaps };
+  return { m1Gaps, m5Gaps, m15Gaps, m30Gaps, h1Gaps, h4Gaps, d1Gaps };
+}
+
+// Aggregate M5 candles from M1 candles
+export function buildM5FromM1(m1Candles: Candle[]): Candle[] {
+  if (!m1Candles || m1Candles.length === 0) return [];
+  const map = new Map<string, Candle[]>();
+  for (const bar of m1Candles) {
+    const t = new Date(bar.openTime).getTime();
+    const floored = Math.floor(t / (5 * 60 * 1000)) * (5 * 60 * 1000);
+    const key = new Date(floored).toISOString();
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(bar);
+  }
+  const result: Candle[] = [];
+  for (const [openTime, bars] of map.entries()) {
+    result.push({
+      openTime,
+      open: bars[0].open,
+      high: Math.max(...bars.map((b) => b.high)),
+      low: Math.min(...bars.map((b) => b.low)),
+      close: bars[bars.length - 1].close,
+      volume: bars.reduce((sum, b) => sum + b.volume, 0),
+      isClosed: bars.length >= 5,
+      usableForZones: true,
+    });
+  }
+  return result.sort((a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime());
 }
 
 // Aggregate H4 candles from H1 candles aligned to broker session boundaries
@@ -163,6 +196,30 @@ export function buildD1FromH1(h1Candles: Candle[]): Candle[] {
   return result.sort((a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime());
 }
 
+// Merge candle series keeping history and sorted ascending
+export function mergeCandleSeries(existing: Candle[], incoming: Candle[], maxLimit: number = 1200): Candle[] {
+  const byTime = new Map<number, Candle>();
+  for (const c of existing) {
+    const t = new Date(c.openTime).getTime();
+    if (!isNaN(t)) {
+      byTime.set(t, { ...c, openTime: new Date(t).toISOString() });
+    }
+  }
+  for (const c of incoming) {
+    const t = new Date(c.openTime).getTime();
+    if (!isNaN(t)) {
+      byTime.set(t, { ...c, openTime: new Date(t).toISOString() });
+    }
+  }
+  const sorted = Array.from(byTime.values()).sort(
+    (a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime()
+  );
+  if (sorted.length > maxLimit) {
+    return sorted.slice(-maxLimit);
+  }
+  return sorted;
+}
+
 // Load persisted candles from disk
 export function loadCandlesFromDisk(): CandleStore {
   ensureDataDir();
@@ -170,11 +227,13 @@ export function loadCandlesFromDisk(): CandleStore {
     try {
       const content = fs.readFileSync(DATA_FILE, 'utf-8');
       const parsed = JSON.parse(content);
-      if (parsed && Array.isArray(parsed.H1) && parsed.H1.length > 0) {
+      if (parsed && (Array.isArray(parsed.H1) || Array.isArray(parsed.M15))) {
         store = {
           symbol: parsed.symbol || 'XAUUSD',
           lastUpdated: parsed.lastUpdated || new Date().toISOString(),
           htfBootstrapMethod: parsed.htfBootstrapMethod || 'NATIVE_BIQUOTE_OHLC_INTERVALS',
+          M1: parsed.M1 || [],
+          M5: parsed.M5 || [],
           M15: parsed.M15 || [],
           M30: parsed.M30 || [],
           H1: parsed.H1 || [],
@@ -182,7 +241,7 @@ export function loadCandlesFromDisk(): CandleStore {
           D1: parsed.D1 || [],
         };
         runGapDetectionAudit();
-        console.log(`[CANDLE ENGINE] Loaded candles from disk: H1=${store.H1.length}, M30=${store.M30.length}, M15=${store.M15.length}, H4=${store.H4.length}, D1=${store.D1.length}`);
+        console.log(`[CANDLE ENGINE] Loaded candles from disk: M1=${store.M1.length}, M5=${store.M5.length}, M15=${store.M15.length}, M30=${store.M30.length}, H1=${store.H1.length}, H4=${store.H4.length}, D1=${store.D1.length}`);
         return store;
       }
     } catch (err: any) {
@@ -259,8 +318,10 @@ function updateTimeframeCandles(
   }
 }
 
-// Process new tick from live feed into all 5 timeframes
+// Process new tick from live feed into all 7 timeframes
 export function processTick(price: number, timestampMs: number) {
+  updateTimeframeCandles(store.M1, 1, price, timestampMs);
+  updateTimeframeCandles(store.M5, 5, price, timestampMs);
   updateTimeframeCandles(store.M15, 15, price, timestampMs);
   updateTimeframeCandles(store.M30, 30, price, timestampMs);
   updateTimeframeCandles(store.H1, 60, price, timestampMs);
@@ -273,8 +334,8 @@ export function processTick(price: number, timestampMs: number) {
 }
 
 // Fetch authentic historical candles from biquote.io endpoint for a specific interval
-async function fetchTimeframeOhlc(intervalParam: '15m' | '30m' | '1h' | '4h' | '1d'): Promise<Candle[]> {
-  const res = await fetch(`https://biquote.io/api/XAUUSD/ohlc?interval=${intervalParam}`, {
+async function fetchTimeframeOhlc(intervalParam: string): Promise<Candle[]> {
+  const res = await fetch(`https://biquote.io/api/XAUUSD/ohlc?interval=${intervalParam}&limit=500`, {
     headers: { Accept: 'application/json', 'User-Agent': 'SARRAF-Engine/2.0' },
   });
 
@@ -304,14 +365,16 @@ async function fetchTimeframeOhlc(intervalParam: '15m' | '30m' | '1h' | '4h' | '
   }));
 }
 
-// Bootstrap authentic historical candles from biquote.io for M15, M30, H1, H4, D1
+// Bootstrap authentic historical candles from biquote.io for M1, M5, M15, M30, H1, H4, D1
 export async function bootstrapHistoricalCandles(): Promise<boolean> {
   const hasEnough =
-    store.H1.length >= 80 &&
-    store.M30.length >= 100 &&
-    store.M15.length >= 100 &&
-    store.H4.length >= 40 &&
-    store.D1.length >= 20;
+    store.M1.length >= 300 &&
+    store.M5.length >= 250 &&
+    store.M15.length >= 300 &&
+    store.M30.length >= 250 &&
+    store.H1.length >= 180 &&
+    store.H4.length >= 150 &&
+    store.D1.length >= 300;
 
   if (hasEnough) {
     runGapDetectionAudit();
@@ -319,22 +382,32 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
   }
 
   try {
-    console.log('[CANDLE ENGINE] Fetching authentic historical candles from biquote.io for M15, M30, H1, H4, D1...');
+    console.log('[CANDLE ENGINE] Fetching authentic historical candles from biquote.io for M1, M5, M15, M30, H1, H4, D1...');
 
-    const [m15Bars, m30Bars, h1Bars, h4Bars, d1Bars] = await Promise.all([
-      fetchTimeframeOhlc('15m'),
-      fetchTimeframeOhlc('30m'),
-      fetchTimeframeOhlc('1h'),
-      fetchTimeframeOhlc('4h'),
-      fetchTimeframeOhlc('1d'),
+    const [m1Bars, m5Bars, m15Bars, m30Bars, h1Bars, h4Bars, d1Bars] = await Promise.all([
+      fetchTimeframeOhlc('1m').catch(() => []),
+      fetchTimeframeOhlc('5m').catch(() => []),
+      fetchTimeframeOhlc('15m').catch(() => []),
+      fetchTimeframeOhlc('30m').catch(() => []),
+      fetchTimeframeOhlc('1h').catch(() => []),
+      fetchTimeframeOhlc('4h').catch(() => []),
+      fetchTimeframeOhlc('1d').catch(() => []),
     ]);
 
-    if (m15Bars.length > 0) store.M15 = m15Bars;
-    if (m30Bars.length > 0) store.M30 = m30Bars;
-    if (h1Bars.length > 0) store.H1 = h1Bars;
+    if (m1Bars.length > 0) store.M1 = mergeCandleSeries(store.M1, m1Bars);
+    if (m5Bars.length > 0) store.M5 = mergeCandleSeries(store.M5, m5Bars);
+    if (m15Bars.length > 0) store.M15 = mergeCandleSeries(store.M15, m15Bars);
+    if (m30Bars.length > 0) store.M30 = mergeCandleSeries(store.M30, m30Bars);
+    if (h1Bars.length > 0) store.H1 = mergeCandleSeries(store.H1, h1Bars);
+
+    // If M5 is short, build from M1
+    if (store.M5.length < 60 && store.M1.length > 0) {
+      const fromM1 = buildM5FromM1(store.M1);
+      store.M5 = mergeCandleSeries(store.M5, fromM1);
+    }
 
     if (h4Bars.length > 0) {
-      store.H4 = h4Bars;
+      store.H4 = mergeCandleSeries(store.H4, h4Bars);
       store.htfBootstrapMethod = 'NATIVE_BIQUOTE_OHLC_INTERVALS (Direct 4h & 1d API bootstrap)';
     } else if (store.H1.length > 0) {
       store.H4 = buildH4FromH1(store.H1);
@@ -342,7 +415,7 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
     }
 
     if (d1Bars.length > 0) {
-      store.D1 = d1Bars;
+      store.D1 = mergeCandleSeries(store.D1, d1Bars);
     } else if (store.H1.length > 0) {
       store.D1 = buildD1FromH1(store.H1);
     }
@@ -350,10 +423,13 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
     runGapDetectionAudit();
     saveCandlesToDisk();
 
-    console.log(`[CANDLE ENGINE] Bootstrapped real history: M15=${store.M15.length}, M30=${store.M30.length}, H1=${store.H1.length}, H4=${store.H4.length}, D1=${store.D1.length} (${store.htfBootstrapMethod})`);
+    console.log(`[CANDLE ENGINE] Bootstrapped real history: M1=${store.M1.length}, M5=${store.M5.length}, M15=${store.M15.length}, M30=${store.M30.length}, H1=${store.H1.length}, H4=${store.H4.length}, D1=${store.D1.length} (${store.htfBootstrapMethod})`);
     return true;
   } catch (err: any) {
-    console.warn('[CANDLE ENGINE] Historical bootstrap failed, attempting H1 candle aggregation fallback:', err.message);
+    console.warn('[CANDLE ENGINE] Historical bootstrap failed, attempting aggregation fallback:', err.message);
+    if (store.M1.length > 0 && store.M5.length < 60) {
+      store.M5 = mergeCandleSeries(store.M5, buildM5FromM1(store.M1));
+    }
     if (store.H1.length > 0) {
       store.H4 = buildH4FromH1(store.H1);
       store.D1 = buildD1FromH1(store.H1);
@@ -368,7 +444,7 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
 }
 
 // Get closed candles only (excluding active forming candle and gap candles when requested)
-export function getClosedCandles(timeframe: 'M15' | 'M30' | 'H1' | 'H4' | 'D1', includeGaps: boolean = false): Candle[] {
+export function getClosedCandles(timeframe: 'M1' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D1', includeGaps: boolean = false): Candle[] {
   const list = store[timeframe];
   if (!list || list.length === 0) return [];
   
@@ -380,13 +456,15 @@ export function getClosedCandles(timeframe: 'M15' | 'M30' | 'H1' | 'H4' | 'D1', 
 
 // Usable candle counts audit
 export function getUsableCandleCounts() {
+  const m1Usable = store.M1.filter((c, i) => i < store.M1.length - 1 && !c.hasGapBefore).length;
+  const m5Usable = store.M5.filter((c, i) => i < store.M5.length - 1 && !c.hasGapBefore).length;
   const m15Usable = store.M15.filter((c, i) => i < store.M15.length - 1 && !c.hasGapBefore).length;
   const m30Usable = store.M30.filter((c, i) => i < store.M30.length - 1 && !c.hasGapBefore).length;
   const h1Usable = store.H1.filter((c, i) => i < store.H1.length - 1 && !c.hasGapBefore).length;
   const h4Usable = store.H4.filter((c, i) => i < store.H4.length - 1 && !c.hasGapBefore).length;
   const d1Usable = store.D1.filter((c, i) => i < store.D1.length - 1 && !c.hasGapBefore).length;
 
-  return { m15Usable, m30Usable, h1Usable, h4Usable, d1Usable };
+  return { m1Usable, m5Usable, m15Usable, m30Usable, h1Usable, h4Usable, d1Usable };
 }
 
 export function getEngineStatus() {

@@ -11,6 +11,8 @@ import {
   MarketRegimeData,
   ConfidenceBreakdown,
   FeedConnectionState,
+  SarrafZone,
+  WhereCandidate,
 } from './commandTypes';
 
 export interface NearestZoneData {
@@ -62,6 +64,10 @@ export interface UseCommandFeedResult {
   liquidityGrade: 'HIGH' | 'MED' | 'LOW';
   nearestZone: NearestZoneData | null;
   nearestFvgOrOb: string;
+  sarrafZones: SarrafZone[];
+  whereCandidates: WhereCandidate[];
+  watchingCandidate: WhereCandidate | null;
+  liquidityPanelZones: any[];
   lastTickTimestamp: number;
   lastCandleTimestamp: number;
   lastNewsTimestamp: number;
@@ -169,6 +175,10 @@ export function useCommandFeed(): UseCommandFeedResult {
     liquidityGrade,
     nearestZone,
     nearestFvgOrOb: commandStore.getNearestFvgOrOrderBlock(),
+    sarrafZones: commandStore.sarrafZones,
+    whereCandidates: commandStore.whereCandidates,
+    watchingCandidate: commandStore.watchingCandidate,
+    liquidityPanelZones: commandStore.liquidityPanelZones,
     lastTickTimestamp: commandStore.lastTickTimestamp,
     lastCandleTimestamp: commandStore.lastCandleTimestamp,
     lastNewsTimestamp: commandStore.lastNewsTimestamp,

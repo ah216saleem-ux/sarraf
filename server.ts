@@ -15,6 +15,11 @@ import {
   getClosedCandles,
 } from './src/server/candleEngine.ts';
 import {
+  computeZonesForTimeframe,
+  getWhereSellBuyCanComeFrom,
+  getLiquidityZonesListForPanel,
+} from './src/server/sarrafZoneEngine.ts';
+import {
   loadLastTickFromDisk,
   saveLastTickToDisk,
   recordLiveTick,
@@ -530,6 +535,40 @@ app.get('/api/command/ticks', (_req, res) => {
   return res.json({
     status: 'SUCCESS',
     ticks: get5MinTickBuffer(),
+  });
+});
+
+// GET /api/command/zones - Real-time deterministic zones (FVG, OB, Liquidity)
+app.get('/api/command/zones', (req, res) => {
+  const tf = (req.query.timeframe as any) || 'M15';
+  const livePrice = latestLiveQuote?.price ?? 0;
+  const zones = computeZonesForTimeframe(tf, livePrice);
+  return res.json({
+    status: 'SUCCESS',
+    timeframe: tf,
+    zones,
+  });
+});
+
+// GET /api/command/where-buy-sell - Real-time "Where sell/buy can come from" candidate zones
+app.get('/api/command/where-buy-sell', (req, res) => {
+  const tf = (req.query.timeframe as any) || 'M15';
+  const livePrice = latestLiveQuote?.price ?? 0;
+  const data = getWhereSellBuyCanComeFrom(livePrice, tf);
+  return res.json({
+    status: 'SUCCESS',
+    ...data,
+  });
+});
+
+// GET /api/command/liquidity-panel - Real-time liquidity panel zones
+app.get('/api/command/liquidity-panel', (req, res) => {
+  const tf = (req.query.timeframe as any) || 'M15';
+  const livePrice = latestLiveQuote?.price ?? 0;
+  const list = getLiquidityZonesListForPanel(livePrice, tf);
+  return res.json({
+    status: 'SUCCESS',
+    zones: list,
   });
 });
 

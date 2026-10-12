@@ -98,3 +98,59 @@ export interface FeedConnectionState {
   reconnectAttempts: number;
   source: string;
 }
+
+export type ZoneType =
+  | 'FVG'
+  | 'OB'
+  | 'BSL'
+  | 'SSL'
+  | 'PDH'
+  | 'PDL'
+  | 'SESSION_HIGH'
+  | 'SESSION_LOW'
+  | 'ABSORPTION';
+
+export type ZoneSide = 'SELL' | 'BUY';
+export type ZoneStatus = 'FRESH' | 'TOUCHED' | 'TESTED' | 'SWEPT' | 'BROKEN';
+
+export interface SarrafZone {
+  id: string;
+  type: ZoneType;
+  side: ZoneSide;
+  top: number;
+  bottom: number;
+  mid: number;
+  status: ZoneStatus;
+  timeframe: string;
+  createdAt: string;
+  createdBarIndex: number;
+  rating: number; // 0 - 100
+  ratingBreakdown?: {
+    freshness: number;
+    confluence: number;
+    htfAlignment: number;
+    absorption: number;
+  };
+  bosLevel?: number;
+  brokenAt?: string;
+  brokenReason?: string;
+  label: string;
+  confluenceTags: string[];
+  touchesCount?: number;
+}
+
+export interface WhereCandidate {
+  id: string;
+  side: ZoneSide;
+  priceRange: string;
+  top: number;
+  bottom: number;
+  mid: number;
+  distanceDollars: number;
+  rating: number;
+  confluenceTags: string[];
+  status: ZoneStatus;
+  timeframe: string;
+  type: ZoneType;
+  isWatching: boolean;
+}

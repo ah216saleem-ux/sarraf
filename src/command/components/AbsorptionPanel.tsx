@@ -56,11 +56,11 @@ export const AbsorptionPanel: React.FC<AbsorptionPanelProps> = ({
                   collecting data...
                 </div>
               ) : (
-                buyZones.map((z) => {
+                buyZones.map((z, idx) => {
                   const diffDollars = currentPrice > 0 ? Math.abs(currentPrice - z.mid).toFixed(2) : '0.00';
                   return (
                     <div
-                      key={z.id}
+                      key={`${z.id}-${idx}`}
                       className="flex items-center justify-between h-[22px]"
                     >
                       <div className="flex items-center gap-1.5">
@@ -100,11 +100,11 @@ export const AbsorptionPanel: React.FC<AbsorptionPanelProps> = ({
                   collecting data...
                 </div>
               ) : (
-                sellZones.map((z) => {
+                sellZones.map((z, idx) => {
                   const diffDollars = currentPrice > 0 ? Math.abs(z.mid - currentPrice).toFixed(2) : '0.00';
                   return (
                     <div
-                      key={z.id}
+                      key={`${z.id}-${idx}`}
                       className="flex items-center justify-between h-[22px]"
                     >
                       <div className="flex items-center gap-1.5">

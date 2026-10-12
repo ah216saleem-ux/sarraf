@@ -42,6 +42,7 @@ export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
             currentPrice={feed.currentPrice}
             isFeedDimmed={isDimmed}
             isMarketClosed={feed.connection.status === 'MARKET_CLOSED' || !feed.connection.isLive}
+            watchingCandidate={feed.watchingCandidate}
             onManualClose={signalEngine.manualClose}
             onTriggerTest={signalEngine.triggerTestSignal}
             isLoading={signalEngine.isLoading}

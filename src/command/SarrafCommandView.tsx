@@ -8,6 +8,8 @@ import { MarketRegimePanel } from './components/MarketRegimePanel';
 import { BuySellRatioPanel } from './components/BuySellRatioPanel';
 import { TickTapePanel } from './components/TickTapePanel';
 import { CandlestickChartPanel } from './components/CandlestickChartPanel';
+import { SarrafChartPro } from './components/SarrafChartPro';
+import { WhereSellBuyCanComeFrom } from './components/WhereSellBuyCanComeFrom';
 import { AbsorptionPanel } from './components/AbsorptionPanel';
 import { OriginProfilePanel } from './components/OriginProfilePanel';
 import { LiquidityZonesPanel } from './components/LiquidityZonesPanel';
@@ -242,22 +244,37 @@ export const SarrafCommandView: React.FC = () => {
             />
           </div>
 
-          {/* Panel 6: XAUUSD Candlestick Chart */}
+          {/* Panel 6: SARRAF CHART PRO (Full-width, ~340px height on mobile) */}
           <div
             className={`transition-all duration-300 ease-out ${
               cardsRevealed ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'
             }`}
             style={{ transitionDelay: '240ms' }}
           >
-            <CandlestickChartPanel
+            <SarrafChartPro
               candles={feed.candles}
               timeframe={feed.selectedTimeframe}
               currentPrice={feed.currentPrice}
-              supportLevel={nearestSup}
-              resistanceLevel={nearestRes}
-              zones={feed.liquidityZones}
+              bidPrice={feed.bid}
+              zones={feed.sarrafZones}
               isDimmed={isDimmed}
               freshness={candleFreshness}
+              onTimeframeChange={feed.setTimeframe}
+            />
+          </div>
+
+          {/* SELL/BUY ORIGIN Box: "WHERE SELL/BUY CAN COME FROM" */}
+          <div
+            className={`transition-all duration-300 ease-out ${
+              cardsRevealed ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'
+            }`}
+            style={{ transitionDelay: '260ms' }}
+          >
+            <WhereSellBuyCanComeFrom
+              candidates={feed.whereCandidates}
+              watchingCandidate={feed.watchingCandidate}
+              currentPrice={feed.currentPrice}
+              timeframe={feed.selectedTimeframe}
             />
           </div>
 
@@ -302,6 +319,7 @@ export const SarrafCommandView: React.FC = () => {
           >
             <LiquidityZonesPanel
               liquidityZones={feed.liquidityZones}
+              sarrafZones={feed.sarrafZones}
               currentPrice={feed.currentPrice}
               isDimmed={isDimmed}
               freshness={candleFreshness}

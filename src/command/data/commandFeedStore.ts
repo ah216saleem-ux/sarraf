@@ -9,6 +9,8 @@ import {
   MarketRegimeData,
   ConfidenceBreakdown,
   FeedConnectionState,
+  SarrafZone,
+  WhereCandidate,
 } from './commandTypes';
 
 // Listener callback types
@@ -90,6 +92,12 @@ class CommandFeedStore {
   public originLevels: OriginLevel[] = [];
   public originDisplacements: OriginDisplacement[] = [];
 
+  // Unified Zone Engine Structures (Single Source of Truth)
+  public sarrafZones: SarrafZone[] = [];
+  public whereCandidates: WhereCandidate[] = [];
+  public watchingCandidate: WhereCandidate | null = null;
+  public liquidityPanelZones: any[] = [];
+
   // Market Regime & Confidence (strictly derived from real ticks/candles/calendar)
   public regime: MarketRegimeData = {
     trend: 'collecting data',
@@ -160,7 +168,45 @@ class CommandFeedStore {
   public setTimeframe(tf: Timeframe) {
     if (this.selectedTimeframe !== tf) {
       this.selectedTimeframe = tf;
+      this.fetchUnifiedZones();
       this.notify();
+    }
+  }
+
+  public async fetchUnifiedZones() {
+    try {
+      const tf = this.selectedTimeframe;
+      const [zonesRes, whereRes, liqRes] = await Promise.all([
+        fetch(`/api/command/zones?timeframe=${tf}`),
+        fetch(`/api/command/where-buy-sell?timeframe=${tf}`),
+        fetch(`/api/command/liquidity-panel?timeframe=${tf}`),
+      ]);
+
+      if (zonesRes.ok) {
+        const d = await zonesRes.json();
+        if (Array.isArray(d?.zones)) {
+          this.sarrafZones = d.zones;
+        }
+      }
+
+      if (whereRes.ok) {
+        const w = await whereRes.json();
+        if (Array.isArray(w?.candidates)) {
+          this.whereCandidates = w.candidates;
+        }
+        this.watchingCandidate = w?.watchingCandidate || null;
+      }
+
+      if (liqRes.ok) {
+        const l = await liqRes.json();
+        if (Array.isArray(l?.zones)) {
+          this.liquidityPanelZones = l.zones;
+        }
+      }
+
+      this.notify();
+    } catch {
+      // Keep existing zones on network hiccups
     }
   }
 
@@ -168,6 +214,7 @@ class CommandFeedStore {
     this.isSubscribed = true;
     this.fetchTickBuffer5m();
     this.seedHistoricalCandles();
+    this.fetchUnifiedZones();
     this.fetchNewsImpact();
     this.connectSse();
     this.startPolling();
@@ -175,6 +222,7 @@ class CommandFeedStore {
     // Refresh news calendar every 60s
     this.newsIntervalId = setInterval(() => {
       this.fetchNewsImpact();
+      this.fetchUnifiedZones();
     }, 60000);
   }
 
@@ -268,18 +316,26 @@ class CommandFeedStore {
           const store = data.store;
           const mapCandles = (arr: any[]): Candle[] => {
             if (!Array.isArray(arr)) return [];
-            return arr.map((c) => ({
-              time: new Date(c.openTime).getTime(),
-              openTimeStr: c.openTime,
-              open: Number(c.open),
-              high: Number(c.high),
-              low: Number(c.low),
-              close: Number(c.close),
-              volume: Number(c.volume || 1),
-              isClosed: c.isClosed,
-            }));
+            const byTime = new Map<number, Candle>();
+            for (const c of arr) {
+              const time = new Date(c.openTime).getTime();
+              if (isNaN(time)) continue;
+              byTime.set(time, {
+                time,
+                openTimeStr: new Date(time).toISOString(),
+                open: Number(c.open),
+                high: Number(c.high),
+                low: Number(c.low),
+                close: Number(c.close),
+                volume: Number(c.volume || 1),
+                isClosed: c.isClosed,
+              });
+            }
+            return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
           };
 
+          if (store.M1?.length) this.candles.M1 = mapCandles(store.M1);
+          if (store.M5?.length) this.candles.M5 = mapCandles(store.M5);
           if (store.M15?.length) this.candles.M15 = mapCandles(store.M15);
           if (store.M30?.length) this.candles.M30 = mapCandles(store.M30);
           if (store.H1?.length) this.candles.H1 = mapCandles(store.H1);
@@ -287,7 +343,7 @@ class CommandFeedStore {
           if (store.D1?.length) this.candles.D1 = mapCandles(store.D1);
 
           // Build M1 and M5 from M15 seed if not provided
-          if (this.candles.M15.length) {
+          if (!this.candles.M1.length && this.candles.M15.length) {
             this.buildLowerTfSeedsFromM15(this.candles.M15);
           }
 
@@ -690,6 +746,7 @@ class CommandFeedStore {
             this.lastCandleTimestamp = Date.now();
             this.lastDerivedTimestamp = Date.now();
             this.recalculateStructures();
+            this.fetchUnifiedZones();
           }
         } else {
           last.high = Math.max(last.high, price);
@@ -934,8 +991,13 @@ class CommandFeedStore {
       const buyZones: ZoneItem[] = [];
       const sellZones: ZoneItem[] = [];
 
+      const seenBuyIds = new Set<string>();
+      const seenSellIds = new Set<string>();
+
       // Find candles with long lower wicks (Demand absorption)
-      for (const c of m15Candles.slice(-24)) {
+      const recentSlice = m15Candles.slice(-24);
+      for (let idx = 0; idx < recentSlice.length; idx++) {
+        const c = recentSlice[idx];
         const range = c.high - c.low;
         if (range <= 0.5) continue;
         const lowerWick = Math.min(c.open, c.close) - c.low;
@@ -943,10 +1005,12 @@ class CommandFeedStore {
 
         if (lowerWickRatio >= 0.38) {
           const mid = Number(((c.low + Math.min(c.open, c.close)) / 2).toFixed(2));
-          // Avoid duplicate nearby zones
-          if (!buyZones.some((z) => Math.abs(z.mid - mid) < 1.2)) {
+          const zoneId = `abz-${c.time}-${mid.toFixed(1)}`;
+          // Avoid duplicate nearby zones or identical ids
+          if (!seenBuyIds.has(zoneId) && !buyZones.some((z) => Math.abs(z.mid - mid) < 1.2 || z.id === zoneId)) {
+            seenBuyIds.add(zoneId);
             buyZones.push({
-              id: `abz-${c.time}`,
+              id: zoneId,
               type: 'BUY_ZONE',
               label: `M15 Demand Rejection`,
               low: c.low,
@@ -964,9 +1028,11 @@ class CommandFeedStore {
         const upperWickRatio = upperWick / range;
         if (upperWickRatio >= 0.38) {
           const mid = Number(((c.high + Math.max(c.open, c.close)) / 2).toFixed(2));
-          if (!sellZones.some((z) => Math.abs(z.mid - mid) < 1.2)) {
+          const zoneId = `asz-${c.time}-${mid.toFixed(1)}`;
+          if (!seenSellIds.has(zoneId) && !sellZones.some((z) => Math.abs(z.mid - mid) < 1.2 || z.id === zoneId)) {
+            seenSellIds.add(zoneId);
             sellZones.push({
-              id: `asz-${c.time}`,
+              id: zoneId,
               type: 'SELL_ZONE',
               label: `M15 Supply Absorption`,
               low: Number(Math.max(c.open, c.close).toFixed(2)),
