@@ -99,6 +99,10 @@ export interface FeedConnectionState {
   quoteAgeSeconds: number;
   reconnectAttempts: number;
   source: string;
+  upstreamStatusText?: string;
+  reasonCategory?: string;
+  downSeconds?: number;
+  retryingInSeconds?: number;
 }
 
 export type ZoneType =

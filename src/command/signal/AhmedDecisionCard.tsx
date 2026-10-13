@@ -71,7 +71,15 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
     const opposingPrice = activeSignal?.side === 'BUY' ? currentPrice + pathClearR : currentPrice - pathClearR;
     blockingReason = `only ${(pathClearR / 10).toFixed(2)}R clear to the opposing zone ${opposingPrice.toFixed(2)}`;
   } else if (missingGate) {
-    blockingReason = `${missingGate.name} missing: ${missingGate.reason}`;
+    if ((isMarketClosed || isFeedDimmed) && (missingGate.id === 'g1' || missingGate.name.includes('W1/D1') || missingGate.reason.includes('History loading'))) {
+      blockingReason = 'History loading (upstream down)';
+    } else {
+      blockingReason = `${missingGate.name} missing: ${missingGate.reason}`;
+    }
+  }
+
+  if (blockingReason.includes('W1/D1 Context missing') && (isMarketClosed || isFeedDimmed)) {
+    blockingReason = 'History loading (upstream down)';
   }
 
   // Compute WATCHING line from real candidate and real missing gate
@@ -85,7 +93,11 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
     const action = watchingCandidate.side === 'SELL' ? 'close below' : 'close above';
     watchingLine = `${watchingCandidate.side} zone ${watchingCandidate.mid.toFixed(1)} - needs ${gateLabel} ${action} ${targetPrice}`;
   } else if (missingGate) {
-    watchingLine = `Monitoring liquidity - awaiting ${missingGate.name} (${missingGate.timeframe}) confirmation`;
+    if ((isMarketClosed || isFeedDimmed) && (missingGate.id === 'g1' || missingGate.name.includes('W1/D1'))) {
+      watchingLine = 'History loading (upstream down) - awaiting live stream reconnect';
+    } else {
+      watchingLine = `Monitoring liquidity - awaiting ${missingGate.name} (${missingGate.timeframe}) confirmation`;
+    }
   } else {
     watchingLine = `Monitoring liquidity structures across M15 & H1`;
   }

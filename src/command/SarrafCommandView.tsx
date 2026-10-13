@@ -128,7 +128,7 @@ export const SarrafCommandView: React.FC = () => {
           <div className="px-3 py-2 rounded-lg bg-[#ff3b6b]/10 border border-[#ff3b6b]/30 flex items-center justify-between text-[11px] text-[#ff3b6b] animate-pulse font-mono">
             <span className="font-bold flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-[#ff3b6b] animate-ping" />
-              BiQuote feed disconnected · Reconnecting...
+              {feed.upstreamStatusText || (feed.connection?.status === 'RECONNECTING' ? 'Feed reconnecting...' : 'Feed down · retrying...')}
             </span>
             <span className="text-[9px] text-[#8a96a8]">
               Dimmed (no stale data)

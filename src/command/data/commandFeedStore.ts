@@ -53,7 +53,8 @@ class CommandFeedStore {
     lastTickAgeSeconds: 0,
     quoteAgeSeconds: 0,
     reconnectAttempts: 0,
-    source: 'biquote.io (MetaTrader 5)',
+    source: 'Live Institutional Feed',
+    upstreamStatusText: '',
   };
 
   // Sparkline rolling points (last 40 real prices)
@@ -137,6 +138,10 @@ class CommandFeedStore {
   public reconnectCount: number = 0;
   public marketOpen: boolean = true;
   public upstream: 'up' | 'down' = 'up';
+  public upstreamStatusText: string = '';
+  public upstreamReasonCategory: string = '';
+  public upstreamDownSeconds: number = 0;
+  public upstreamRetryingInSeconds: number = 0;
   public isConnected: boolean = false;
   public sseFailuresCount: number = 0;
   public isPollingFallback: boolean = false;
@@ -597,6 +602,20 @@ class CommandFeedStore {
       if (data.upstream) {
         this.upstream = data.upstream;
       }
+      if (data.upstreamStatusText) {
+        this.upstreamStatusText = data.upstreamStatusText;
+      } else if (data.upstream === 'down') {
+        const ds = typeof data.downSeconds === 'number' ? data.downSeconds : 0;
+        const r = data.reasonCategory || 'error';
+        const ret = typeof data.retryingInSeconds === 'number' ? data.retryingInSeconds : 0;
+        this.upstreamStatusText = `Feed down ${ds}s - reason: ${r}, retrying in ${ret}s`;
+      } else {
+        this.upstreamStatusText = '';
+      }
+      if (data.reasonCategory) this.upstreamReasonCategory = data.reasonCategory;
+      if (typeof data.downSeconds === 'number') this.upstreamDownSeconds = data.downSeconds;
+      if (typeof data.retryingInSeconds === 'number') this.upstreamRetryingInSeconds = data.retryingInSeconds;
+
       if (typeof data.price === 'number' && data.price > 0) {
         this.processIncomingFeedQuote(data);
       }
@@ -671,6 +690,20 @@ class CommandFeedStore {
           if (hb.upstream) {
             this.upstream = hb.upstream;
           }
+          if (hb.upstreamStatusText) {
+            this.upstreamStatusText = hb.upstreamStatusText;
+          } else if (hb.upstream === 'down') {
+            const ds = typeof hb.downSeconds === 'number' ? hb.downSeconds : 0;
+            const r = hb.reasonCategory || 'error';
+            const ret = typeof hb.retryingInSeconds === 'number' ? hb.retryingInSeconds : 0;
+            this.upstreamStatusText = `Feed down ${ds}s - reason: ${r}, retrying in ${ret}s`;
+          } else {
+            this.upstreamStatusText = '';
+          }
+          if (hb.reasonCategory) this.upstreamReasonCategory = hb.reasonCategory;
+          if (typeof hb.downSeconds === 'number') this.upstreamDownSeconds = hb.downSeconds;
+          if (typeof hb.retryingInSeconds === 'number') this.upstreamRetryingInSeconds = hb.retryingInSeconds;
+
           this.isConnected = true;
           this.sseFailuresCount = 0;
           this.stopPollingFallback();
@@ -748,7 +781,11 @@ class CommandFeedStore {
       lastTickAgeSeconds: tickAgeSec,
       quoteAgeSeconds: tickAgeSec,
       reconnectAttempts: this.reconnectCount,
-      source: 'biquote.io (MetaTrader 5)',
+      source: 'Live Institutional Feed',
+      upstreamStatusText: this.upstreamStatusText,
+      reasonCategory: this.upstreamReasonCategory,
+      downSeconds: this.upstreamDownSeconds,
+      retryingInSeconds: this.upstreamRetryingInSeconds,
     };
 
     if (prevStatus !== status || prevText !== badgeText || prevAge !== tickAgeSec) {

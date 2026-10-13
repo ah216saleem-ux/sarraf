@@ -71,8 +71,9 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
 
   // Rule: Never generate a signal from missing, stale, or reconnecting data.
   if (feedStatus !== 'LIVE' || currentPrice <= 0) {
+    const isHistoryMissing = d1Candles.length < 5;
     const lockedGates: SniperGateResult[] = [
-      { id: 'g1', name: 'W1/D1 Context', shortName: 'D1 Context', timeframe: 'D1', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Feed disconnected · Awaiting live stream' },
+      { id: 'g1', name: 'W1/D1 Context', shortName: 'D1 Context', timeframe: 'D1', status: 'LOCKED', direction: 'NEUTRAL', reason: isHistoryMissing ? 'History loading (upstream down)' : 'Feed disconnected · Awaiting live stream' },
       { id: 'g2', name: 'H4 Bias', shortName: 'H4 Bias', timeframe: 'H4', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Feed disconnected · Awaiting live stream' },
       { id: 'g3', name: 'H1 Confirmation', shortName: 'H1 Confirm', timeframe: 'H1', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Feed disconnected · Awaiting live stream' },
       { id: 'g4', name: 'M30 Refinement', shortName: 'M30 Refine', timeframe: 'M30', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Feed disconnected · Awaiting live stream' },
@@ -91,7 +92,9 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
       confidence: 0,
       isConfidenceMet: false,
       canIssueSignal: false,
-      waitReason: 'BiQuote feed disconnected or reconnecting · Signals paused until live ticks resume.',
+      waitReason: isHistoryMissing
+        ? 'History loading (upstream down)'
+        : 'Feed disconnected · Signals paused until live ticks resume.',
     };
   }
 
@@ -105,7 +108,7 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
 
   if (d1Candles.length < 5) {
     g1Status = 'LOCKED';
-    g1Reason = 'Insufficient D1 bars for swing context';
+    g1Reason = feedStatus !== 'LIVE' ? 'History loading (upstream down)' : 'Insufficient D1 bars for swing context';
   } else {
     const recentD1 = d1Candles.slice(-cfg.w1d1SwingLookback);
     const lastD1 = recentD1[recentD1.length - 1];

@@ -76,15 +76,12 @@ export function getCredentials(): {
   chatId: string | null;
   tokenPresent: boolean;
   chatIdPresent: boolean;
+  chatIdIsNumeric: boolean;
+  missingVariable: string | null;
+  validationError: string | null;
 } {
   const rawToken = process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.trim() : null;
   let rawChatId = process.env.TELEGRAM_CHAT_ID ? process.env.TELEGRAM_CHAT_ID.trim() : null;
-
-  const tokenPresent = Boolean(rawToken);
-  const chatIdPresent = Boolean(rawChatId);
-
-  // Safe environmental check log (NEVER logs values)
-  console.log(`[SARRAF TELEGRAM] Env check: TELEGRAM_BOT_TOKEN=${tokenPresent ? 'present' : 'missing'}, TELEGRAM_CHAT_ID=${chatIdPresent ? 'present' : 'missing'}`);
 
   // Fallback if env chatId is bot's self username (e.g. @Sarraftelegrambot) and dynamic registered chat ID exists
   if (rawChatId && (rawChatId.startsWith('@') && rawChatId.toLowerCase().includes('bot'))) {
@@ -93,8 +90,7 @@ export function getCredentials(): {
         const raw = fs.readFileSync(DYNAMIC_CHAT_FILE, 'utf8');
         const parsed = JSON.parse(raw);
         if (parsed.chatId && !String(parsed.chatId).startsWith('@')) {
-          console.log('[SARRAF TELEGRAM] Resolved bot username to registered chat ID from telegram_chat.json');
-          rawChatId = String(parsed.chatId);
+          rawChatId = String(parsed.chatId).trim();
         }
       } catch {
         // Ignore file read error
@@ -102,17 +98,41 @@ export function getCredentials(): {
     }
   }
 
+  const tokenPresent = Boolean(rawToken);
+  const chatIdPresent = Boolean(rawChatId);
+  const chatIdIsNumeric = Boolean(rawChatId && /^-?\d+$/.test(rawChatId));
+
+  let missingVariable: string | null = null;
+  let validationError: string | null = null;
+
+  if (!tokenPresent && !chatIdPresent) {
+    missingVariable = 'TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID';
+    validationError = 'TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are missing';
+  } else if (!tokenPresent) {
+    missingVariable = 'TELEGRAM_BOT_TOKEN';
+    validationError = 'TELEGRAM_BOT_TOKEN is missing';
+  } else if (!chatIdPresent) {
+    missingVariable = 'TELEGRAM_CHAT_ID';
+    validationError = 'TELEGRAM_CHAT_ID is missing';
+  } else if (!chatIdIsNumeric) {
+    missingVariable = 'TELEGRAM_CHAT_ID';
+    validationError = 'TELEGRAM_CHAT_ID must be the numeric chat id';
+  }
+
   return {
     token: rawToken,
     chatId: rawChatId,
     tokenPresent,
     chatIdPresent,
+    chatIdIsNumeric,
+    missingVariable,
+    validationError,
   };
 }
 
 export function isTelegramConfigured(): boolean {
-  const { token, chatId } = getCredentials();
-  return Boolean(token && chatId);
+  const { tokenPresent, chatIdPresent, chatIdIsNumeric } = getCredentials();
+  return Boolean(tokenPresent && chatIdPresent && chatIdIsNumeric);
 }
 
 /**
@@ -156,20 +176,27 @@ export async function sendTelegramMessageWithRetry(
   text: string,
   maxRetries = 3
 ): Promise<{ success: boolean; error?: string }> {
-  const { token, chatId, tokenPresent, chatIdPresent } = getCredentials();
+  const creds = getCredentials();
 
-  if (!tokenPresent || !token) {
+  if (!creds.tokenPresent || !creds.token) {
     settings.lastMessageStatus = 'FAILED';
     settings.lastErrorMessage = 'TELEGRAM_BOT_TOKEN is missing';
     saveTelegramSettings();
     return { success: false, error: 'TELEGRAM_BOT_TOKEN is missing' };
   }
 
-  if (!chatIdPresent || !chatId) {
+  if (!creds.chatIdPresent || !creds.chatId) {
     settings.lastMessageStatus = 'FAILED';
     settings.lastErrorMessage = 'TELEGRAM_CHAT_ID is missing';
     saveTelegramSettings();
     return { success: false, error: 'TELEGRAM_CHAT_ID is missing' };
+  }
+
+  if (!creds.chatIdIsNumeric) {
+    settings.lastMessageStatus = 'FAILED';
+    settings.lastErrorMessage = 'TELEGRAM_CHAT_ID must be the numeric chat id';
+    saveTelegramSettings();
+    return { success: false, error: 'TELEGRAM_CHAT_ID must be the numeric chat id' };
   }
 
   // Enforce 20 msgs/min rate limit
@@ -331,12 +358,14 @@ export async function notifySignalClosed(
  * Send Test Message
  */
 export async function sendTestMessage(): Promise<{ success: boolean; message: string; reasonCode?: TelegramReasonCode }> {
-  const { tokenPresent, chatIdPresent, token, chatId } = getCredentials();
-  if (!tokenPresent || !token) {
-    return { success: false, message: 'TELEGRAM_BOT_TOKEN is missing in environment variables', reasonCode: 'MISSING_TOKEN' };
-  }
-  if (!chatIdPresent || !chatId) {
-    return { success: false, message: 'TELEGRAM_CHAT_ID is missing in environment variables', reasonCode: 'MISSING_CHAT_ID' };
+  const creds = getCredentials();
+  if (creds.validationError) {
+    const code: TelegramReasonCode = !creds.tokenPresent
+      ? 'MISSING_TOKEN'
+      : !creds.chatIdPresent
+      ? 'MISSING_CHAT_ID'
+      : 'INVALID_CHAT_ID';
+    return { success: false, message: creds.validationError, reasonCode: code };
   }
   const res = await sendTelegramMessageWithRetry('SARRAF test message OK');
   if (res.success) {
@@ -499,18 +528,26 @@ export function stopTelegramSignals(): {
  * Status Getter for UI with precise reason codes
  */
 export function getCommandTelegramStatus(isAdmin: boolean = true): TelegramCommandStatus {
-  const { tokenPresent, chatIdPresent } = getCredentials();
-  const configured = tokenPresent && chatIdPresent;
+  const creds = getCredentials();
+  const configured = creds.tokenPresent && creds.chatIdPresent && creds.chatIdIsNumeric;
 
   let reasonCode: TelegramReasonCode = 'OK';
   let reasonMessage = 'Telegram bot is ready and verified.';
 
-  if (!tokenPresent) {
-    reasonCode = 'MISSING_TOKEN';
-    reasonMessage = 'TELEGRAM_BOT_TOKEN is not configured in server environment.';
-  } else if (!chatIdPresent) {
-    reasonCode = 'MISSING_CHAT_ID';
-    reasonMessage = 'TELEGRAM_CHAT_ID is not configured in server environment.';
+  if (creds.validationError) {
+    if (!creds.tokenPresent && !creds.chatIdPresent) {
+      reasonCode = 'MISSING_TOKEN';
+      reasonMessage = 'TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are missing in server environment variables.';
+    } else if (!creds.tokenPresent) {
+      reasonCode = 'MISSING_TOKEN';
+      reasonMessage = 'TELEGRAM_BOT_TOKEN is missing in server environment variables.';
+    } else if (!creds.chatIdPresent) {
+      reasonCode = 'MISSING_CHAT_ID';
+      reasonMessage = 'TELEGRAM_CHAT_ID is missing in server environment variables.';
+    } else if (!creds.chatIdIsNumeric) {
+      reasonCode = 'INVALID_CHAT_ID';
+      reasonMessage = 'TELEGRAM_CHAT_ID must be the numeric chat id';
+    }
   } else if (!isAdmin) {
     reasonCode = 'NOT_ADMIN';
     reasonMessage = 'Admin privileges required. Please log in to control Telegram dispatch.';

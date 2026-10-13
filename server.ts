@@ -9,6 +9,7 @@ import {
   loadCandlesFromDisk,
   saveCandlesToDisk,
   bootstrapHistoricalCandles,
+  backfillCandleGaps,
   processTick,
   getEngineStatus,
   getCandleStore,
@@ -339,25 +340,98 @@ function broadcastCommandTick(tick: any) {
 
 // Track upstream feed health & watchdog
 let lastUpstreamTickAt = 0;
+let firstHealthyTickAt = 0;
+let lastUpstreamDownAt = 0;
+let lastReasonCategory: string | null = null;
 let upstreamStatus: 'up' | 'down' = 'down';
-const BACKOFF_STEPS_MS = [1000, 2000, 5000, 10000];
+const BACKOFF_STEPS_MS = [1000, 2000, 5000, 10000, 20000, 30000, 60000];
 let upstreamBackoffIdx = 0;
-let upstreamFetchTimeoutId: any = null;
+let upstreamFetchTimeoutId: NodeJS.Timeout | null = null;
+let nextRetryAt = 0;
 let currentUpstreamAbortController: AbortController | null = null;
+let isUpstreamConnecting = false;
 
-function logReconnectReason(category: 'silent' | 'closed' | 'error') {
-  console.log(`[SARRAF FEED] reconnecting: reason=${category}`);
+function categorizeUpstreamError(err: any): 'dns' | 'timeout' | 'http 401' | 'http 403' | 'http 429' | 'http 5xx' | 'closed' | 'silent' | 'error' {
+  const code = (err?.code || '').toLowerCase();
+  const name = (err?.name || '').toLowerCase();
+  const msg = (err?.message || '').toLowerCase();
+
+  if (code === 'enotfound' || code === 'eai_again' || msg.includes('getaddrinfo') || msg.includes('dns')) {
+    return 'dns';
+  }
+  if (name === 'aborterror' || code === 'etimedout' || msg.includes('timeout') || msg.includes('timed out')) {
+    return 'timeout';
+  }
+  if (msg.includes('http_401') || msg.includes(' 401')) {
+    return 'http 401';
+  }
+  if (msg.includes('http_403') || msg.includes(' 403')) {
+    return 'http 403';
+  }
+  if (msg.includes('http_429') || msg.includes(' 429')) {
+    return 'http 429';
+  }
+  if (msg.includes('http_5') || msg.includes(' 500') || msg.includes(' 502') || msg.includes(' 503') || msg.includes(' 504')) {
+    return 'http 5xx';
+  }
+  if (code === 'econnreset' || code === 'econnrefused' || msg.includes('econnreset') || msg.includes('closed') || msg.includes('socket')) {
+    return 'closed';
+  }
+  return 'error';
+}
+
+function logReconnectReason(category: 'dns' | 'timeout' | 'http 401' | 'http 403' | 'http 429' | 'http 5xx' | 'closed' | 'silent' | 'error') {
+  console.log(`[FEED] reason: ${category}`);
+}
+
+function getJitteredBackoff(): number {
+  const base = BACKOFF_STEPS_MS[Math.min(upstreamBackoffIdx, BACKOFF_STEPS_MS.length - 1)];
+  upstreamBackoffIdx = Math.min(upstreamBackoffIdx + 1, BACKOFF_STEPS_MS.length - 1);
+  const jitter = 1 + (Math.random() * 0.30); // 0-30% random jitter
+  return Math.max(1000, Math.floor(base * jitter));
 }
 
 function scheduleNextBiquoteTick(delayMs: number) {
   if (upstreamFetchTimeoutId) {
     clearTimeout(upstreamFetchTimeoutId);
+    upstreamFetchTimeoutId = null;
   }
-  upstreamFetchTimeoutId = setTimeout(fetchBiquoteTick, delayMs);
+  const safeDelay = Math.max(1000, Math.floor(delayMs));
+  nextRetryAt = Date.now() + safeDelay;
+  upstreamFetchTimeoutId = setTimeout(() => {
+    upstreamFetchTimeoutId = null;
+    fetchBiquoteTick();
+  }, safeDelay);
+}
+
+export function getUpstreamStatusInfo() {
+  const now = Date.now();
+  const downSeconds = upstreamStatus === 'down' && lastUpstreamDownAt > 0
+    ? Math.max(0, Math.floor((now - lastUpstreamDownAt) / 1000))
+    : 0;
+  const retryingInSeconds = upstreamStatus === 'down' && nextRetryAt > now
+    ? Math.max(0, Math.ceil((nextRetryAt - now) / 1000))
+    : 0;
+  const statusMessage = upstreamStatus === 'down'
+    ? `Feed down ${downSeconds}s - reason: ${lastReasonCategory || 'error'}, retrying in ${retryingInSeconds}s`
+    : 'Feed up';
+
+  return {
+    upstream: upstreamStatus,
+    lastReasonCategory: upstreamStatus === 'down' ? (lastReasonCategory || 'error') : null,
+    downSeconds,
+    retryingInSeconds,
+    statusMessage,
+  };
 }
 
 // Resilient background tick fetcher with upstream watchdog & exponential backoff
 async function fetchBiquoteTick() {
+  if (isUpstreamConnecting) {
+    return;
+  }
+  isUpstreamConnecting = true;
+
   try {
     currentUpstreamAbortController = new AbortController();
     const timeout = setTimeout(() => {
@@ -376,6 +450,10 @@ async function fetchBiquoteTick() {
     currentUpstreamAbortController = null;
 
     if (!res.ok) {
+      if (res.status === 401) throw new Error('HTTP_401');
+      if (res.status === 403) throw new Error('HTTP_403');
+      if (res.status === 429) throw new Error('HTTP_429');
+      if (res.status >= 500 && res.status < 600) throw new Error('HTTP_5xx');
       throw new Error(`HTTP_${res.status}`);
     }
 
@@ -389,7 +467,17 @@ async function fetchBiquoteTick() {
     const now = Date.now();
     lastUpstreamTickAt = now;
     upstreamStatus = 'up';
-    upstreamBackoffIdx = 0;
+    lastUpstreamDownAt = 0;
+    lastReasonCategory = null;
+    consecutiveFailures = 0;
+
+    // Reset the backoff after 60 s of healthy data
+    if (firstHealthyTickAt === 0) {
+      firstHealthyTickAt = now;
+    } else if (now - firstHealthyTickAt >= 60000) {
+      upstreamBackoffIdx = 0;
+    }
+
     const quoteTime = rawData.timestamp ? new Date(rawData.timestamp).getTime() : now;
     const computedAgeSeconds = Math.max(0, Math.round((now - quoteTime) / 1000));
     const effectiveAgeSeconds = typeof rawData.quoteAgeSeconds === 'number' ? rawData.quoteAgeSeconds : computedAgeSeconds;
@@ -411,7 +499,7 @@ async function fetchBiquoteTick() {
       dayDiffPercent: rawData.dayDiffPercent,
       direction: rawData.direction,
       timestamp: rawData.timestamp,
-      source: rawData.source || 'biquote.io (MetaTrader 5)',
+      source: rawData.source || 'Live Institutional Feed',
       marketState: rawData.marketState,
     });
 
@@ -471,23 +559,23 @@ async function fetchBiquoteTick() {
     // Broadcast tick immediately to SARRAF COMMAND clients
     broadcastCommandTick(latestLiveQuote);
 
-    // Reset backoff on success and schedule fast polling (700ms)
-    consecutiveFailures = 0;
-    backoffDelayMs = 700;
+    // Schedule next tick interval (1s)
+    scheduleNextBiquoteTick(1000);
   } catch (err: any) {
     currentUpstreamAbortController = null;
     consecutiveFailures += 1;
-    if (consecutiveFailures >= 3) {
+    firstHealthyTickAt = 0;
+    const now = Date.now();
+    if (upstreamStatus !== 'down') {
       upstreamStatus = 'down';
+      lastUpstreamDownAt = now;
     }
 
-    const reasonCategory: 'silent' | 'closed' | 'error' =
-      err?.name === 'AbortError' ? 'silent' : err?.message?.includes('HTTP_') ? 'closed' : 'error';
+    const reasonCategory = categorizeUpstreamError(err);
+    lastReasonCategory = reasonCategory;
     logReconnectReason(reasonCategory);
 
-    const backoff = BACKOFF_STEPS_MS[Math.min(upstreamBackoffIdx, BACKOFF_STEPS_MS.length - 1)];
-    upstreamBackoffIdx = Math.min(upstreamBackoffIdx + 1, BACKOFF_STEPS_MS.length - 1);
-    backoffDelayMs = backoff;
+    const jitterDelay = getJitteredBackoff();
 
     const marketEval = evaluateMarketPriceStatus();
     if (marketEval.status === 'FEED_OFFLINE' && isGoldMarketOpen(new Date())) {
@@ -502,15 +590,15 @@ async function fetchBiquoteTick() {
       'OFFLINE',
       isNewsLockActive()
     );
-  }
 
-  scheduleNextBiquoteTick(backoffDelayMs);
+    scheduleNextBiquoteTick(jitterDelay);
+  } finally {
+    isUpstreamConnecting = false;
+  }
 }
 
-// Upstream watchdog for the BiQuote feed: track lastTickAt. If the market is open and no tick arrived for 30 s,
-// ensure connection is not hung and reconnect with backoff 1s, 2s, 5s, 10s (cap 10s, retry forever).
-// Log ONE line per reconnect with a reason category only (silent / closed / error), never URLs or keys.
-// Market-closed hours (real schedule) must not count as stale.
+// Upstream watchdog: track lastTickAt. If the market is open and no tick arrived for 30 s,
+// reconnect with backoff steps. Log ONE line with reason category 'silent'.
 const serverStartupAt = Date.now();
 let lastWatchdogTriggerAt = 0;
 
@@ -522,9 +610,12 @@ setInterval(() => {
     const tickAgeMs = now - referenceTime;
     if (tickAgeMs > 30000 && now - lastWatchdogTriggerAt >= 15000) {
       lastWatchdogTriggerAt = now;
-      if (consecutiveFailures >= 3) {
+      firstHealthyTickAt = 0;
+      if (upstreamStatus !== 'down') {
         upstreamStatus = 'down';
+        lastUpstreamDownAt = now;
       }
+      lastReasonCategory = 'silent';
       logReconnectReason('silent');
       if (currentUpstreamAbortController) {
         try {
@@ -532,9 +623,8 @@ setInterval(() => {
         } catch {}
         currentUpstreamAbortController = null;
       }
-      const backoff = BACKOFF_STEPS_MS[Math.min(upstreamBackoffIdx, BACKOFF_STEPS_MS.length - 1)];
-      upstreamBackoffIdx = Math.min(upstreamBackoffIdx + 1, BACKOFF_STEPS_MS.length - 1);
-      scheduleNextBiquoteTick(backoff);
+      const jitterDelay = getJitteredBackoff();
+      scheduleNextBiquoteTick(jitterDelay);
     }
   }
 }, 3000);
@@ -627,13 +717,18 @@ app.get('/api/command/snapshot', (_req, res) => {
   const ticks5m = get5MinTickBuffer();
   const now = Date.now();
   const lastTickAgeMs = lastUpstreamTickAt > 0 ? now - lastUpstreamTickAt : 0;
+  const upstreamInfo = getUpstreamStatusInfo();
 
   const payload = {
     status: latestLiveQuote?.status || (schedule.isOpen ? 'LIVE' : 'MARKET_CLOSED'),
     ...(latestLiveQuote || {}),
     ticks5m,
     marketOpen: schedule.isOpen,
-    upstream: upstreamStatus,
+    upstream: upstreamInfo.upstream,
+    reasonCategory: upstreamInfo.lastReasonCategory,
+    downSeconds: upstreamInfo.downSeconds,
+    retryingInSeconds: upstreamInfo.retryingInSeconds,
+    upstreamStatusText: upstreamInfo.statusMessage,
     lastTickAgeMs,
     serverTime: now,
   };
@@ -663,12 +758,17 @@ app.get('/api/command/feed-stream', (req, res) => {
   const schedule = getMarketSchedule();
   const now = Date.now();
   const lastTickAgeMs = lastUpstreamTickAt > 0 ? now - lastUpstreamTickAt : 0;
+  const upstreamInfo = getUpstreamStatusInfo();
   const initialPayload = {
     status: latestLiveQuote?.status || (schedule.isOpen ? 'LIVE' : 'MARKET_CLOSED'),
     ...(latestLiveQuote || {}),
     ticks5m: get5MinTickBuffer(),
     marketOpen: schedule.isOpen,
-    upstream: upstreamStatus,
+    upstream: upstreamInfo.upstream,
+    reasonCategory: upstreamInfo.lastReasonCategory,
+    downSeconds: upstreamInfo.downSeconds,
+    retryingInSeconds: upstreamInfo.retryingInSeconds,
+    upstreamStatusText: upstreamInfo.statusMessage,
     lastTickAgeMs,
     serverTime: now,
   };
@@ -679,16 +779,21 @@ app.get('/api/command/feed-stream', (req, res) => {
 
   commandSseClients.add(res);
 
-  // Heartbeat every 3s: event "hb" with {ts, lastTickAgeMs, upstream: "up"|"down", marketOpen}
+  // Heartbeat every 3s: event "hb" with {ts, lastTickAgeMs, upstream, reasonCategory, downSeconds, retryingInSeconds, upstreamStatusText, marketOpen}
   const hbInterval = setInterval(() => {
     try {
       const hbNow = Date.now();
       const hbTickAge = lastUpstreamTickAt > 0 ? hbNow - lastUpstreamTickAt : 0;
       const hbSchedule = getMarketSchedule();
+      const hbUpstream = getUpstreamStatusInfo();
       const hbData = JSON.stringify({
         ts: hbNow,
         lastTickAgeMs: hbTickAge,
-        upstream: upstreamStatus,
+        upstream: hbUpstream.upstream,
+        reasonCategory: hbUpstream.lastReasonCategory,
+        downSeconds: hbUpstream.downSeconds,
+        retryingInSeconds: hbUpstream.retryingInSeconds,
+        upstreamStatusText: hbUpstream.statusMessage,
         marketOpen: hbSchedule.isOpen,
       });
       res.write(`event: hb\ndata: ${hbData}\n\n`);
@@ -1119,13 +1224,18 @@ app.get('/api/signal/tests', requireAdminAuth, (_req, res) => {
 // PHASE 4: TELEGRAM, GEMINI VALIDATION & AI CHAT API (Sections 1, 5, 6, 7, 8)
 // -------------------------------------------------------------
 
-// GET /api/health - Public monitoring endpoint: {ok:true, upstream, lastTickAgeMs, clients, uptimeSec}
+// GET /api/health - Public monitoring endpoint with upstream reason and retry timing
 app.get(['/api/health', '/health'], (_req, res) => {
   const now = Date.now();
   const lastTickAgeMs = lastUpstreamTickAt > 0 ? now - lastUpstreamTickAt : now;
+  const upstreamInfo = getUpstreamStatusInfo();
   return res.status(200).json({
-    ok: true,
-    upstream: upstreamStatus,
+    ok: upstreamInfo.upstream === 'up',
+    upstream: upstreamInfo.upstream,
+    lastReasonCategory: upstreamInfo.lastReasonCategory,
+    downSeconds: upstreamInfo.downSeconds,
+    retryingInSeconds: upstreamInfo.retryingInSeconds,
+    statusMessage: upstreamInfo.statusMessage,
     lastTickAgeMs,
     clients: commandSseClients.size,
     uptimeSec: Math.floor(process.uptime()),
@@ -2206,8 +2316,17 @@ app.post('/api/auth/logout', (req, res) => {
 async function startServer() {
   // 1. Verify DATA_DIR writability
   const dirCheck = checkDataDirectory();
-  console.log(`[SARRAF STARTUP] Absolute path for DATA_DIR: ${path.resolve(DATA_DIR)}`);
-  console.log(`[SARRAF STARTUP] Absolute path for lastTick.json: ${LAST_TICK_FILE}`);
+
+  // 5. STARTUP LOG (one line, no values): which required variables are present (true/false only)
+  const telegramBotToken = Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim());
+  const telegramChatId = Boolean(process.env.TELEGRAM_CHAT_ID?.trim());
+  const aiApiKey = Boolean((process.env.AI_API_KEY || process.env.GEMINI_API_KEY)?.trim());
+  const adminUsername = Boolean(process.env.ADMIN_USERNAME?.trim());
+  const adminPasswordHash = Boolean(process.env.ADMIN_PASSWORD_HASH?.trim());
+  const dataDirWritable = Boolean(dirCheck.writable);
+
+  console.log(`[STARTUP] TELEGRAM_BOT_TOKEN: ${telegramBotToken}, TELEGRAM_CHAT_ID: ${telegramChatId}, AI_API_KEY: ${aiApiKey}, ADMIN_USERNAME: ${adminUsername}, ADMIN_PASSWORD_HASH: ${adminPasswordHash}, DATA_DIR writable: ${dataDirWritable}`);
+
   if (!dirCheck.writable) {
     console.error(`[SARRAF FATAL] DATA_DIR (${DATA_DIR}) is not writable: ${dirCheck.error}. Server cannot safely start.`);
     process.exit(1);
@@ -2232,19 +2351,18 @@ async function startServer() {
   // 5. Load settings from disk
   loadSettingsFromDisk();
 
-  // 5b. Load last valid tick from disk (A1 requirement)
+  // 5b. Load last valid tick from disk
   loadLastTickFromDisk();
   setInterval(saveLastTickToDisk, 60 * 1000);
 
-  // 6. Load candles from disk and bootstrap history if needed
+  // 6. Load candles and signal state BEFORE first upstream connection
   loadCandlesFromDisk();
-  await bootstrapHistoricalCandles();
-
-  // 7. Load signal manager state, restore cooldown, and perform downtime candle recovery
   loadSignalsFromDisk();
-
-  // 7b. Load Phase 4 Ahmed Sniper command signal state
   loadCommandSignalsFromDisk();
+
+  // 7. On start, backfill the missing gap from the candle source before enabling the signal engine
+  await backfillCandleGaps();
+  await bootstrapHistoricalCandles();
 
   // 8. Fetch real Forex Factory news calendar and start 15-minute background refresh
   await fetchForexFactoryCalendar();
@@ -2255,7 +2373,7 @@ async function startServer() {
   // 9. Start background Telegram dispatch worker and long-polling handler
   startTelegramWorker();
 
-  // 10. Start resilient background tick worker
+  // 10. Start resilient background tick worker (first upstream connection)
   fetchBiquoteTick();
 
   // 10b. Initialize SPY S&P 500 Options Feed & Signals

@@ -75,6 +75,7 @@ export interface UseCommandFeedResult {
   lastTickAt: number;
   lastMsgAt: number;
   reconnectCount: number;
+  upstreamStatusText: string;
 }
 
 export function formatFreshness(timestamp: number): string {
@@ -189,5 +190,6 @@ export function useCommandFeed(): UseCommandFeedResult {
     lastTickAt: commandStore.lastTickAt,
     lastMsgAt: commandStore.lastMsgAt,
     reconnectCount: commandStore.reconnectCount,
+    upstreamStatusText: commandStore.upstreamStatusText,
   };
 }

@@ -279,13 +279,15 @@ function updateTimeframeCandles(
   periodMinutes: number,
   price: number,
   timestampMs: number
-) {
+): boolean {
   const openTime = getPeriodStartTime(timestampMs, periodMinutes);
   const current = candles[candles.length - 1];
+  let didClose = false;
 
   if (!current || current.openTime !== openTime) {
     if (current) {
       current.isClosed = true;
+      didClose = true;
     }
 
     const prevTime = current ? new Date(current.openTime).getTime() : 0;
@@ -316,19 +318,22 @@ function updateTimeframeCandles(
     current.close = price;
     current.volume += 1;
   }
+
+  return didClose;
 }
 
 // Process new tick from live feed into all 7 timeframes
 export function processTick(price: number, timestampMs: number) {
-  updateTimeframeCandles(store.M1, 1, price, timestampMs);
-  updateTimeframeCandles(store.M5, 5, price, timestampMs);
-  updateTimeframeCandles(store.M15, 15, price, timestampMs);
-  updateTimeframeCandles(store.M30, 30, price, timestampMs);
-  updateTimeframeCandles(store.H1, 60, price, timestampMs);
-  updateTimeframeCandles(store.H4, 240, price, timestampMs);
-  updateTimeframeCandles(store.D1, 1440, price, timestampMs);
+  const c1 = updateTimeframeCandles(store.M1, 1, price, timestampMs);
+  const c5 = updateTimeframeCandles(store.M5, 5, price, timestampMs);
+  const c15 = updateTimeframeCandles(store.M15, 15, price, timestampMs);
+  const c30 = updateTimeframeCandles(store.M30, 30, price, timestampMs);
+  const c60 = updateTimeframeCandles(store.H1, 60, price, timestampMs);
+  const c240 = updateTimeframeCandles(store.H4, 240, price, timestampMs);
+  const c1440 = updateTimeframeCandles(store.D1, 1440, price, timestampMs);
 
-  if (Date.now() - lastSaveTime > 25000) {
+  const anyClosed = c1 || c5 || c15 || c30 || c60 || c240 || c1440;
+  if (anyClosed || Date.now() - lastSaveTime > 25000) {
     saveCandlesToDisk();
   }
 }
@@ -441,6 +446,58 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
   }
 
   return false;
+}
+
+// On server startup: backfill the missing gap from the candle source before enabling the signal engine
+export async function backfillCandleGaps(): Promise<boolean> {
+  try {
+    const [m1Bars, m5Bars, m15Bars, m30Bars, h1Bars, h4Bars, d1Bars] = await Promise.all([
+      fetchTimeframeOhlc('1m').catch(() => []),
+      fetchTimeframeOhlc('5m').catch(() => []),
+      fetchTimeframeOhlc('15m').catch(() => []),
+      fetchTimeframeOhlc('30m').catch(() => []),
+      fetchTimeframeOhlc('1h').catch(() => []),
+      fetchTimeframeOhlc('4h').catch(() => []),
+      fetchTimeframeOhlc('1d').catch(() => []),
+    ]);
+
+    let anyMerged = false;
+    if (m1Bars.length > 0) { store.M1 = mergeCandleSeries(store.M1, m1Bars); anyMerged = true; }
+    if (m5Bars.length > 0) { store.M5 = mergeCandleSeries(store.M5, m5Bars); anyMerged = true; }
+    if (m15Bars.length > 0) { store.M15 = mergeCandleSeries(store.M15, m15Bars); anyMerged = true; }
+    if (m30Bars.length > 0) { store.M30 = mergeCandleSeries(store.M30, m30Bars); anyMerged = true; }
+    if (h1Bars.length > 0) { store.H1 = mergeCandleSeries(store.H1, h1Bars); anyMerged = true; }
+
+    if (h4Bars.length > 0) {
+      store.H4 = mergeCandleSeries(store.H4, h4Bars);
+      anyMerged = true;
+    } else if (store.H1.length > 0) {
+      store.H4 = buildH4FromH1(store.H1);
+      anyMerged = true;
+    }
+
+    if (d1Bars.length > 0) {
+      store.D1 = mergeCandleSeries(store.D1, d1Bars);
+      anyMerged = true;
+    } else if (store.H1.length > 0) {
+      store.D1 = buildD1FromH1(store.H1);
+      anyMerged = true;
+    }
+
+    if (anyMerged) {
+      runGapDetectionAudit();
+      saveCandlesToDisk();
+      console.log(`[CANDLE ENGINE] Startup backfill completed: M1=${store.M1.length}, M5=${store.M5.length}, M15=${store.M15.length}, M30=${store.M30.length}, H1=${store.H1.length}, H4=${store.H4.length}, D1=${store.D1.length}`);
+      return true;
+    }
+  } catch (err: any) {
+    console.log('[CANDLE ENGINE] Startup gap backfill skipped (upstream unreachable)');
+  }
+  return false;
+}
+
+export function isHistoryGenuinelyMissing(): boolean {
+  return store.D1.length < 5 || store.H1.length < 5;
 }
 
 // Get closed candles only (excluding active forming candle and gap candles when requested)

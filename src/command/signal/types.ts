@@ -107,6 +107,7 @@ export type TelegramReasonCode =
   | 'OK'
   | 'MISSING_TOKEN'
   | 'MISSING_CHAT_ID'
+  | 'INVALID_CHAT_ID'
   | 'NOT_ADMIN'
   | 'BOT_NOT_IN_CHAT'
   | 'CHAT_NOT_FOUND'

@@ -136,12 +136,17 @@ export const TelegramControlBar: React.FC<TelegramControlBarProps> = ({
         };
       case 'MISSING_TOKEN':
         return {
-          text: 'TELEGRAM_BOT_TOKEN missing in server environment variables.',
+          text: status.reasonMessage || 'TELEGRAM_BOT_TOKEN is missing.',
           color: 'text-[#f5a524]',
         };
       case 'MISSING_CHAT_ID':
         return {
-          text: 'TELEGRAM_CHAT_ID missing in server environment variables.',
+          text: status.reasonMessage || 'TELEGRAM_CHAT_ID is missing.',
+          color: 'text-[#f5a524]',
+        };
+      case 'INVALID_CHAT_ID':
+        return {
+          text: 'TELEGRAM_CHAT_ID must be the numeric chat id',
           color: 'text-[#f5a524]',
         };
       case 'BOT_NOT_IN_CHAT':
@@ -343,7 +348,7 @@ export const TelegramControlBar: React.FC<TelegramControlBarProps> = ({
       {/* Not Configured Notice */}
       {!status.configured && (
         <div className="mt-2 px-2 py-1 rounded bg-[#f5a524]/5 border border-[#f5a524]/20 text-[8.5px] text-[#f5a524]">
-          Telegram credentials missing. Set <code className="bg-black/30 px-1 py-0.5 rounded">TELEGRAM_BOT_TOKEN</code> and <code className="bg-black/30 px-1 py-0.5 rounded">TELEGRAM_CHAT_ID</code> in Railway environment variables.
+          {status.reasonMessage || 'TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are missing.'}
         </div>
       )}
     </div>
