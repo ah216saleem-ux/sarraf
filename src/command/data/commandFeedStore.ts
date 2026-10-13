@@ -590,6 +590,7 @@ class CommandFeedStore {
       if (!res.ok) return;
       const data = await res.json();
       this.lastMsgAt = Date.now();
+      this.isConnected = true;
       if (typeof data.marketOpen === 'boolean') {
         this.marketOpen = data.marketOpen;
       }
@@ -603,6 +604,7 @@ class CommandFeedStore {
         this.seedTickBuffer5m(data.ticks5m);
       }
       this.fetchUnifiedZones();
+      this.updateConnectionStatus();
     } catch {
       // Handled by retry/fallback
     }
@@ -705,8 +707,8 @@ class CommandFeedStore {
   // Update honest connection state & badge:
   // LIVE only if market open and now - lastTickAt < 6 s.
   // If connected but lastTickAt is 6-30 s old show amber "STALE 12s".
-  // Show red OFFLINE/RECONNECTING only when there is no connection.
-  // Market closed shows CLOSED/REPLAY as today.
+  // Show red OFFLINE/RECONNECTING only when there is no connection and data is old.
+  // Market closed shows CLOSED/REPLAY.
   public updateConnectionStatus() {
     const now = Date.now();
     const tickAgeSec = this.lastTickAt > 0 ? Math.max(0, Math.floor((now - this.lastTickAt) / 1000)) : 999;
@@ -715,10 +717,12 @@ class CommandFeedStore {
     let status: 'LIVE' | 'STALE' | 'RECONNECTING' | 'MARKET_CLOSED' | 'OFFLINE';
     let badgeText = 'LIVE';
 
+    const hasRecentData = msgAgeSec <= 15 || tickAgeSec <= 15;
+
     if (!this.marketOpen) {
       status = 'MARKET_CLOSED';
       badgeText = 'CLOSED';
-    } else if (!this.isConnected && !this.isPollingFallback) {
+    } else if (!this.isConnected && !this.isPollingFallback && !hasRecentData) {
       status = 'RECONNECTING';
       badgeText = 'RECONNECTING';
     } else if (msgAgeSec > 25) {

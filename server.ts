@@ -328,6 +328,9 @@ function broadcastCommandTick(tick: any) {
   for (const client of commandSseClients) {
     try {
       client.write(payload);
+      if (typeof client.flush === 'function') {
+        client.flush();
+      }
     } catch {
       commandSseClients.delete(client);
     }
@@ -670,6 +673,9 @@ app.get('/api/command/feed-stream', (req, res) => {
     serverTime: now,
   };
   res.write(`data: ${JSON.stringify(initialPayload)}\n\n`);
+  if (typeof (res as any).flush === 'function') {
+    (res as any).flush();
+  }
 
   commandSseClients.add(res);
 
@@ -686,6 +692,9 @@ app.get('/api/command/feed-stream', (req, res) => {
         marketOpen: hbSchedule.isOpen,
       });
       res.write(`event: hb\ndata: ${hbData}\n\n`);
+      if (typeof (res as any).flush === 'function') {
+        (res as any).flush();
+      }
     } catch {
       cleanup();
     }
@@ -695,6 +704,9 @@ app.get('/api/command/feed-stream', (req, res) => {
   const pingInterval = setInterval(() => {
     try {
       res.write(': ping\n\n');
+      if (typeof (res as any).flush === 'function') {
+        (res as any).flush();
+      }
     } catch {
       cleanup();
     }
