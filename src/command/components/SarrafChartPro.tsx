@@ -202,17 +202,16 @@ export const SarrafChartPro: React.FC<SarrafChartProProps> = React.memo(({
       return padLeft + indexInVisible * candleSpacing + candleSpacing / 2;
     };
 
-    // Draw Overlays
+    // Draw Overlays: Thin bands without text labels
     for (const z of zones) {
       const isBroken = z.status === 'BROKEN';
 
-      // 1. FVG Overlays
+      // 1. FVG Overlays (Thin band)
       if (z.type === 'FVG' && overlays.fvg) {
         const topY = getY(z.top);
         const botY = getY(z.bottom);
         const boxH = Math.max(2, botY - topY);
         const isBull = z.side === 'BUY';
-        const color = isBroken ? '#8a96a8' : isBull ? GREEN : RED;
 
         ctx.fillStyle = isBroken ? '#8a96a815' : isBull ? '#22e08a18' : '#ff3b6b18';
         ctx.fillRect(padLeft, topY, chartW, boxH);
@@ -220,15 +219,9 @@ export const SarrafChartPro: React.FC<SarrafChartProProps> = React.memo(({
         ctx.strokeStyle = isBroken ? '#8a96a840' : isBull ? '#22e08a50' : '#ff3b6b50';
         ctx.lineWidth = 1;
         ctx.strokeRect(padLeft, topY, chartW, boxH);
-
-        // Label
-        ctx.fillStyle = color;
-        ctx.font = '8px monospace';
-        const lbl = isBroken ? 'FVG [BROKEN]' : isBull ? (z.status === 'TOUCHED' ? 'FVG bull touched' : 'FVG bull') : 'FVG bear';
-        ctx.fillText(lbl, padLeft + 6, topY + Math.min(boxH / 2 + 3, 10));
       }
 
-      // 2. OB Overlays
+      // 2. OB Overlays (Thin band)
       if (z.type === 'OB' && overlays.ob) {
         const topY = getY(z.top);
         const botY = getY(z.bottom);
@@ -242,17 +235,9 @@ export const SarrafChartPro: React.FC<SarrafChartProProps> = React.memo(({
         ctx.strokeStyle = color + (isBroken ? '30' : '70');
         ctx.lineWidth = 1.2;
         ctx.strokeRect(padLeft, topY, chartW, boxH);
-
-        ctx.fillStyle = color;
-        ctx.font = '8.5px monospace';
-        ctx.fillText(
-          isBroken ? `OB [BROKEN] ${z.brokenReason || ''}` : `OB ${z.side} · BOS $${(z.bosLevel || z.mid).toFixed(1)}`,
-          padLeft + 6,
-          topY + 9
-        );
       }
 
-      // 3. Liquidity (BSL / SSL / PDH / PDL) Overlays
+      // 3. Liquidity (BSL / SSL / PDH / PDL) Overlays (Dashed line)
       if ((z.type === 'BSL' || z.type === 'SSL' || z.type === 'PDH' || z.type === 'PDL') && overlays.liq) {
         const y = getY(z.mid);
         if (y >= padTop && y <= padTop + chartH) {
@@ -266,14 +251,10 @@ export const SarrafChartPro: React.FC<SarrafChartProProps> = React.memo(({
           ctx.lineTo(padLeft + chartW, y);
           ctx.stroke();
           ctx.setLineDash([]);
-
-          ctx.fillStyle = isBroken ? '#8a96a8' : col;
-          ctx.font = '8px monospace';
-          ctx.fillText(`${z.label} $${z.mid.toFixed(1)}`, padLeft + chartW - 120, y - 3);
         }
       }
 
-      // 4. Absorption Overlays
+      // 4. Absorption Overlays (Solid line)
       if (z.type === 'ABSORPTION' && overlays.abs) {
         const y = getY(z.mid);
         if (y >= padTop && y <= padTop + chartH) {
@@ -283,13 +264,94 @@ export const SarrafChartPro: React.FC<SarrafChartProProps> = React.memo(({
           ctx.moveTo(padLeft, y);
           ctx.lineTo(padLeft + chartW, y);
           ctx.stroke();
-
-          ctx.fillStyle = z.side === 'BUY' ? GREEN : RED;
-          ctx.font = '8px monospace';
-          ctx.fillText(`${timeframe} ${z.side} p${z.rating}`, padLeft + 16, y - 3);
         }
       }
     }
+
+    // REQUIREMENT 4: Cap visible zone labels to the 4 nearest zones to current price.
+    // Draw labels at the right edge, stacked with minimum 14 px spacing so they never overlap.
+    interface LabeledZoneItem {
+      zone: SarrafZone;
+      dist: number;
+      targetY: number;
+      text: string;
+      color: string;
+    }
+
+    const candidateLabels: LabeledZoneItem[] = [];
+
+    for (const z of zones) {
+      const isBroken = z.status === 'BROKEN';
+      let text = '';
+      let color = isBroken ? '#8a96a8' : z.side === 'BUY' ? GREEN : RED;
+
+      if (z.type === 'FVG' && overlays.fvg) {
+        text = isBroken ? 'FVG [BRK]' : `${z.side === 'BUY' ? 'Bull' : 'Bear'} FVG $${z.mid.toFixed(1)}`;
+      } else if (z.type === 'OB' && overlays.ob) {
+        text = isBroken ? 'OB [BRK]' : `OB ${z.side} $${(z.bosLevel || z.mid).toFixed(1)}`;
+      } else if ((z.type === 'BSL' || z.type === 'SSL' || z.type === 'PDH' || z.type === 'PDL') && overlays.liq) {
+        color = z.type === 'PDH' || z.type === 'PDL' ? GOLD : z.type === 'BSL' ? RED : GREEN;
+        text = `${z.label} $${z.mid.toFixed(1)}`;
+      } else if (z.type === 'ABSORPTION' && overlays.abs) {
+        text = `${z.side} Abs $${z.mid.toFixed(1)}`;
+      }
+
+      if (text) {
+        const rawY = getY(z.mid);
+        if (rawY >= padTop - 10 && rawY <= padTop + chartH + 10) {
+          const dist = currentPrice > 0 ? Math.abs(z.mid - currentPrice) : Math.abs(rawY - (padTop + chartH / 2));
+          candidateLabels.push({
+            zone: z,
+            dist,
+            targetY: Math.max(padTop + 10, Math.min(padTop + chartH - 10, rawY)),
+            text,
+            color,
+          });
+        }
+      }
+    }
+
+    // Cap to 4 nearest zones to current price
+    candidateLabels.sort((a, b) => a.dist - b.dist);
+    const nearest4 = candidateLabels.slice(0, 4);
+
+    // Sort by Y coordinate so we can stack them cleanly
+    nearest4.sort((a, b) => a.targetY - b.targetY);
+
+    // Enforce minimum 14 px vertical spacing between stacked labels
+    for (let i = 1; i < nearest4.length; i++) {
+      if (nearest4[i].targetY < nearest4[i - 1].targetY + 14) {
+        nearest4[i].targetY = nearest4[i - 1].targetY + 14;
+      }
+    }
+    // Check bottom bounds and adjust if exceeding chart area
+    if (nearest4.length > 0 && nearest4[nearest4.length - 1].targetY > padTop + chartH - 6) {
+      const overflow = nearest4[nearest4.length - 1].targetY - (padTop + chartH - 6);
+      for (let i = nearest4.length - 1; i >= 0; i--) {
+        nearest4[i].targetY -= overflow;
+      }
+    }
+
+    // Draw the 4 nearest labels stacked at the right edge
+    ctx.textAlign = 'right';
+    ctx.font = '8px monospace';
+    for (const item of nearest4) {
+      const lx = padLeft + chartW - 4;
+      const ly = item.targetY;
+
+      // Subtle background badge for readability
+      const textW = ctx.measureText(item.text).width;
+      ctx.fillStyle = '#070b14dc';
+      ctx.fillRect(lx - textW - 5, ly - 9, textW + 6, 12);
+      ctx.strokeStyle = item.color + '50';
+      ctx.lineWidth = 0.8;
+      ctx.strokeRect(lx - textW - 5, ly - 9, textW + 6, 12);
+
+      // Label text
+      ctx.fillStyle = item.color;
+      ctx.fillText(item.text, lx - 2, ly);
+    }
+    ctx.textAlign = 'left';
 
     // DRAW CANDLESTICKS
     for (let i = 0; i < candleCount; i++) {

@@ -9,7 +9,7 @@ interface BuySellRatioPanelProps {
   freshness: string;
 }
 
-export const BuySellRatioPanel: React.FC<BuySellRatioPanelProps> = ({
+export const BuySellRatioPanel: React.FC<BuySellRatioPanelProps> = React.memo(({
   buyRatio,
   sellRatio,
   buyTicks60s,
@@ -82,4 +82,4 @@ export const BuySellRatioPanel: React.FC<BuySellRatioPanelProps> = ({
       )}
     </div>
   );
-};
+});

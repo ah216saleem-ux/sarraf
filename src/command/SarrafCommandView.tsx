@@ -20,7 +20,7 @@ import { SpreadVolumeHistPanel } from './components/SpreadVolumeHistPanel';
 import { LiquiditySummaryPanel } from './components/LiquiditySummaryPanel';
 import { FastForward, Shield, Sparkles } from 'lucide-react';
 
-export const SarrafCommandView: React.FC = () => {
+export const SarrafCommandView: React.FC = React.memo(() => {
   const feed = useCommandFeed();
 
   // Intro state: 2-second fade/slide intro, then staggered slide-in of cards in 40ms steps
@@ -56,17 +56,7 @@ export const SarrafCommandView: React.FC = () => {
 
   const isDimmed = feed.connection.status === 'RECONNECTING' || feed.connection.status === 'OFFLINE';
 
-  // 1-Second ticker so "updated Xs ago" counts up live every second (Requirement 8)
-  const [, setSecondTicker] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      setSecondTicker(Date.now());
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Real freshness computed timestamps
+  // Real freshness computed timestamps from feed
   const tickFreshness = formatFreshness(feed.lastTickTimestamp);
   const candleFreshness = formatFreshness(feed.lastCandleTimestamp);
   const derivedFreshness = formatFreshness(feed.lastDerivedTimestamp || feed.lastCandleTimestamp || feed.lastTickTimestamp);
@@ -429,4 +419,4 @@ export const SarrafCommandView: React.FC = () => {
       </div>
     </div>
   );
-};
+});

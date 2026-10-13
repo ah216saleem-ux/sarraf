@@ -14,7 +14,7 @@ interface TopAreaPlaceholdersProps {
   freshness: string;
 }
 
-export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
+export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = React.memo(({
   buyRatio,
   sellRatio,
   isDimmed,
@@ -42,6 +42,8 @@ export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
             currentPrice={feed.currentPrice}
             isFeedDimmed={isDimmed}
             isMarketClosed={feed.connection.status === 'MARKET_CLOSED' || !feed.connection.isLive}
+            upstream={feed.upstream}
+            candlesCount={feed.candles.length}
             watchingCandidate={feed.watchingCandidate}
             onManualClose={signalEngine.manualClose}
             onTriggerTest={signalEngine.triggerTestSignal}
@@ -80,4 +82,4 @@ export const TopAreaPlaceholders: React.FC<TopAreaPlaceholdersProps> = ({
       />
     </div>
   );
-};
+});

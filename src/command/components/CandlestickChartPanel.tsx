@@ -12,7 +12,7 @@ interface CandlestickChartPanelProps {
   freshness: string;
 }
 
-export const CandlestickChartPanel: React.FC<CandlestickChartPanelProps> = ({
+export const CandlestickChartPanel: React.FC<CandlestickChartPanelProps> = React.memo(({
   candles,
   timeframe,
   currentPrice,
@@ -322,4 +322,4 @@ export const CandlestickChartPanel: React.FC<CandlestickChartPanelProps> = ({
       </div>
     </div>
   );
-};
+});

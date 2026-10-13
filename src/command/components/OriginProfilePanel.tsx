@@ -9,7 +9,7 @@ interface OriginProfilePanelProps {
   freshness: string;
 }
 
-export const OriginProfilePanel: React.FC<OriginProfilePanelProps> = ({
+export const OriginProfilePanel: React.FC<OriginProfilePanelProps> = React.memo(({
   originLevels,
   originDisplacements,
   currentPrice,
@@ -128,5 +128,5 @@ export const OriginProfilePanel: React.FC<OriginProfilePanelProps> = ({
       )}
     </div>
   );
-};
+});
 

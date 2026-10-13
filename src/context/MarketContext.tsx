@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 
 export interface PriceTick {
   price: number;
@@ -344,23 +344,38 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
   }, []);
 
+  const contextValue = useMemo(
+    () => ({
+      priceData,
+      macroEvents: MACRO_EVENTS,
+      isLoggedIn,
+      user,
+      adminConfigured,
+      isLoginModalOpen,
+      isTunnelActive,
+      openLoginModal,
+      closeLoginModal,
+      login,
+      logout,
+      scrollToScene,
+    }),
+    [
+      priceData,
+      isLoggedIn,
+      user,
+      adminConfigured,
+      isLoginModalOpen,
+      isTunnelActive,
+      openLoginModal,
+      closeLoginModal,
+      login,
+      logout,
+      scrollToScene,
+    ]
+  );
+
   return (
-    <MarketContext.Provider
-      value={{
-        priceData,
-        macroEvents: MACRO_EVENTS,
-        isLoggedIn,
-        user,
-        adminConfigured,
-        isLoginModalOpen,
-        isTunnelActive,
-        openLoginModal,
-        closeLoginModal,
-        login,
-        logout,
-        scrollToScene,
-      }}
-    >
+    <MarketContext.Provider value={contextValue}>
       {children}
     </MarketContext.Provider>
   );
@@ -372,4 +387,9 @@ export const useMarket = () => {
     throw new Error('useMarket must be used within a MarketProvider');
   }
   return context;
+};
+
+export const useMarketAuth = () => {
+  const { isLoggedIn, user, login, logout, openLoginModal, closeLoginModal, isLoginModalOpen } = useMarket();
+  return { isLoggedIn, user, login, logout, openLoginModal, closeLoginModal, isLoginModalOpen };
 };

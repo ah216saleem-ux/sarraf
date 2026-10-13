@@ -321,22 +321,121 @@ let consecutiveFailures = 0;
 let backoffDelayMs = 1200;
 
 // SSE client tracking for SARRAF COMMAND live tick stream
-const commandSseClients = new Set<any>();
+interface CommandSseClient {
+  id: string;
+  ip: string;
+  res: any;
+  req: any;
+  connectedAt: number;
+  lastWriteAt: number;
+}
+
+const commandSseClients = new Map<string, CommandSseClient>();
+
+function removeSseClient(id: string, reason: string) {
+  const client = commandSseClients.get(id);
+  if (!client) return;
+  commandSseClients.delete(id);
+  try {
+    if (!client.res.writableEnded) {
+      client.res.end();
+    }
+  } catch {}
+  try {
+    const sock = client.req?.socket || client.res?.socket;
+    if (sock && !sock.destroyed) {
+      sock.destroy();
+    }
+  } catch {}
+  console.log(`[SSE DISCONNECT] Client ${id} disconnected (${reason}). Live clients: ${commandSseClients.size}`);
+}
+
+function safeWriteToSseClient(client: CommandSseClient, chunk: string): boolean {
+  try {
+    const sock = client.req?.socket || client.res?.socket;
+    if (
+      !client.res ||
+      client.res.destroyed ||
+      client.res.writableEnded ||
+      !client.res.writable ||
+      (sock && (sock.destroyed || !sock.writable))
+    ) {
+      removeSseClient(client.id, 'socket_destroyed_or_unwritable');
+      return false;
+    }
+    const ok = client.res.write(chunk);
+    if (typeof client.res.flush === 'function') {
+      client.res.flush();
+    }
+    if (!ok && sock && sock.destroyed) {
+      removeSseClient(client.id, 'write_failed_destroyed');
+      return false;
+    }
+    client.lastWriteAt = Date.now();
+    return ok;
+  } catch (err: any) {
+    removeSseClient(client.id, `write_error_${err?.message || 'unknown'}`);
+    return false;
+  }
+}
 
 function broadcastCommandTick(tick: any) {
   if (commandSseClients.size === 0 || !tick) return;
   const payload = `data: ${JSON.stringify(tick)}\n\n`;
-  for (const client of commandSseClients) {
-    try {
-      client.write(payload);
-      if (typeof client.flush === 'function') {
-        client.flush();
-      }
-    } catch {
-      commandSseClients.delete(client);
-    }
+  for (const client of Array.from(commandSseClients.values())) {
+    safeWriteToSseClient(client, payload);
   }
 }
+
+// ONE shared heartbeat timer for all clients (every 3s)
+setInterval(() => {
+  if (commandSseClients.size === 0) return;
+  const hbNow = Date.now();
+  const hbTickAge = lastUpstreamTickAt > 0 ? hbNow - lastUpstreamTickAt : 0;
+  const hbSchedule = getMarketSchedule();
+  const hbUpstream = getUpstreamStatusInfo();
+  const hbData = JSON.stringify({
+    ts: hbNow,
+    lastTickAgeMs: hbTickAge,
+    upstream: hbUpstream.upstream,
+    reasonCategory: hbUpstream.lastReasonCategory,
+    downSeconds: hbUpstream.downSeconds,
+    retryingInSeconds: hbUpstream.retryingInSeconds,
+    upstreamStatusText: hbUpstream.statusMessage,
+    marketOpen: hbSchedule.isOpen,
+  });
+  const hbChunk = `event: hb\ndata: ${hbData}\n\n`;
+  for (const client of Array.from(commandSseClients.values())) {
+    safeWriteToSseClient(client, hbChunk);
+  }
+}, 3000);
+
+// ONE shared comment line ": ping" timer for all clients (every 10s to keep Railway/Cloudflare edge proxy alive)
+setInterval(() => {
+  if (commandSseClients.size === 0) return;
+  const pingChunk = ': ping\n\n';
+  for (const client of Array.from(commandSseClients.values())) {
+    safeWriteToSseClient(client, pingChunk);
+  }
+}, 10000);
+
+// Periodic sweep every 30s that removes dead sockets (exact live count enforcement)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, client] of commandSseClients.entries()) {
+    const sock = client.req?.socket || client.res?.socket;
+    const isDead =
+      !client.res ||
+      client.res.destroyed ||
+      client.res.writableEnded ||
+      !client.res.writable ||
+      (sock && (sock.destroyed || !sock.writable)) ||
+      (now - client.lastWriteAt > 35000);
+    if (isDead) {
+      removeSseClient(id, 'sweep_dead_socket');
+    }
+  }
+}, 30000);
 
 // Track upstream feed health & watchdog
 let lastUpstreamTickAt = 0;
@@ -737,6 +836,25 @@ app.get('/api/command/snapshot', (_req, res) => {
 
 // GET /api/command/feed-stream - Real-time SSE streaming ticks for SARRAF COMMAND
 app.get('/api/command/feed-stream', (req, res) => {
+  const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
+
+  // Hard cap at 50 clients per IP. When over the cap, close the oldest connection of that IP.
+  const ipClients: CommandSseClient[] = [];
+  for (const client of commandSseClients.values()) {
+    if (client.ip === clientIp) {
+      ipClients.push(client);
+    }
+  }
+  if (ipClients.length >= 50) {
+    ipClients.sort((a, b) => a.connectedAt - b.connectedAt);
+    const toClose = ipClients.slice(0, ipClients.length - 49);
+    for (const oldClient of toClose) {
+      removeSseClient(oldClient.id, 'ip_cap_exceeded');
+    }
+  }
+
+  const clientId = `client_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+
   // Prevent any compression middleware or reverse proxies from buffering or dropping SSE
   (res as any)._noCompression = true;
   req.socket?.setKeepAlive(true);
@@ -755,6 +873,7 @@ app.get('/api/command/feed-stream', (req, res) => {
   // Instruction: Send retry: 2000
   res.write('retry: 2000\n\n');
 
+  // Send an initial full snapshot immediately on connect
   const schedule = getMarketSchedule();
   const now = Date.now();
   const lastTickAgeMs = lastUpstreamTickAt > 0 ? now - lastUpstreamTickAt : 0;
@@ -777,59 +896,30 @@ app.get('/api/command/feed-stream', (req, res) => {
     (res as any).flush();
   }
 
-  commandSseClients.add(res);
-
-  // Heartbeat every 3s: event "hb" with {ts, lastTickAgeMs, upstream, reasonCategory, downSeconds, retryingInSeconds, upstreamStatusText, marketOpen}
-  const hbInterval = setInterval(() => {
-    try {
-      const hbNow = Date.now();
-      const hbTickAge = lastUpstreamTickAt > 0 ? hbNow - lastUpstreamTickAt : 0;
-      const hbSchedule = getMarketSchedule();
-      const hbUpstream = getUpstreamStatusInfo();
-      const hbData = JSON.stringify({
-        ts: hbNow,
-        lastTickAgeMs: hbTickAge,
-        upstream: hbUpstream.upstream,
-        reasonCategory: hbUpstream.lastReasonCategory,
-        downSeconds: hbUpstream.downSeconds,
-        retryingInSeconds: hbUpstream.retryingInSeconds,
-        upstreamStatusText: hbUpstream.statusMessage,
-        marketOpen: hbSchedule.isOpen,
-      });
-      res.write(`event: hb\ndata: ${hbData}\n\n`);
-      if (typeof (res as any).flush === 'function') {
-        (res as any).flush();
-      }
-    } catch {
-      cleanup();
-    }
-  }, 3000);
-
-  // Comment line ": ping" every 10s to keep Railway/Cloudflare edge proxies warm and alive
-  const pingInterval = setInterval(() => {
-    try {
-      res.write(': ping\n\n');
-      if (typeof (res as any).flush === 'function') {
-        (res as any).flush();
-      }
-    } catch {
-      cleanup();
-    }
-  }, 10000);
+  const clientRecord: CommandSseClient = {
+    id: clientId,
+    ip: clientIp,
+    res,
+    req,
+    connectedAt: now,
+    lastWriteAt: now,
+  };
+  commandSseClients.set(clientId, clientRecord);
+  console.log(`[SSE CONNECT] Client ${clientId} connected from ${clientIp}. Live count: ${commandSseClients.size}`);
 
   let isCleanedUp = false;
-  const cleanup = () => {
+  const cleanup = (reason: string) => {
     if (isCleanedUp) return;
     isCleanedUp = true;
-    clearInterval(hbInterval);
-    clearInterval(pingInterval);
-    commandSseClients.delete(res);
+    removeSseClient(clientId, reason);
   };
 
-  req.on('close', cleanup);
-  req.on('error', cleanup);
-  res.on('close', cleanup);
-  res.on('error', cleanup);
+  req.on('close', () => cleanup('req_close'));
+  req.on('aborted', () => cleanup('req_aborted'));
+  res.on('close', () => cleanup('res_close'));
+  res.on('error', () => cleanup('res_error'));
+  req.socket?.on('close', () => cleanup('socket_close'));
+  req.socket?.on('error', () => cleanup('socket_error'));
 });
 
 // -------------------------------------------------------------

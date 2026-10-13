@@ -10,7 +10,7 @@ interface CommandHeaderProps {
   currentPrice?: number;
 }
 
-export const CommandHeader: React.FC<CommandHeaderProps> = ({
+export const CommandHeader: React.FC<CommandHeaderProps> = React.memo(({
   connection,
   selectedTimeframe,
   onTimeframeChange,
@@ -206,4 +206,4 @@ export const CommandHeader: React.FC<CommandHeaderProps> = ({
       </div>
     </header>
   );
-};
+});

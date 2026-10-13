@@ -145,13 +145,17 @@ class CommandFeedStore {
   public isConnected: boolean = false;
   public sseFailuresCount: number = 0;
   public isPollingFallback: boolean = false;
+  public lastDisconnectReason: string = '';
   private reconnectBackoffIdx: number = 0;
-  private readonly CLIENT_BACKOFF_STEPS = [500, 1000, 2000, 4000, 8000];
+  private readonly CLIENT_BACKOFF_STEPS = [1000, 2000, 4000, 8000, 15000];
   private watchdogTimerId: any = null;
   private reconnectTimerId: any = null;
   private fallbackPollTimerId: any = null;
   private statusTickerId: any = null;
   private resumeHandlersRegistered: boolean = false;
+  private pendingBadgeStatus: 'LIVE' | 'STALE' | 'RECONNECTING' | 'MARKET_CLOSED' | 'OFFLINE' | null = null;
+  private pendingBadgeSince: number = 0;
+  private isReconnecting: boolean = false;
 
   // Background SSE references
   private sseSource: EventSource | null = null;
@@ -520,33 +524,40 @@ class CommandFeedStore {
     }
   }
 
-  // Register resilient listeners: reconnect immediately (if last message older than 5 s) on:
+  // Register resilient listeners: reconnect immediately (if last message older than 20 s) on:
   // window "online", document "visibilitychange" (visible), "pageshow", "focus"
   private registerResumeHandlers() {
     if (typeof window === 'undefined' || this.resumeHandlersRegistered) return;
     this.resumeHandlersRegistered = true;
     const handleResume = () => {
       const now = Date.now();
-      if (this.lastMsgAt === 0 || now - this.lastMsgAt > 5000) {
-        this.reconnect('resume_event');
+      if (this.lastMsgAt === 0 || now - this.lastMsgAt > 20000) {
+        this.reconnect('resume_event_stale');
       }
     };
     window.addEventListener('online', handleResume);
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') handleResume();
+      if (document.visibilityState === 'hidden') {
+        console.log('[SSE DISCONNECT] tab hidden');
+        this.lastDisconnectReason = 'tab hidden';
+      } else if (document.visibilityState === 'visible') {
+        handleResume();
+      }
     });
     window.addEventListener('pageshow', handleResume);
     window.addEventListener('focus', handleResume);
   }
 
-  // Watchdog every 2 s: if now - lastMsgAt > 25 s (cellular/proxy buffer allowance), close EventSource and reconnect immediately.
-  // Reconnect with backoff 0.5s, 1s, 2s, 4s, 8s (cap 8s), unlimited retries, never give up, never require a page reload.
+  // Watchdog every 2 s: reset on ANY message (tick, heartbeat, snapshot), threshold 20 s (not less),
+  // and must NOT reconnect if data arrived in the last 20 s.
   private startWatchdog() {
     if (this.watchdogTimerId) clearInterval(this.watchdogTimerId);
     this.watchdogTimerId = setInterval(() => {
       const now = Date.now();
-      if (this.isSubscribed && this.lastMsgAt > 0 && now - this.lastMsgAt > 25000) {
-        this.reconnect('watchdog_timeout');
+      if (this.isSubscribed && this.lastMsgAt > 0 && now - this.lastMsgAt > 20000 && !this.isReconnecting) {
+        console.log('[SSE DISCONNECT] watchdog timeout 20s');
+        this.lastDisconnectReason = 'watchdog 20s';
+        this.reconnect('watchdog 20s');
       }
       this.updateConnectionStatus();
     }, 2000);
@@ -559,31 +570,53 @@ class CommandFeedStore {
     }, 1000);
   }
 
-  // Reconnect immediately and fetch snapshot so no gap is left in ticks/candles/zones
-  public async reconnect(reason?: string) {
-    this.reconnectCount++;
-    if (this.reconnectTimerId) {
-      clearTimeout(this.reconnectTimerId);
-      this.reconnectTimerId = null;
-    }
+  // Safely close the existing EventSource ensuring only one EventSource exists at a time
+  private closeSse() {
     if (this.sseSource) {
       try {
+        this.sseSource.onopen = null;
+        this.sseSource.onmessage = null;
+        this.sseSource.onerror = null;
         this.sseSource.close();
       } catch {}
       this.sseSource = null;
     }
-    this.isConnected = false;
-    this.updateConnectionStatus();
+  }
 
-    // After every reconnect call /api/command/snapshot and merge it so no gap is left in ticks/candles/zones
-    await this.fetchSnapshotAndMerge();
+  // Reconnect immediately and fetch snapshot so no gap is left in ticks/candles/zones
+  public async reconnect(reason?: string) {
+    if (this.isReconnecting) return;
+    this.isReconnecting = true;
+    this.reconnectCount++;
 
-    this.connectSse();
+    if (reason) {
+      this.lastDisconnectReason = reason;
+      console.log(`[SSE DISCONNECT] ${reason}`);
+    }
+
+    if (this.reconnectTimerId) {
+      clearTimeout(this.reconnectTimerId);
+      this.reconnectTimerId = null;
+    }
+    this.closeSse();
+
+    try {
+      // Bridge any gap with snapshot
+      await this.fetchSnapshotAndMerge();
+      this.connectSse();
+    } finally {
+      this.isReconnecting = false;
+      this.updateConnectionStatus();
+    }
   }
 
   private scheduleReconnect(delayMs: number) {
-    if (this.reconnectTimerId) clearTimeout(this.reconnectTimerId);
+    if (this.reconnectTimerId) {
+      clearTimeout(this.reconnectTimerId);
+      this.reconnectTimerId = null;
+    }
     this.reconnectTimerId = setTimeout(() => {
+      this.reconnectTimerId = null;
       this.reconnect('backoff');
     }, delayMs);
   }
@@ -650,32 +683,28 @@ class CommandFeedStore {
   private connectSse() {
     if (typeof window === 'undefined') return;
     try {
-      if (this.sseSource) {
-        try {
-          this.sseSource.close();
-        } catch {}
-        this.sseSource = null;
-      }
+      this.closeSse();
 
       this.sseSource = new EventSource('/api/command/feed-stream');
 
       this.sseSource.onopen = () => {
         this.isConnected = true;
+        this.lastMsgAt = Date.now();
         this.sseFailuresCount = 0;
         this.reconnectBackoffIdx = 0;
         this.stopPollingFallback();
-        this.lastMsgAt = Date.now();
         this.updateConnectionStatus();
       };
 
       this.sseSource.onmessage = (event) => {
         try {
           this.lastMsgAt = Date.now();
-          const raw = JSON.parse(event.data);
-          this.processIncomingFeedQuote(raw);
           this.isConnected = true;
+          this.reconnectBackoffIdx = 0;
           this.sseFailuresCount = 0;
           this.stopPollingFallback();
+          const raw = JSON.parse(event.data);
+          this.processIncomingFeedQuote(raw);
           this.updateConnectionStatus();
         } catch {}
       };
@@ -683,6 +712,10 @@ class CommandFeedStore {
       this.sseSource.addEventListener('hb', (event: any) => {
         try {
           this.lastMsgAt = Date.now();
+          this.isConnected = true;
+          this.reconnectBackoffIdx = 0;
+          this.sseFailuresCount = 0;
+          this.stopPollingFallback();
           const hb = JSON.parse(event.data);
           if (typeof hb.marketOpen === 'boolean') {
             this.marketOpen = hb.marketOpen;
@@ -704,9 +737,6 @@ class CommandFeedStore {
           if (typeof hb.downSeconds === 'number') this.upstreamDownSeconds = hb.downSeconds;
           if (typeof hb.retryingInSeconds === 'number') this.upstreamRetryingInSeconds = hb.retryingInSeconds;
 
-          this.isConnected = true;
-          this.sseFailuresCount = 0;
-          this.stopPollingFallback();
           this.updateConnectionStatus();
         } catch {}
       });
@@ -715,17 +745,12 @@ class CommandFeedStore {
         this.isConnected = false;
         this.sseFailuresCount++;
 
-        // If SSE fails 3 times in a row, fall back to polling /api/command/snapshot every 2 s until SSE works again
+        // If SSE fails 3 times in a row, switch to polling /api/command/snapshot every 2 s and keep trying SSE in background
         if (this.sseFailuresCount >= 3) {
           this.startPollingFallback();
         }
 
-        try {
-          if (this.sseSource) {
-            this.sseSource.close();
-            this.sseSource = null;
-          }
-        } catch {}
+        this.closeSse();
 
         const backoff = this.CLIENT_BACKOFF_STEPS[Math.min(this.reconnectBackoffIdx, this.CLIENT_BACKOFF_STEPS.length - 1)];
         this.reconnectBackoffIdx++;
@@ -738,45 +763,71 @@ class CommandFeedStore {
   }
 
   // Update honest connection state & badge:
-  // LIVE only if market open and now - lastTickAt < 6 s.
-  // If connected but lastTickAt is 6-30 s old show amber "STALE 12s".
-  // Show red OFFLINE/RECONNECTING only when there is no connection and data is old.
-  // Market closed shows CLOSED/REPLAY.
+  // LIVE only when a message arrived in the last 10 s.
+  // RECONNECTING only while a reconnect is actually in progress.
+  // No flicker (require 3 s of stable state before changing the badge).
+  // If polling fallback works, UI shows LIVE (POLLING), not RECONNECTING.
   public updateConnectionStatus() {
     const now = Date.now();
     const tickAgeSec = this.lastTickAt > 0 ? Math.max(0, Math.floor((now - this.lastTickAt) / 1000)) : 999;
     const msgAgeSec = this.lastMsgAt > 0 ? Math.max(0, Math.floor((now - this.lastMsgAt) / 1000)) : 999;
 
-    let status: 'LIVE' | 'STALE' | 'RECONNECTING' | 'MARKET_CLOSED' | 'OFFLINE';
-    let badgeText = 'LIVE';
-
-    const hasRecentData = msgAgeSec <= 15 || tickAgeSec <= 15;
+    let targetStatus: 'LIVE' | 'STALE' | 'RECONNECTING' | 'MARKET_CLOSED' | 'OFFLINE';
+    let targetBadgeText = 'LIVE';
 
     if (!this.marketOpen) {
-      status = 'MARKET_CLOSED';
-      badgeText = 'CLOSED';
-    } else if (!this.isConnected && !this.isPollingFallback && !hasRecentData) {
-      status = 'RECONNECTING';
-      badgeText = 'RECONNECTING';
-    } else if (msgAgeSec > 25) {
-      status = 'RECONNECTING';
-      badgeText = 'RECONNECTING';
-    } else if (tickAgeSec < 6) {
-      status = 'LIVE';
-      badgeText = 'LIVE';
+      targetStatus = 'MARKET_CLOSED';
+      targetBadgeText = 'CLOSED';
+    } else if (this.isPollingFallback && msgAgeSec <= 10) {
+      // While polling works, the UI must show LIVE (POLLING), not RECONNECTING
+      targetStatus = 'LIVE';
+      targetBadgeText = 'LIVE (POLLING)';
+    } else if (msgAgeSec <= 10) {
+      targetStatus = 'LIVE';
+      targetBadgeText = 'LIVE';
+    } else if (this.isReconnecting) {
+      // RECONNECTING only while a reconnect is actually in progress
+      targetStatus = 'RECONNECTING';
+      targetBadgeText = 'RECONNECTING';
+    } else if (msgAgeSec <= 20) {
+      targetStatus = 'STALE';
+      targetBadgeText = `STALE ${tickAgeSec < 999 ? tickAgeSec : msgAgeSec}s`;
     } else {
-      status = 'STALE';
-      badgeText = `STALE ${tickAgeSec}s`;
+      targetStatus = this.isReconnecting ? 'RECONNECTING' : 'OFFLINE';
+      targetBadgeText = this.isReconnecting ? 'RECONNECTING' : 'OFFLINE';
+    }
+
+    let finalStatus: 'LIVE' | 'STALE' | 'RECONNECTING' | 'MARKET_CLOSED' | 'OFFLINE';
+    let finalBadgeText: string;
+
+    // No flicker: require 3 s of stable degraded state before changing badge to RECONNECTING or STALE
+    if (targetStatus === 'LIVE' || targetStatus === 'MARKET_CLOSED') {
+      this.pendingBadgeStatus = null;
+      this.pendingBadgeSince = 0;
+      finalStatus = targetStatus;
+      finalBadgeText = targetBadgeText;
+    } else {
+      if (this.pendingBadgeStatus !== targetStatus) {
+        this.pendingBadgeStatus = targetStatus;
+        this.pendingBadgeSince = now;
+        finalStatus = this.connection.status;
+        finalBadgeText = this.connection.badgeText;
+      } else if (now - this.pendingBadgeSince >= 3000) {
+        finalStatus = targetStatus;
+        finalBadgeText = targetBadgeText;
+      } else {
+        finalStatus = this.connection.status;
+        finalBadgeText = this.connection.badgeText;
+      }
     }
 
     const prevStatus = this.connection.status;
     const prevText = this.connection.badgeText;
-    const prevAge = this.connection.lastTickAgeSeconds;
 
     this.connection = {
-      status,
-      badgeText,
-      isLive: status === 'LIVE',
+      status: finalStatus,
+      badgeText: finalBadgeText,
+      isLive: finalStatus === 'LIVE',
       lastTickTime: this.lastTickAt,
       lastTickAgeSeconds: tickAgeSec,
       quoteAgeSeconds: tickAgeSec,
@@ -788,7 +839,7 @@ class CommandFeedStore {
       retryingInSeconds: this.upstreamRetryingInSeconds,
     };
 
-    if (prevStatus !== status || prevText !== badgeText || prevAge !== tickAgeSec) {
+    if (prevStatus !== finalStatus || prevText !== finalBadgeText) {
       this.notify();
     }
   }

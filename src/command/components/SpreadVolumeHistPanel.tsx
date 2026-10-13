@@ -8,7 +8,7 @@ interface SpreadVolumeHistPanelProps {
   freshness: string;
 }
 
-export const SpreadVolumeHistPanel: React.FC<SpreadVolumeHistPanelProps> = ({
+export const SpreadVolumeHistPanel: React.FC<SpreadVolumeHistPanelProps> = React.memo(({
   spread,
   spreadHistory,
   volumeHistory,
@@ -123,4 +123,4 @@ export const SpreadVolumeHistPanel: React.FC<SpreadVolumeHistPanelProps> = ({
       </div>
     </div>
   );
-};
+});

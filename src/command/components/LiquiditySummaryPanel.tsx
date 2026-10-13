@@ -10,7 +10,7 @@ interface LiquiditySummaryPanelProps {
   freshness: string;
 }
 
-export const LiquiditySummaryPanel: React.FC<LiquiditySummaryPanelProps> = ({
+export const LiquiditySummaryPanel: React.FC<LiquiditySummaryPanelProps> = React.memo(({
   liquidityGrade,
   nearestZone,
   spread,
@@ -79,4 +79,4 @@ export const LiquiditySummaryPanel: React.FC<LiquiditySummaryPanelProps> = ({
       </div>
     </div>
   );
-};
+});

@@ -15,7 +15,7 @@ import {
   Globe,
   RotateCcw,
 } from 'lucide-react';
-import { useMarket } from '../context/MarketContext';
+import { useMarketAuth } from '../context/MarketContext';
 import { NewsFlow, NFEvent } from './newsflow/NewsFlow';
 
 interface BriefData {
@@ -219,8 +219,8 @@ function formatDayTimeShort(timeUtc: string): string {
   return `${day} ${time}`;
 }
 
-export const NewsTab: React.FC<NewsTabProps> = () => {
-  const { isLoggedIn, user } = useMarket();
+export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
+  const { isLoggedIn, user } = useMarketAuth();
   const isAdmin = Boolean(isLoggedIn && (user?.accountType === 'ADMIN' || !user?.accountType));
 
   const [feedStatus, setFeedStatus] = useState<any>(null);
@@ -1654,4 +1654,4 @@ export const NewsTab: React.FC<NewsTabProps> = () => {
       </div>
     </div>
   );
-};
+});

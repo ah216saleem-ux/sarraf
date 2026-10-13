@@ -9,7 +9,7 @@ interface AbsorptionPanelProps {
   freshness: string;
 }
 
-export const AbsorptionPanel: React.FC<AbsorptionPanelProps> = ({
+export const AbsorptionPanel: React.FC<AbsorptionPanelProps> = React.memo(({
   buyZones,
   sellZones,
   currentPrice,
@@ -136,4 +136,4 @@ export const AbsorptionPanel: React.FC<AbsorptionPanelProps> = ({
       )}
     </div>
   );
-};
+});

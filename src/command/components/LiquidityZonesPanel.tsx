@@ -9,7 +9,7 @@ interface LiquidityZonesPanelProps {
   freshness: string;
 }
 
-export const LiquidityZonesPanel: React.FC<LiquidityZonesPanelProps> = ({
+export const LiquidityZonesPanel: React.FC<LiquidityZonesPanelProps> = React.memo(({
   liquidityZones = [],
   sarrafZones = [],
   currentPrice,
@@ -145,4 +145,4 @@ export const LiquidityZonesPanel: React.FC<LiquidityZonesPanelProps> = ({
       )}
     </div>
   );
-};
+});

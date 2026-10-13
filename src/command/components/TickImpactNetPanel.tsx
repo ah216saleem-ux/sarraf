@@ -9,7 +9,7 @@ interface TickImpactNetPanelProps {
   freshness: string;
 }
 
-export const TickImpactNetPanel: React.FC<TickImpactNetPanelProps> = ({
+export const TickImpactNetPanel: React.FC<TickImpactNetPanelProps> = React.memo(({
   minuteFlows,
   buyTicks60s,
   sellTicks60s,
@@ -122,4 +122,4 @@ export const TickImpactNetPanel: React.FC<TickImpactNetPanelProps> = ({
       </div>
     </div>
   );
-};
+});

@@ -9,18 +9,22 @@ interface AhmedDecisionCardProps {
   currentPrice: number;
   isFeedDimmed: boolean;
   isMarketClosed?: boolean;
+  upstream?: 'up' | 'down';
+  candlesCount?: number;
   watchingCandidate?: WhereCandidate | null;
   onManualClose: () => Promise<void>;
   onTriggerTest?: () => Promise<void>;
   isLoading: boolean;
 }
 
-export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
+export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = React.memo(({
   state,
   livePnL,
   currentPrice,
   isFeedDimmed,
   isMarketClosed = false,
+  upstream = 'up',
+  candlesCount = 60,
   watchingCandidate = null,
   onManualClose,
   isLoading,
@@ -63,28 +67,37 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
   const effectivePnL = activeSignal ? livePnL : 0;
   const pnlColor = effectivePnL >= 0 ? 'text-[#22e08a]' : 'text-[#ff3b6b]';
 
-  // Compute Blocking Reason in plain words
-  let blockingReason = waitReason || 'Awaiting institutional gate convergence';
-  const missingGate = gates.find((g) => g.status === 'FAIL' || g.status === 'LOCKED');
+  // REQUIREMENT 3: Decision/blocking reasons must be recomputed from current feed state on every update.
+  // When upstream is up and candles are loaded, clear "History loading (upstream down)".
+  // Show it only while upstream is truly down or history is truly empty.
+  const isUpstreamTrulyDown = upstream === 'down';
+  const isHistoryTrulyEmpty = typeof candlesCount === 'number' ? candlesCount === 0 : false;
+  const isActuallyDownOrEmpty = isUpstreamTrulyDown || isHistoryTrulyEmpty;
 
-  if (pathClearR > 0 && pathClearR < 10 && gates.filter((g) => g.status === 'PASS').length >= 6) {
+  const missingGate = gates.find((g) => g.status === 'FAIL' || g.status === 'LOCKED');
+  let blockingReason = waitReason || 'Awaiting institutional gate convergence';
+
+  if (isActuallyDownOrEmpty) {
+    blockingReason = 'History loading (upstream down)';
+  } else if (pathClearR > 0 && pathClearR < 10 && gates.filter((g) => g.status === 'PASS').length >= 6) {
     const opposingPrice = activeSignal?.side === 'BUY' ? currentPrice + pathClearR : currentPrice - pathClearR;
     blockingReason = `only ${(pathClearR / 10).toFixed(2)}R clear to the opposing zone ${opposingPrice.toFixed(2)}`;
   } else if (missingGate) {
-    if ((isMarketClosed || isFeedDimmed) && (missingGate.id === 'g1' || missingGate.name.includes('W1/D1') || missingGate.reason.includes('History loading'))) {
-      blockingReason = 'History loading (upstream down)';
-    } else {
-      blockingReason = `${missingGate.name} missing: ${missingGate.reason}`;
-    }
+    blockingReason = `${missingGate.name} missing: ${missingGate.reason}`;
   }
 
-  if (blockingReason.includes('W1/D1 Context missing') && (isMarketClosed || isFeedDimmed)) {
-    blockingReason = 'History loading (upstream down)';
+  // Clear stale "History loading (upstream down)" if upstream is UP and candles are loaded
+  if (!isActuallyDownOrEmpty && blockingReason.includes('History loading')) {
+    blockingReason = missingGate
+      ? `${missingGate.name} missing: ${missingGate.reason}`
+      : 'Monitoring institutional order flow';
   }
 
   // Compute WATCHING line from real candidate and real missing gate
   let watchingLine = '';
-  if (watchingCandidate) {
+  if (isActuallyDownOrEmpty) {
+    watchingLine = 'History loading (upstream down) - awaiting live stream reconnect';
+  } else if (watchingCandidate) {
     const gateLabel = missingGate ? missingGate.shortName || missingGate.name : 'M15 close';
     const targetPrice =
       watchingCandidate.side === 'SELL'
@@ -93,11 +106,7 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
     const action = watchingCandidate.side === 'SELL' ? 'close below' : 'close above';
     watchingLine = `${watchingCandidate.side} zone ${watchingCandidate.mid.toFixed(1)} - needs ${gateLabel} ${action} ${targetPrice}`;
   } else if (missingGate) {
-    if ((isMarketClosed || isFeedDimmed) && (missingGate.id === 'g1' || missingGate.name.includes('W1/D1'))) {
-      watchingLine = 'History loading (upstream down) - awaiting live stream reconnect';
-    } else {
-      watchingLine = `Monitoring liquidity - awaiting ${missingGate.name} (${missingGate.timeframe}) confirmation`;
-    }
+    watchingLine = `Monitoring liquidity - awaiting ${missingGate.name} (${missingGate.timeframe}) confirmation`;
   } else {
     watchingLine = `Monitoring liquidity structures across M15 & H1`;
   }
@@ -270,4 +279,4 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = ({
       )}
     </div>
   );
-};
+});

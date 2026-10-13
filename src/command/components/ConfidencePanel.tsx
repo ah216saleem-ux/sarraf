@@ -8,7 +8,7 @@ interface ConfidencePanelProps {
   freshness: string;
 }
 
-export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
+export const ConfidencePanel: React.FC<ConfidencePanelProps> = React.memo(({
   confidence,
   signalConfidence,
   isDimmed,
@@ -112,4 +112,4 @@ export const ConfidencePanel: React.FC<ConfidencePanelProps> = ({
       )}
     </div>
   );
-};
+});

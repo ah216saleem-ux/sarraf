@@ -16,7 +16,7 @@ interface PriceMarketPanelProps {
   freshness: string;
 }
 
-export const PriceMarketPanel: React.FC<PriceMarketPanelProps> = ({
+export const PriceMarketPanel: React.FC<PriceMarketPanelProps> = React.memo(({
   currentPrice,
   previousPrice: _previousPrice,
   bid,
@@ -172,4 +172,4 @@ export const PriceMarketPanel: React.FC<PriceMarketPanelProps> = ({
       )}
     </div>
   );
-};
+});

@@ -11,7 +11,7 @@ interface TickTapePanelProps {
   freshness: string;
 }
 
-export const TickTapePanel: React.FC<TickTapePanelProps> = ({
+export const TickTapePanel: React.FC<TickTapePanelProps> = React.memo(({
   tickTape,
   buyTicks60s,
   sellTicks60s,
@@ -126,4 +126,4 @@ export const TickTapePanel: React.FC<TickTapePanelProps> = ({
       </div>
     </div>
   );
-};
+});

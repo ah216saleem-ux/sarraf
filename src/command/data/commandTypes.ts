@@ -103,6 +103,7 @@ export interface FeedConnectionState {
   reasonCategory?: string;
   downSeconds?: number;
   retryingInSeconds?: number;
+  lastDisconnectReason?: string;
 }
 
 export type ZoneType =

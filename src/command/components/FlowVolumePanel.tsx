@@ -11,7 +11,7 @@ interface FlowVolumePanelProps {
   freshness: string;
 }
 
-export const FlowVolumePanel: React.FC<FlowVolumePanelProps> = ({
+export const FlowVolumePanel: React.FC<FlowVolumePanelProps> = React.memo(({
   buyTicks60s,
   sellTicks60s,
   flatTicks60s,
@@ -121,4 +121,4 @@ export const FlowVolumePanel: React.FC<FlowVolumePanelProps> = ({
       )}
     </div>
   );
-};
+});

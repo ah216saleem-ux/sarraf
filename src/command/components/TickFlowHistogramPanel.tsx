@@ -7,7 +7,7 @@ interface TickFlowHistogramPanelProps {
   freshness: string;
 }
 
-export const TickFlowHistogramPanel: React.FC<TickFlowHistogramPanelProps> = ({
+export const TickFlowHistogramPanel: React.FC<TickFlowHistogramPanelProps> = React.memo(({
   minuteFlows,
   isDimmed,
   freshness,
@@ -91,4 +91,4 @@ export const TickFlowHistogramPanel: React.FC<TickFlowHistogramPanelProps> = ({
       )}
     </div>
   );
-};
+});

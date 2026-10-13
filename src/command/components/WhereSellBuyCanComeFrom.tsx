@@ -9,7 +9,7 @@ interface WhereSellBuyCanComeFromProps {
   timeframe: string;
 }
 
-export const WhereSellBuyCanComeFrom: React.FC<WhereSellBuyCanComeFromProps> = ({
+export const WhereSellBuyCanComeFrom: React.FC<WhereSellBuyCanComeFromProps> = React.memo(({
   candidates,
   watchingCandidate,
   currentPrice,
@@ -140,4 +140,4 @@ export const WhereSellBuyCanComeFrom: React.FC<WhereSellBuyCanComeFromProps> = (
       )}
     </div>
   );
-};
+});

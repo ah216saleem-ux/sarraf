@@ -7,7 +7,7 @@ interface MarketRegimePanelProps {
   freshness: string;
 }
 
-export const MarketRegimePanel: React.FC<MarketRegimePanelProps> = ({
+export const MarketRegimePanel: React.FC<MarketRegimePanelProps> = React.memo(({
   regime,
   isDimmed,
   freshness,
@@ -99,4 +99,4 @@ export const MarketRegimePanel: React.FC<MarketRegimePanelProps> = ({
       </div>
     </div>
   );
-};
+});
