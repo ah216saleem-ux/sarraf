@@ -310,9 +310,19 @@ export class NeuralCoreEngine {
   private startLoop() {
     if (this.running || this.destroyed) return;
     this.running = true;
+    let lastRenderTime = 0;
+    const FRAME_INTERVAL = 1000 / 30; // 30 FPS cap saves CPU/GPU while remaining silky smooth
+
     const loop = (ts: number) => {
       if (!this.running) return;
-      this.draw(ts);
+      if (typeof document !== 'undefined' && document.hidden) {
+        this.raf = requestAnimationFrame(loop);
+        return;
+      }
+      if (ts - lastRenderTime >= FRAME_INTERVAL) {
+        lastRenderTime = ts;
+        this.draw(ts);
+      }
       this.raf = requestAnimationFrame(loop);
     };
     this.raf = requestAnimationFrame(loop);

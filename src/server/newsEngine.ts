@@ -278,21 +278,28 @@ export function saveManualActuals() {
   }
 }
 
+let archiveCache: NewsEvent[] | null = null;
+
 export function load30DayArchive(): NewsEvent[] {
+  if (archiveCache !== null) return archiveCache;
   ensureDataDir();
   if (fs.existsSync(NEWS_30DAYS_FILE)) {
     try {
       const data = fs.readFileSync(NEWS_30DAYS_FILE, 'utf-8');
-      return JSON.parse(data) || [];
+      archiveCache = JSON.parse(data) || [];
+      return archiveCache!;
     } catch {
-      return [];
+      archiveCache = [];
+      return archiveCache;
     }
   }
-  return [];
+  archiveCache = [];
+  return archiveCache;
 }
 
 export function save30DayArchive(events: NewsEvent[]) {
   ensureDataDir();
+  archiveCache = events;
   try {
     // Keep 30 days of past events
     const cutoffMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
@@ -923,176 +930,201 @@ export function decideLean(
   return { final: 'WAIT', label: 'RULES ONLY' };
 }
 
+let isEvaluatingDecisions = false;
+
 // Evaluate decisions for all events, locking at T-60m and evaluating HIT/MISS post-release
 export async function evaluateNewsDecisions(events: NewsEvent[]): Promise<Record<string, LockedDecision>> {
-  const store = loadNewsDecisions();
-  const now = Date.now();
-  let modified = false;
+  if (isEvaluatingDecisions) {
+    return loadNewsDecisions();
+  }
 
-  const archive = load30DayArchive();
-  const m15Candles = getClosedCandles('M15', true);
+  isEvaluatingDecisions = true;
+  try {
+    const store = loadNewsDecisions();
+    const now = Date.now();
+    let modified = false;
 
-  for (const evt of events) {
-    const isUsd = evt.country === 'USD';
-    const tier = evt.ahmedTier || 3;
-    const isHighOrMed = tier === 1 || tier === 2;
-    if (!isUsd || !isHighOrMed) continue;
+    const archive = load30DayArchive();
+    const m15Candles = getClosedCandles('M15', true);
 
-    const eventTimeMs = new Date(evt.timeUtc).getTime();
-    const minutesUntil = Math.round((eventTimeMs - now) / 60000);
-    const hasForecast = evt.forecastNum !== null && evt.forecastStr && evt.forecastStr !== '--' && evt.forecastStr !== 'N/A';
+    for (const evt of events) {
+      const isUsd = evt.country === 'USD';
+      const tier = evt.ahmedTier || 3;
+      const isHighOrMed = tier === 1 || tier === 2;
+      if (!isUsd || !isHighOrMed) continue;
 
-    // 1. If already locked, check if released and actual arrived to calculate HIT/MISS
-    if (store[evt.id] && store[evt.id].isLocked) {
-      const current = store[evt.id];
-      if (
-        evt.isReleased &&
-        evt.actualNum !== null &&
-        evt.forecastNum !== null &&
-        (!current.resultStatus || current.resultStatus === 'PENDING')
-      ) {
-        // Measure real price move 15 min after release from candles
-        let goldMove15m: number | undefined = undefined;
-        if (m15Candles.length > 0) {
-          const preCandle = m15Candles.find((c) => {
-            const cTime = new Date(c.openTime).getTime();
-            return cTime >= eventTimeMs - 15 * 60000 && cTime <= eventTimeMs;
-          });
-          const postCandle = m15Candles.find((c) => {
-            const cTime = new Date(c.openTime).getTime();
-            return cTime >= eventTimeMs + 10 * 60000 && cTime <= eventTimeMs + 25 * 60000;
-          });
-          if (preCandle && postCandle) {
-            goldMove15m = Number((postCandle.close - preCandle.open).toFixed(2));
+      const eventTimeMs = new Date(evt.timeUtc).getTime();
+      const minutesUntil = Math.round((eventTimeMs - now) / 60000);
+      const hasForecast = evt.forecastNum !== null && evt.forecastStr && evt.forecastStr !== '--' && evt.forecastStr !== 'N/A';
+
+      // 1. If already locked, check if released and actual arrived to calculate HIT/MISS
+      if (store[evt.id] && store[evt.id].isLocked) {
+        const current = store[evt.id];
+        if (
+          evt.isReleased &&
+          evt.actualNum !== null &&
+          evt.forecastNum !== null &&
+          (!current.resultStatus || current.resultStatus === 'PENDING')
+        ) {
+          // Measure real price move 15 min after release from candles
+          let goldMove15m: number | undefined = undefined;
+          if (m15Candles.length > 0) {
+            const preCandle = m15Candles.find((c) => {
+              const cTime = new Date(c.openTime).getTime();
+              return cTime >= eventTimeMs - 15 * 60000 && cTime <= eventTimeMs;
+            });
+            const postCandle = m15Candles.find((c) => {
+              const cTime = new Date(c.openTime).getTime();
+              return cTime >= eventTimeMs + 10 * 60000 && cTime <= eventTimeMs + 25 * 60000;
+            });
+            if (preCandle && postCandle) {
+              goldMove15m = Number((postCandle.close - preCandle.open).toFixed(2));
+            }
+          }
+
+          const reversed = isReversedGoldEvent(evt.title);
+          const diff = evt.actualNum - evt.forecastNum;
+          const actualBetterForGold = reversed ? diff > 0 : diff < 0; // cooler inflation / higher unemployment = better for gold (BULLISH)
+          const actualDirection: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = Math.abs(diff) <= Math.abs(evt.forecastNum) * 0.0001
+            ? 'NEUTRAL'
+            : actualBetterForGold ? 'BULLISH' : 'BEARISH';
+
+          if (goldMove15m !== undefined && Math.abs(goldMove15m) < 1.0) {
+            current.resultStatus = 'NEUTRAL';
+            current.goldMove15m = goldMove15m;
+            modified = true;
+          } else if (goldMove15m !== undefined) {
+            const goldMovedUp = goldMove15m > 0;
+            const goldRealDirection = goldMovedUp ? 'BULLISH' : 'BEARISH';
+            const isHit = current.final === goldRealDirection && actualDirection === goldRealDirection;
+            current.resultStatus = isHit ? 'HIT' : 'MISS';
+            current.goldMove15m = goldMove15m;
+            modified = true;
+          } else if (current.final !== 'WAIT' && current.final !== 'WAITING') {
+            // If candle not yet archived, check actual direction alone tentatively or wait
+            if (actualDirection === current.final) {
+              current.resultStatus = 'HIT';
+            } else if (actualDirection !== 'NEUTRAL') {
+              current.resultStatus = 'MISS';
+            } else {
+              current.resultStatus = 'NEUTRAL';
+            }
+            modified = true;
           }
         }
+        continue;
+      }
 
-        const reversed = isReversedGoldEvent(evt.title);
-        const diff = evt.actualNum - evt.forecastNum;
-        const actualBetterForGold = reversed ? diff > 0 : diff < 0; // cooler inflation / higher unemployment = better for gold (BULLISH)
-        const actualDirection: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = Math.abs(diff) <= Math.abs(evt.forecastNum) * 0.0001
-          ? 'NEUTRAL'
-          : actualBetterForGold ? 'BULLISH' : 'BEARISH';
+      // 2. Event is not locked yet. Determine if it has already been released
+      if (evt.isReleased) {
+        // If event was released while server was down, do not store backdated decision
+        continue;
+      }
 
-        if (goldMove15m !== undefined && Math.abs(goldMove15m) < 1.0) {
-          current.resultStatus = 'NEUTRAL';
-          current.goldMove15m = goldMove15m;
-          modified = true;
-        } else if (goldMove15m !== undefined) {
-          const goldMovedUp = goldMove15m > 0;
-          const goldRealDirection = goldMovedUp ? 'BULLISH' : 'BEARISH';
-          const isHit = current.final === goldRealDirection && actualDirection === goldRealDirection;
-          current.resultStatus = isHit ? 'HIT' : 'MISS';
-          current.goldMove15m = goldMove15m;
-          modified = true;
-        } else if (current.final !== 'WAIT' && current.final !== 'WAITING') {
-          // If candle not yet archived, check actual direction alone tentatively or wait
-          if (actualDirection === current.final) {
-            current.resultStatus = 'HIT';
-          } else if (actualDirection !== 'NEUTRAL') {
-            current.resultStatus = 'MISS';
-          } else {
-            current.resultStatus = 'NEUTRAL';
+      if (!hasForecast) {
+        continue;
+      }
+
+      // Determine System Vote
+      const preLean = computePreNewsLean(evt.title, evt.forecastNum, evt.previousNum, evt.isSpeech ?? false);
+      const systemVote: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = preLean.lean === 'BULLISH'
+        ? 'BULLISH'
+        : preLean.lean === 'BEARISH'
+        ? 'BEARISH'
+        : 'NEUTRAL';
+
+      // Check if within next 24h for AI call budget (max 1 AI call per event)
+      const isWithin24h = minutesUntil >= 0 && minutesUntil <= 1440;
+      let aiVote: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'UNAVAILABLE' = 'UNAVAILABLE';
+      let aiConfidence = 0;
+      let aiReason = '';
+
+      // Check if we already have a generated decision or AI vote for this event!
+      if (store[evt.id] && store[evt.id].aiVote && store[evt.id].aiVote !== 'UNAVAILABLE') {
+        aiVote = store[evt.id].aiVote;
+        aiConfidence = store[evt.id].aiConfidence;
+        aiReason = store[evt.id].aiReason || '';
+      } else {
+        // If T <= 60 minutes or preview requested within 24h:
+        const shouldQueryAi = isWithin24h && (process.env.AI_API_KEY || (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'));
+
+        if (shouldQueryAi) {
+          // Find last 6 released events of same type from stored archive
+          const sameTypeHistory = archive
+            .filter((e) => e.title.toLowerCase().includes(evt.title.toLowerCase().slice(0, 8)) && e.isReleased && e.actualStr)
+            .slice(0, 6)
+            .map((e) => ({
+              title: e.title,
+              actual: e.actualStr || '--',
+              forecast: e.forecastStr || '--',
+              diff: e.actualNum !== null && e.forecastNum !== null ? (e.actualNum - e.forecastNum).toFixed(2) : '--',
+            }));
+
+          const otherHighEvents24h = events
+            .filter((e) => e.id !== evt.id && e.ahmedTier === 1 && e.minutesUntil >= 0 && e.minutesUntil <= 1440)
+            .map((e) => e.title);
+
+          try {
+            const aiRes = await getAhmedAiVoteForEvent({
+              eventName: evt.title,
+              tier: evt.ahmedTier || 2,
+              forecast: evt.forecastStr,
+              previous: evt.previousStr,
+              recentHistory: sameTypeHistory,
+              systemVote,
+              otherHighEvents24h,
+            });
+
+            aiVote = aiRes.vote;
+            aiConfidence = aiRes.confidence;
+            aiReason = aiRes.reason;
+          } catch {
+            aiVote = 'UNAVAILABLE';
           }
+        }
+      }
+
+      const combined = decideLean(systemVote, aiVote);
+
+      // T-60m or closer -> LOCK permanently
+      const isLockTriggered = minutesUntil <= 60 && !evt.isReleased;
+
+      const decisionRecord: LockedDecision = {
+        eventId: evt.id,
+        systemVote,
+        aiVote,
+        aiConfidence,
+        aiReason,
+        final: combined.final,
+        label: combined.label,
+        lockedAt: new Date().toISOString(),
+        isLocked: isLockTriggered,
+        resultStatus: 'PENDING',
+      };
+
+      if (isLockTriggered) {
+        store[evt.id] = decisionRecord;
+        modified = true;
+      } else {
+        // Live preview (not yet locked) - save so subsequent requests reuse it without re-querying AI
+        if (!store[evt.id] || store[evt.id].aiVote !== aiVote || store[evt.id].final !== combined.final) {
+          store[evt.id] = {
+            ...decisionRecord,
+            isLocked: false,
+          };
           modified = true;
         }
       }
-      continue;
     }
 
-    // 2. Event is not locked yet. Determine if it has already been released
-    if (evt.isReleased) {
-      // If event was released while server was down, do not store backdated decision
-      continue;
+    if (modified || !fs.existsSync(NEWS_DECISIONS_FILE)) {
+      saveNewsDecisions(store);
     }
 
-    if (!hasForecast) {
-      continue;
-    }
-
-    // Determine System Vote
-    const preLean = computePreNewsLean(evt.title, evt.forecastNum, evt.previousNum, evt.isSpeech ?? false);
-    const systemVote: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = preLean.lean === 'BULLISH'
-      ? 'BULLISH'
-      : preLean.lean === 'BEARISH'
-      ? 'BEARISH'
-      : 'NEUTRAL';
-
-    // Check if within next 24h for AI call budget (max 1 AI call per event)
-    const isWithin24h = minutesUntil >= 0 && minutesUntil <= 1440;
-    let aiVote: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'UNAVAILABLE' = 'UNAVAILABLE';
-    let aiConfidence = 0;
-    let aiReason = '';
-
-    // If T <= 60 minutes or preview requested within 24h:
-    const shouldQueryAi = isWithin24h && (process.env.AI_API_KEY || (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'));
-
-    if (shouldQueryAi) {
-      // Find last 6 released events of same type from stored archive
-      const sameTypeHistory = archive
-        .filter((e) => e.title.toLowerCase().includes(evt.title.toLowerCase().slice(0, 8)) && e.isReleased && e.actualStr)
-        .slice(0, 6)
-        .map((e) => ({
-          title: e.title,
-          actual: e.actualStr || '--',
-          forecast: e.forecastStr || '--',
-          diff: e.actualNum !== null && e.forecastNum !== null ? (e.actualNum - e.forecastNum).toFixed(2) : '--',
-        }));
-
-      const otherHighEvents24h = events
-        .filter((e) => e.id !== evt.id && e.ahmedTier === 1 && e.minutesUntil >= 0 && e.minutesUntil <= 1440)
-        .map((e) => e.title);
-
-      const aiRes = await getAhmedAiVoteForEvent({
-        eventName: evt.title,
-        tier: evt.ahmedTier || 2,
-        forecast: evt.forecastStr,
-        previous: evt.previousStr,
-        recentHistory: sameTypeHistory,
-        systemVote,
-        otherHighEvents24h,
-      });
-
-      aiVote = aiRes.vote;
-      aiConfidence = aiRes.confidence;
-      aiReason = aiRes.reason;
-    }
-
-    const combined = decideLean(systemVote, aiVote);
-
-    // T-60m or closer -> LOCK permanently
-    const isLockTriggered = minutesUntil <= 60 && !evt.isReleased;
-
-    const decisionRecord: LockedDecision = {
-      eventId: evt.id,
-      systemVote,
-      aiVote,
-      aiConfidence,
-      aiReason,
-      final: combined.final,
-      label: combined.label,
-      lockedAt: new Date().toISOString(),
-      isLocked: isLockTriggered,
-      resultStatus: 'PENDING',
-    };
-
-    if (isLockTriggered) {
-      store[evt.id] = decisionRecord;
-      modified = true;
-    } else {
-      // Live preview (not yet locked)
-      store[evt.id] = {
-        ...decisionRecord,
-        isLocked: false,
-      };
-    }
+    return store;
+  } finally {
+    isEvaluatingDecisions = false;
   }
-
-  if (modified || !fs.existsSync(NEWS_DECISIONS_FILE)) {
-    saveNewsDecisions(store);
-  }
-
-  return store;
 }
 
 // Calculate 30-day accuracy statistics from locked calls

@@ -271,7 +271,10 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
 
     fetchRealPrice();
-    const interval = setInterval(fetchRealPrice, 1500);
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      fetchRealPrice();
+    }, 2000);
 
     return () => {
       isMounted = false;

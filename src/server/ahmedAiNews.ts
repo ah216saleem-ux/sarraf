@@ -894,22 +894,33 @@ Return valid JSON with exactly:
   return fallback;
 }
 
-// Pre-generate for Tier 1 and 2 events in next 72 hours
+let isPregenerating = false;
+let lastPregenerateTime = 0;
+
+// Pre-generate for Tier 1 and 2 events in next 72 hours (max once every 5 minutes)
 export async function pregenerateUpcomingBriefs(events: StructuredEventPayload[]) {
   const now = Date.now();
-  const cutoff72h = now + 72 * 60 * 60 * 1000;
+  if (isPregenerating || now - lastPregenerateTime < 5 * 60 * 1000) return;
+  isPregenerating = true;
+  lastPregenerateTime = now;
 
-  const targetEvents = events.filter((e) => {
-    const tMs = new Date(e.timeUtc).getTime();
-    return (e.tier === 1 || e.tier === 2) && tMs >= now - 60 * 60 * 1000 && tMs <= cutoff72h;
-  });
+  try {
+    const cutoff72h = now + 72 * 60 * 60 * 1000;
 
-  for (const evt of targetEvents.slice(0, 10)) {
-    const hash = computeEventHash(evt);
-    const cacheKey = `${evt.id}_${hash}`;
-    if (!briefsCache[cacheKey]) {
-      await getOrGenerateAhmedAiBrief(evt);
+    const targetEvents = events.filter((e) => {
+      const tMs = new Date(e.timeUtc).getTime();
+      return (e.tier === 1 || e.tier === 2) && tMs >= now - 60 * 60 * 1000 && tMs <= cutoff72h;
+    });
+
+    for (const evt of targetEvents.slice(0, 10)) {
+      const hash = computeEventHash(evt);
+      const cacheKey = `${evt.id}_${hash}`;
+      if (!briefsCache[cacheKey]) {
+        await getOrGenerateAhmedAiBrief(evt);
+      }
     }
+  } finally {
+    isPregenerating = false;
   }
 }
 

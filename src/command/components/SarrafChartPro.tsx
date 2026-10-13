@@ -20,7 +20,7 @@ const GOLD = '#f5c451';
 const BLUE = '#38bdf8';
 const BG = '#070b14';
 
-export const SarrafChartPro: React.FC<SarrafChartProProps> = ({
+export const SarrafChartPro: React.FC<SarrafChartProProps> = React.memo(({
   candles,
   timeframe,
   currentPrice,
@@ -71,16 +71,19 @@ export const SarrafChartPro: React.FC<SarrafChartProProps> = ({
   // Check if history is still building (< 60 candles)
   const isBuildingHistory = candles.length < 60;
 
-  // Clone candles with latest tick merged on the forming candle
+  // Merge latest tick price on the forming candle without full-array cloning
   const displayCandles = useMemo(() => {
     if (candles.length === 0) return [];
-    const list = candles.map((c) => ({ ...c }));
-    if (currentPrice > 0 && list.length > 0) {
-      const last = list[list.length - 1];
-      last.close = currentPrice;
-      last.high = Math.max(last.high, currentPrice);
-      last.low = Math.min(last.low, currentPrice);
-    }
+    if (currentPrice <= 0) return candles;
+    const last = candles[candles.length - 1];
+    const updatedLast = {
+      ...last,
+      close: currentPrice,
+      high: Math.max(last.high, currentPrice),
+      low: Math.min(last.low, currentPrice),
+    };
+    const list = candles.slice(0, -1);
+    list.push(updatedLast);
     return list;
   }, [candles, currentPrice]);
 
@@ -623,4 +626,4 @@ export const SarrafChartPro: React.FC<SarrafChartProProps> = ({
       </div>
     </div>
   );
-};
+});

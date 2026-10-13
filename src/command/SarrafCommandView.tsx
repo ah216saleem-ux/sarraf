@@ -60,6 +60,7 @@ export const SarrafCommandView: React.FC = () => {
   const [, setSecondTicker] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       setSecondTicker(Date.now());
     }, 1000);
     return () => clearInterval(timer);

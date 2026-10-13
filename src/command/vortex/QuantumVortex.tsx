@@ -29,12 +29,9 @@ export const AHMED_GATES_ORDER = [
   { id: 'g8', name: 'Entry Trigger', shortName: 'TICK', timeframe: 'TICK' },
 ];
 
-export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
-  ({ className = '', onRegisterHooks, variant = 'command', signalEngine: externalSignalEngine, buyRatio: propBuyRatio, sellRatio: propSellRatio }, ref) => {
+const QuantumVortexInner = forwardRef<QuantumVortexHooks, QuantumVortexProps & { signalEngine: any }>(
+  ({ className = '', onRegisterHooks, variant = 'command', signalEngine, buyRatio: propBuyRatio, sellRatio: propSellRatio }, ref) => {
     const feed = useCommandFeed();
-    const internalSignal = useCommandSignal();
-    const signalEngine = externalSignalEngine || internalSignal;
-
     const coreRef = useRef<NeuralCoreHandle | null>(null);
 
     // Lite Mode State (persisted in localStorage)
@@ -552,5 +549,17 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     );
   }
 );
+
+const QuantumVortexWithInternalSignal = forwardRef<QuantumVortexHooks, QuantumVortexProps>((props, ref) => {
+  const internalSignal = useCommandSignal();
+  return <QuantumVortexInner {...props} signalEngine={internalSignal} ref={ref} />;
+});
+
+export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>((props, ref) => {
+  if (props.signalEngine) {
+    return <QuantumVortexInner {...props} signalEngine={props.signalEngine} ref={ref} />;
+  }
+  return <QuantumVortexWithInternalSignal {...props} ref={ref} />;
+});
 
 QuantumVortex.displayName = 'QuantumVortex';

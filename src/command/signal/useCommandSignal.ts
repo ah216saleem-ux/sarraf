@@ -160,14 +160,14 @@ export function useCommandSignal(): UseCommandSignalReturn {
     }
   }, []);
 
-  // Regular server poll every 1000ms
+  // Regular server poll every 2000ms
   useEffect(() => {
     fetchState();
     fetchTelegramStatus();
     const interval = setInterval(() => {
       fetchState();
       fetchTelegramStatus();
-    }, 1000);
+    }, 2000);
     return () => clearInterval(interval);
   }, [fetchState, fetchTelegramStatus]);
 

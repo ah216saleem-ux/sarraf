@@ -1721,28 +1721,24 @@ app.get('/api/google-chat/tests', requireAdminAuth, (_req, res) => {
 // -------------------------------------------------------------
 
 // GET /api/news - Live Forex Factory calendar, feed status, countdowns, pregeneration trigger, and decision lock
-app.get('/api/news', async (_req, res) => {
+app.get('/api/news', (_req, res) => {
   const status = getNewsFeedStatus();
   const events = getNewsEventsForUI();
   const ahmedAiStatus = getAhmedAiServerStatus();
-
-  // Evaluate decisions (locks at T-60m and scores HIT/MISS post-release)
-  try {
-    await evaluateNewsDecisions(events);
-  } catch (err: any) {
-    console.warn('[NEWS ROUTE] evaluateNewsDecisions error:', err.message);
-  }
-
-  // Refreshed events with decisions
-  const refreshedEvents = getNewsEventsForUI();
   const accuracy = getNewsDecisionAccuracy();
 
+  // Evaluate decisions asynchronously in background (never blocks GET /api/news)
+  evaluateNewsDecisions(events).catch((err: any) => {
+    console.warn('[NEWS ROUTE] evaluateNewsDecisions error:', err.message);
+  });
+
   // Asynchronously trigger pregeneration for Tier 1 and 2 events in next 72h
-  pregenerateUpcomingBriefs(refreshedEvents as any[]).catch(() => {});
+  pregenerateUpcomingBriefs(events as any[]).catch(() => {});
+
   return res.json({
     status: 'SUCCESS',
     feed: status,
-    events: refreshedEvents,
+    events,
     ahmedAiStatus,
     ahmedAiOnline: ahmedAiStatus === 'ON',
     accuracy,

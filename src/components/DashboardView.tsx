@@ -41,6 +41,55 @@ import { SarrafCommandView } from '../command/SarrafCommandView';
 import { SpyOptionsView } from '../spy/SpyOptionsView';
 import { useCommandFeed } from '../command/data/useCommandFeed';
 
+const DashboardPriceHeader: React.FC<{ fallbackPrice: number | null; fallbackStatus: string }> = React.memo(
+  ({ fallbackPrice, fallbackStatus }) => {
+    const feed = useCommandFeed();
+    const currentPrice = feed.currentPrice > 0 ? feed.currentPrice : fallbackPrice;
+    const headerStatus = feed.currentPrice > 0 ? feed.connection.status : fallbackStatus;
+    const headerBadgeText = feed.currentPrice > 0 ? (feed.connection.badgeText || feed.connection.status) : fallbackStatus;
+
+    return (
+      <div className="flex items-center gap-2 font-mono text-xs">
+        <span className="text-neutral-400">XAU/USD:</span>
+        <span
+          className={`text-base font-bold ${
+            headerStatus === 'LIVE'
+              ? 'text-[#FFD97A]'
+              : headerStatus === 'MARKET_CLOSED'
+              ? 'text-amber-300'
+              : headerStatus === 'STALE'
+              ? 'text-amber-400'
+              : 'text-neutral-300'
+          }`}
+        >
+          ${(currentPrice ?? 4165.5).toFixed(2)}
+        </span>
+        {headerStatus === 'LIVE' ? (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-[9px] text-emerald-400 font-semibold">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+            LIVE
+          </span>
+        ) : headerStatus === 'MARKET_CLOSED' ? (
+          <span
+            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/40 text-[9px] text-amber-300 font-semibold"
+            title="Market Closed - Last Price"
+          >
+            CLOSED
+          </span>
+        ) : headerStatus === 'STALE' ? (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/40 text-[9px] text-amber-300 font-semibold animate-pulse">
+            {headerBadgeText}
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-rose-950/60 border border-rose-500/40 text-[9px] text-rose-300 font-semibold">
+            {headerBadgeText || 'RECONNECTING'}
+          </span>
+        )}
+      </div>
+    );
+  }
+);
+
 export const DashboardView: React.FC = () => {
   const { priceData, user, logout, macroEvents } = useMarket();
   const [sarrafSection, setSarrafSection] = useState<'COMMAND' | 'DECK'>('COMMAND');
@@ -107,7 +156,7 @@ export const DashboardView: React.FC = () => {
 
   const [actionLoading, setActionLoading] = useState(false);
 
-  // Poll real-time data
+  // Poll real-time data (throttled to 3s and pauses when document is hidden)
   const fetchAllData = useCallback(async () => {
     try {
       const [curRes, histRes, statsRes, tgRes, valRes, spyRes] = await Promise.all([
@@ -155,7 +204,10 @@ export const DashboardView: React.FC = () => {
 
   useEffect(() => {
     fetchAllData();
-    const interval = setInterval(fetchAllData, 1500);
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      fetchAllData();
+    }, 3000);
     return () => clearInterval(interval);
   }, [fetchAllData]);
 
@@ -183,12 +235,9 @@ export const DashboardView: React.FC = () => {
     }
   }, [priceData.price, priceData.status]);
 
-  const commandFeed = useCommandFeed();
-  const currentPrice = commandFeed.currentPrice > 0 ? commandFeed.currentPrice : priceData.price;
-  const headerStatus = commandFeed.currentPrice > 0 ? commandFeed.connection.status : priceData.status;
-  const headerBadgeText = commandFeed.currentPrice > 0 ? (commandFeed.connection.badgeText || commandFeed.connection.status) : priceData.status;
-  const minPrice = chartPoints.length > 0 ? Math.min(...chartPoints, (currentPrice ?? 4150) - 4) : 4150;
-  const maxPrice = chartPoints.length > 0 ? Math.max(...chartPoints, (currentPrice ?? 4180) + 4) : 4180;
+  const currentPrice = priceData.price ?? 4165.5;
+  const minPrice = chartPoints.length > 0 ? Math.min(...chartPoints, currentPrice - 4) : 4150;
+  const maxPrice = chartPoints.length > 0 ? Math.max(...chartPoints, currentPrice + 4) : 4180;
   const range = maxPrice - minPrice || 1;
 
   // Signal Actions
@@ -637,43 +686,7 @@ export const DashboardView: React.FC = () => {
                 )}
               </div>
             ) : (
-              <div className="flex items-center gap-2 font-mono text-xs">
-                <span className="text-neutral-400">XAU/USD:</span>
-                <span
-                  className={`text-base font-bold ${
-                    headerStatus === 'LIVE'
-                      ? 'text-[#FFD97A]'
-                      : headerStatus === 'MARKET_CLOSED'
-                      ? 'text-amber-300'
-                      : headerStatus === 'STALE'
-                      ? 'text-amber-400'
-                      : 'text-neutral-300'
-                  }`}
-                >
-                  ${(currentPrice ?? 4165.5).toFixed(2)}
-                </span>
-                {headerStatus === 'LIVE' ? (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/40 text-[9px] text-emerald-400 font-semibold">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                    LIVE
-                  </span>
-                ) : headerStatus === 'MARKET_CLOSED' ? (
-                  <span
-                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/40 text-[9px] text-amber-300 font-semibold"
-                    title="Market Closed - Last Price"
-                  >
-                    CLOSED
-                  </span>
-                ) : headerStatus === 'STALE' ? (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/40 text-[9px] text-amber-300 font-semibold animate-pulse">
-                    {headerBadgeText}
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-rose-950/60 border border-rose-500/40 text-[9px] text-rose-300 font-semibold">
-                    {headerBadgeText || 'RECONNECTING'}
-                  </span>
-                )}
-              </div>
+              <DashboardPriceHeader fallbackPrice={priceData.price} fallbackStatus={priceData.status} />
             )}
 
             <button

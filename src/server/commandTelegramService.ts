@@ -214,7 +214,7 @@ export async function sendTelegramMessageWithRetry(
 
   while (attempt < maxRetries) {
     attempt++;
-    const sendRes = await sendRawTelegramMessage(token, chatId, text);
+    const sendRes = await sendRawTelegramMessage(creds.token, creds.chatId, text);
 
     if (sendRes.success) {
       settings.lastMessageTime = Date.now();
