@@ -534,13 +534,13 @@ class CommandFeedStore {
     window.addEventListener('focus', handleResume);
   }
 
-  // Watchdog every 2 s: if now - lastMsgAt > 10 s, close the EventSource and reconnect immediately.
+  // Watchdog every 2 s: if now - lastMsgAt > 25 s (cellular/proxy buffer allowance), close EventSource and reconnect immediately.
   // Reconnect with backoff 0.5s, 1s, 2s, 4s, 8s (cap 8s), unlimited retries, never give up, never require a page reload.
   private startWatchdog() {
     if (this.watchdogTimerId) clearInterval(this.watchdogTimerId);
     this.watchdogTimerId = setInterval(() => {
       const now = Date.now();
-      if (this.isSubscribed && this.lastMsgAt > 0 && now - this.lastMsgAt > 10000) {
+      if (this.isSubscribed && this.lastMsgAt > 0 && now - this.lastMsgAt > 25000) {
         this.reconnect('watchdog_timeout');
       }
       this.updateConnectionStatus();
@@ -721,18 +721,15 @@ class CommandFeedStore {
     } else if (!this.isConnected && !this.isPollingFallback) {
       status = 'RECONNECTING';
       badgeText = 'RECONNECTING';
-    } else if (msgAgeSec > 10) {
+    } else if (msgAgeSec > 25) {
       status = 'RECONNECTING';
       badgeText = 'RECONNECTING';
     } else if (tickAgeSec < 6) {
       status = 'LIVE';
       badgeText = 'LIVE';
-    } else if (tickAgeSec <= 30) {
+    } else {
       status = 'STALE';
       badgeText = `STALE ${tickAgeSec}s`;
-    } else {
-      status = 'RECONNECTING';
-      badgeText = 'RECONNECTING';
     }
 
     const prevStatus = this.connection.status;

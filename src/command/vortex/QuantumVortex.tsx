@@ -141,10 +141,10 @@ export const QuantumVortex = forwardRef<QuantumVortexHooks, QuantumVortexProps>(
     }, [feed.candles, feed.sparkline]);
 
     // Determine CoreMode:
-    // 'live' when the BiQuote feed is fresh and market open;
-    // 'reconnecting' when feed is stale/reconnecting;
-    // 'closed' or 'replay' when market is closed ('replay' only if stored real ticks exist, else 'closed').
-    const isMarketClosed = feed.connection.status === 'MARKET_CLOSED' || !feed.connection.isLive;
+    // 'live' when market open;
+    // 'reconnecting' when feed is disconnected/reconnecting;
+    // 'closed' or 'replay' ONLY when market is officially closed ('replay' only if stored real ticks exist, else 'closed').
+    const isMarketClosed = feed.connection.status === 'MARKET_CLOSED';
     const isReconnecting = feed.connection.status === 'RECONNECTING' || feed.connection.status === 'OFFLINE';
 
     const mode: CoreMode = useMemo(() => {

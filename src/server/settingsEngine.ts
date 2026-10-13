@@ -439,21 +439,27 @@ export function getAdminUsername(): string | null {
 }
 
 /**
+ * Constant-time string comparison using SHA-256 hashing to guarantee
+ * identical buffer lengths for crypto.timingSafeEqual and prevent RangeError.
+ */
+function timingSafeStringEqual(a: string, b: string): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const hashA = crypto.createHash('sha256').update(a, 'utf8').digest();
+  const hashB = crypto.createHash('sha256').update(b, 'utf8').digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
+/**
  * Constant-time username comparison against configured admin.
  */
 export function verifyAdminUsername(username: string): boolean {
   const admin = getEnvAdmin();
   if (!admin || !admin.username || !username) return false;
 
-  const inputBuf = Buffer.from(username.trim().toLowerCase());
-  const envBuf = Buffer.from(admin.username.toLowerCase());
+  const inputUser = username.trim().toLowerCase();
+  const envUser = admin.username.toLowerCase();
 
-  if (inputBuf.length !== envBuf.length) {
-    // Constant-time dummy compare to prevent timing side-channels
-    crypto.timingSafeEqual(inputBuf, inputBuf);
-    return false;
-  }
-  return crypto.timingSafeEqual(inputBuf, envBuf);
+  return timingSafeStringEqual(inputUser, envUser);
 }
 
 /**
@@ -474,12 +480,7 @@ export function verifyAdminCredentials(username: string, password: string): bool
   const cleanInputUser = username.trim().toLowerCase();
   const cleanConfUser = admin.username.toLowerCase();
 
-  const isMatchUser = cleanInputUser === cleanConfUser;
-
-  // Constant-time comparison
-  const inputUserBuf = Buffer.from(cleanInputUser);
-  const confUserBuf = Buffer.from(isMatchUser ? cleanInputUser : cleanConfUser);
-  crypto.timingSafeEqual(inputUserBuf, confUserBuf);
+  const isMatchUser = timingSafeStringEqual(cleanInputUser, cleanConfUser);
 
   if (!isMatchUser) {
     // Constant-time dummy verify to mitigate username enumeration timing
@@ -503,21 +504,13 @@ export function verifyAdminCredentials(username: string, password: string): bool
         const salt = parts[1];
         const expectedHex = parts[2];
         const computed = crypto.scryptSync(password, salt, 64).toString('hex');
-        const compBuf = Buffer.from(computed);
-        const expBuf = Buffer.from(expectedHex);
-        if (compBuf.length === expBuf.length) {
-          return crypto.timingSafeEqual(compBuf, expBuf);
-        }
+        return timingSafeStringEqual(computed, expectedHex);
       }
     } else if (configuredHash.includes(':')) {
       const [salt, expectedHex] = configuredHash.split(':');
       if (salt && expectedHex) {
         const computed = crypto.scryptSync(password, salt, 64).toString('hex');
-        const compBuf = Buffer.from(computed);
-        const expBuf = Buffer.from(expectedHex);
-        if (compBuf.length === expBuf.length) {
-          return crypto.timingSafeEqual(compBuf, expBuf);
-        }
+        return timingSafeStringEqual(computed, expectedHex);
       }
     }
   } catch {
@@ -528,9 +521,9 @@ export function verifyAdminCredentials(username: string, password: string): bool
 }
 
 export function verifyAdminPassword(password: string): boolean {
-  const envUser = process.env.ADMIN_USERNAME?.trim();
-  if (!envUser) return false;
-  return verifyAdminCredentials(envUser, password);
+  const admin = getEnvAdmin();
+  if (!admin || !admin.username) return false;
+  return verifyAdminCredentials(admin.username, password);
 }
 
 export function recordSuccessfulLogin(ip: string): { isNewIp: boolean } {

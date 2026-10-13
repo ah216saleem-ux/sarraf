@@ -359,7 +359,7 @@ async function fetchBiquoteTick() {
     currentUpstreamAbortController = new AbortController();
     const timeout = setTimeout(() => {
       if (currentUpstreamAbortController) currentUpstreamAbortController.abort();
-    }, 4000);
+    }, 7000);
 
     const res = await fetch('https://biquote.io/api/XAUUSD', {
       signal: currentUpstreamAbortController.signal,
@@ -473,8 +473,10 @@ async function fetchBiquoteTick() {
     backoffDelayMs = 700;
   } catch (err: any) {
     currentUpstreamAbortController = null;
-    upstreamStatus = 'down';
     consecutiveFailures += 1;
+    if (consecutiveFailures >= 3) {
+      upstreamStatus = 'down';
+    }
 
     const reasonCategory: 'silent' | 'closed' | 'error' =
       err?.name === 'AbortError' ? 'silent' : err?.message?.includes('HTTP_') ? 'closed' : 'error';
@@ -502,8 +504,8 @@ async function fetchBiquoteTick() {
   scheduleNextBiquoteTick(backoffDelayMs);
 }
 
-// Upstream watchdog for the BiQuote feed: track lastTickAt. If the market is open and no tick arrived for 15 s,
-// close the upstream connection and reconnect with backoff 1s, 2s, 5s, 10s (cap 10s, retry forever).
+// Upstream watchdog for the BiQuote feed: track lastTickAt. If the market is open and no tick arrived for 30 s,
+// ensure connection is not hung and reconnect with backoff 1s, 2s, 5s, 10s (cap 10s, retry forever).
 // Log ONE line per reconnect with a reason category only (silent / closed / error), never URLs or keys.
 // Market-closed hours (real schedule) must not count as stale.
 const serverStartupAt = Date.now();
@@ -515,9 +517,11 @@ setInterval(() => {
     const now = Date.now();
     const referenceTime = lastUpstreamTickAt > 0 ? lastUpstreamTickAt : serverStartupAt;
     const tickAgeMs = now - referenceTime;
-    if (tickAgeMs > 15000 && now - lastWatchdogTriggerAt >= 10000) {
+    if (tickAgeMs > 30000 && now - lastWatchdogTriggerAt >= 15000) {
       lastWatchdogTriggerAt = now;
-      upstreamStatus = 'down';
+      if (consecutiveFailures >= 3) {
+        upstreamStatus = 'down';
+      }
       logReconnectReason('silent');
       if (currentUpstreamAbortController) {
         try {
@@ -530,7 +534,7 @@ setInterval(() => {
       scheduleNextBiquoteTick(backoff);
     }
   }
-}, 2000);
+}, 3000);
 
 // GET /api/price/xauusd - Unified price endpoint with market status (A1)
 app.get('/api/price/xauusd', (_req, res) => {
@@ -635,8 +639,10 @@ app.get('/api/command/snapshot', (_req, res) => {
 
 // GET /api/command/feed-stream - Real-time SSE streaming ticks for SARRAF COMMAND
 app.get('/api/command/feed-stream', (req, res) => {
-  // Prevent any compression middleware from buffering or delaying SSE chunks
+  // Prevent any compression middleware or reverse proxies from buffering or dropping SSE
   (res as any)._noCompression = true;
+  req.socket?.setKeepAlive(true);
+  req.socket?.setTimeout(0);
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -667,7 +673,7 @@ app.get('/api/command/feed-stream', (req, res) => {
 
   commandSseClients.add(res);
 
-  // Heartbeat every 5s: event "hb" with {ts, lastTickAgeMs, upstream: "up"|"down", marketOpen}
+  // Heartbeat every 3s: event "hb" with {ts, lastTickAgeMs, upstream: "up"|"down", marketOpen}
   const hbInterval = setInterval(() => {
     try {
       const hbNow = Date.now();
@@ -683,16 +689,16 @@ app.get('/api/command/feed-stream', (req, res) => {
     } catch {
       cleanup();
     }
-  }, 5000);
+  }, 3000);
 
-  // Comment line ": ping" every 15s to keep any intermediate proxies alive
+  // Comment line ": ping" every 10s to keep Railway/Cloudflare edge proxies warm and alive
   const pingInterval = setInterval(() => {
     try {
       res.write(': ping\n\n');
     } catch {
       cleanup();
     }
-  }, 15000);
+  }, 10000);
 
   let isCleanedUp = false;
   const cleanup = () => {
