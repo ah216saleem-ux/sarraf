@@ -68,6 +68,7 @@ export interface UseCommandFeedResult {
   whereCandidates: WhereCandidate[];
   watchingCandidate: WhereCandidate | null;
   liquidityPanelZones: any[];
+  upstream: 'up' | 'down';
   lastTickTimestamp: number;
   lastCandleTimestamp: number;
   lastNewsTimestamp: number;
@@ -190,6 +191,7 @@ export function useCommandFeed(): UseCommandFeedResult {
     lastTickAt: commandStore.lastTickAt,
     lastMsgAt: commandStore.lastMsgAt,
     reconnectCount: commandStore.reconnectCount,
+    upstream: commandStore.upstream,
     upstreamStatusText: commandStore.upstreamStatusText,
   };
 }

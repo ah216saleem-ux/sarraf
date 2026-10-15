@@ -132,9 +132,15 @@ export const CommandHeader: React.FC<CommandHeaderProps> = React.memo(({
           ) : (
             <span className="inline-flex items-center gap-1 text-[9px] font-mono font-bold text-[#22e08a] bg-[#22e08a]/10 border border-[#22e08a]/30 px-1.5 py-0.5 rounded">
               <span className="w-1.5 h-1.5 rounded-full bg-[#22e08a] animate-ping" />
-              LIVE
+              {connection.badgeText || 'LIVE'}
             </span>
           )}
+
+          {connection.lastDisconnectReason ? (
+            <span className="font-mono text-[8px] text-[#8a96a8]/80 hidden sm:inline" title="Last reconnect event">
+              reconnect: {connection.lastDisconnectReason}
+            </span>
+          ) : null}
 
           <span className="font-mono text-[9px] text-[#8a96a8] tabular-nums hidden xs:inline">
             {clock}

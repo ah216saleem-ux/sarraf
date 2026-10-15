@@ -54,7 +54,9 @@ export const SarrafCommandView: React.FC = React.memo(() => {
     setCardsRevealed(true);
   };
 
-  const isDimmed = feed.connection.status === 'RECONNECTING' || feed.connection.status === 'OFFLINE';
+  const isDimmed =
+    (feed.connection.status === 'RECONNECTING' || feed.connection.status === 'OFFLINE') &&
+    feed.connection.badgeText !== 'LIVE (POLLING)';
 
   // Real freshness computed timestamps from feed
   const tickFreshness = formatFreshness(feed.lastTickTimestamp);

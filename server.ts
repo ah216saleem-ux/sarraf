@@ -341,12 +341,14 @@ function removeSseClient(id: string, reason: string) {
       client.res.end();
     }
   } catch {}
-  try {
-    const sock = client.req?.socket || client.res?.socket;
-    if (sock && !sock.destroyed) {
-      sock.destroy();
-    }
-  } catch {}
+  if (reason === 'sweep_dead_socket' || reason === 'ip_cap_exceeded' || reason === 'socket_destroyed_or_unwritable') {
+    try {
+      const sock = client.req?.socket || client.res?.socket;
+      if (sock && !sock.destroyed) {
+        sock.destroy();
+      }
+    } catch {}
+  }
   console.log(`[SSE DISCONNECT] Client ${id} disconnected (${reason}). Live clients: ${commandSseClients.size}`);
 }
 
@@ -857,12 +859,14 @@ app.get('/api/command/feed-stream', (req, res) => {
 
   // Prevent any compression middleware or reverse proxies from buffering or dropping SSE
   (res as any)._noCompression = true;
-  req.socket?.setKeepAlive(true);
+  req.socket?.setKeepAlive(true, 10000);
+  req.socket?.setNoDelay(true);
   req.socket?.setTimeout(0);
+  res.socket?.setTimeout(0);
 
   res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache, no-transform',
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform, no-store, must-revalidate',
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
@@ -873,7 +877,7 @@ app.get('/api/command/feed-stream', (req, res) => {
   // Instruction: Send retry: 2000
   res.write('retry: 2000\n\n');
 
-  // Send an initial full snapshot immediately on connect
+  // Send an initial full snapshot immediately on connect (last 30 ticks for instant lightweight connection handshake)
   const schedule = getMarketSchedule();
   const now = Date.now();
   const lastTickAgeMs = lastUpstreamTickAt > 0 ? now - lastUpstreamTickAt : 0;
@@ -881,7 +885,7 @@ app.get('/api/command/feed-stream', (req, res) => {
   const initialPayload = {
     status: latestLiveQuote?.status || (schedule.isOpen ? 'LIVE' : 'MARKET_CLOSED'),
     ...(latestLiveQuote || {}),
-    ticks5m: get5MinTickBuffer(),
+    ticks5m: get5MinTickBuffer().slice(-30),
     marketOpen: schedule.isOpen,
     upstream: upstreamInfo.upstream,
     reasonCategory: upstreamInfo.lastReasonCategory,

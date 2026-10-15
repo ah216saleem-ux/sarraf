@@ -72,13 +72,14 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = React.memo(({
   // Show it only while upstream is truly down or history is truly empty.
   const isUpstreamTrulyDown = upstream === 'down';
   const isHistoryTrulyEmpty = typeof candlesCount === 'number' ? candlesCount === 0 : false;
-  const isActuallyDownOrEmpty = isUpstreamTrulyDown || isHistoryTrulyEmpty;
 
   const missingGate = gates.find((g) => g.status === 'FAIL' || g.status === 'LOCKED');
   let blockingReason = waitReason || 'Awaiting institutional gate convergence';
 
-  if (isActuallyDownOrEmpty) {
+  if (isUpstreamTrulyDown) {
     blockingReason = 'History loading (upstream down)';
+  } else if (isHistoryTrulyEmpty) {
+    blockingReason = 'History loading... awaiting first candle bar';
   } else if (pathClearR > 0 && pathClearR < 10 && gates.filter((g) => g.status === 'PASS').length >= 6) {
     const opposingPrice = activeSignal?.side === 'BUY' ? currentPrice + pathClearR : currentPrice - pathClearR;
     blockingReason = `only ${(pathClearR / 10).toFixed(2)}R clear to the opposing zone ${opposingPrice.toFixed(2)}`;
@@ -86,8 +87,8 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = React.memo(({
     blockingReason = `${missingGate.name} missing: ${missingGate.reason}`;
   }
 
-  // Clear stale "History loading (upstream down)" if upstream is UP and candles are loaded
-  if (!isActuallyDownOrEmpty && blockingReason.includes('History loading')) {
+  // Clear stale "History loading" if upstream is UP and candles are loaded
+  if (!isUpstreamTrulyDown && !isHistoryTrulyEmpty && blockingReason.includes('History loading')) {
     blockingReason = missingGate
       ? `${missingGate.name} missing: ${missingGate.reason}`
       : 'Monitoring institutional order flow';
@@ -95,8 +96,10 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = React.memo(({
 
   // Compute WATCHING line from real candidate and real missing gate
   let watchingLine = '';
-  if (isActuallyDownOrEmpty) {
+  if (isUpstreamTrulyDown) {
     watchingLine = 'History loading (upstream down) - awaiting live stream reconnect';
+  } else if (isHistoryTrulyEmpty) {
+    watchingLine = 'Synchronizing market candles from institutional archive...';
   } else if (watchingCandidate) {
     const gateLabel = missingGate ? missingGate.shortName || missingGate.name : 'M15 close';
     const targetPrice =

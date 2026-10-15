@@ -48,6 +48,7 @@ class CommandFeedStore {
 
   public connection: FeedConnectionState = {
     status: 'LIVE',
+    badgeText: 'LIVE',
     isLive: true,
     lastTickTime: 0,
     lastTickAgeSeconds: 0,
@@ -55,6 +56,7 @@ class CommandFeedStore {
     reconnectAttempts: 0,
     source: 'Live Institutional Feed',
     upstreamStatusText: '',
+    lastDisconnectReason: '',
   };
 
   // Sparkline rolling points (last 40 real prices)
@@ -531,7 +533,8 @@ class CommandFeedStore {
     this.resumeHandlersRegistered = true;
     const handleResume = () => {
       const now = Date.now();
-      if (this.lastMsgAt === 0 || now - this.lastMsgAt > 20000) {
+      // Only reconnect if we have established feed previously, data is actually stale (> 20s), and not already reconnecting
+      if (this.lastMsgAt > 0 && now - this.lastMsgAt > 20000 && !this.isReconnecting) {
         this.reconnect('resume_event_stale');
       }
     };
@@ -586,7 +589,15 @@ class CommandFeedStore {
   // Reconnect immediately and fetch snapshot so no gap is left in ticks/candles/zones
   public async reconnect(reason?: string) {
     if (this.isReconnecting) return;
-    this.isReconnecting = true;
+
+    // Only mark foreground isReconnecting if data is not already fresh from polling
+    const now = Date.now();
+    const isDataFresh = this.lastMsgAt > 0 && now - this.lastMsgAt <= 10000;
+    const isSilentBackground = isDataFresh || this.isPollingFallback;
+
+    if (!isSilentBackground) {
+      this.isReconnecting = true;
+    }
     this.reconnectCount++;
 
     if (reason) {
@@ -666,6 +677,7 @@ class CommandFeedStore {
   private startPollingFallback() {
     if (this.fallbackPollTimerId) return;
     this.isPollingFallback = true;
+    this.fetchSnapshotAndMerge().catch(() => {});
     this.fallbackPollTimerId = setInterval(async () => {
       await this.fetchSnapshotAndMerge();
     }, 2000);
@@ -685,9 +697,11 @@ class CommandFeedStore {
     try {
       this.closeSse();
 
-      this.sseSource = new EventSource('/api/command/feed-stream');
+      const source = new EventSource('/api/command/feed-stream');
+      this.sseSource = source;
 
-      this.sseSource.onopen = () => {
+      source.onopen = () => {
+        if (this.sseSource !== source) return;
         this.isConnected = true;
         this.lastMsgAt = Date.now();
         this.sseFailuresCount = 0;
@@ -696,7 +710,8 @@ class CommandFeedStore {
         this.updateConnectionStatus();
       };
 
-      this.sseSource.onmessage = (event) => {
+      source.onmessage = (event) => {
+        if (this.sseSource !== source) return;
         try {
           this.lastMsgAt = Date.now();
           this.isConnected = true;
@@ -709,7 +724,8 @@ class CommandFeedStore {
         } catch {}
       };
 
-      this.sseSource.addEventListener('hb', (event: any) => {
+      source.addEventListener('hb', (event: any) => {
+        if (this.sseSource !== source) return;
         try {
           this.lastMsgAt = Date.now();
           this.isConnected = true;
@@ -741,20 +757,25 @@ class CommandFeedStore {
         } catch {}
       });
 
-      this.sseSource.onerror = () => {
+      source.onerror = () => {
+        if (this.sseSource !== source) return;
         this.isConnected = false;
         this.sseFailuresCount++;
+        this.lastDisconnectReason = 'error event';
+        console.log('[SSE DISCONNECT] error event');
 
         // If SSE fails 3 times in a row, switch to polling /api/command/snapshot every 2 s and keep trying SSE in background
         if (this.sseFailuresCount >= 3) {
           this.startPollingFallback();
         }
 
-        this.closeSse();
-
-        const backoff = this.CLIENT_BACKOFF_STEPS[Math.min(this.reconnectBackoffIdx, this.CLIENT_BACKOFF_STEPS.length - 1)];
-        this.reconnectBackoffIdx++;
-        this.scheduleReconnect(backoff);
+        // If closed, trigger backoff reconnection
+        if (source.readyState === 2) {
+          this.closeSse();
+          const backoff = this.CLIENT_BACKOFF_STEPS[Math.min(this.reconnectBackoffIdx, this.CLIENT_BACKOFF_STEPS.length - 1)];
+          this.reconnectBackoffIdx++;
+          this.scheduleReconnect(backoff);
+        }
         this.updateConnectionStatus();
       };
     } catch {
@@ -778,13 +799,14 @@ class CommandFeedStore {
     if (!this.marketOpen) {
       targetStatus = 'MARKET_CLOSED';
       targetBadgeText = 'CLOSED';
-    } else if (this.isPollingFallback && msgAgeSec <= 10) {
+    } else if (msgAgeSec <= 10) {
+      // LIVE when message arrived in last 10s (or LIVE (POLLING) if fallback polling)
+      targetStatus = 'LIVE';
+      targetBadgeText = this.isPollingFallback ? 'LIVE (POLLING)' : 'LIVE';
+    } else if (this.isPollingFallback && msgAgeSec <= 15) {
       // While polling works, the UI must show LIVE (POLLING), not RECONNECTING
       targetStatus = 'LIVE';
       targetBadgeText = 'LIVE (POLLING)';
-    } else if (msgAgeSec <= 10) {
-      targetStatus = 'LIVE';
-      targetBadgeText = 'LIVE';
     } else if (this.isReconnecting) {
       // RECONNECTING only while a reconnect is actually in progress
       targetStatus = 'RECONNECTING';
@@ -811,13 +833,13 @@ class CommandFeedStore {
         this.pendingBadgeStatus = targetStatus;
         this.pendingBadgeSince = now;
         finalStatus = this.connection.status;
-        finalBadgeText = this.connection.badgeText;
+        finalBadgeText = this.connection.badgeText || (finalStatus === 'LIVE' ? 'LIVE' : 'RECONNECTING');
       } else if (now - this.pendingBadgeSince >= 3000) {
         finalStatus = targetStatus;
         finalBadgeText = targetBadgeText;
       } else {
         finalStatus = this.connection.status;
-        finalBadgeText = this.connection.badgeText;
+        finalBadgeText = this.connection.badgeText || (finalStatus === 'LIVE' ? 'LIVE' : 'RECONNECTING');
       }
     }
 
@@ -837,6 +859,7 @@ class CommandFeedStore {
       reasonCategory: this.upstreamReasonCategory,
       downSeconds: this.upstreamDownSeconds,
       retryingInSeconds: this.upstreamRetryingInSeconds,
+      lastDisconnectReason: this.lastDisconnectReason,
     };
 
     if (prevStatus !== finalStatus || prevText !== finalBadgeText) {
