@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useMarketAuth } from '../context/MarketContext';
 import { NewsFlow, NFEvent } from './newsflow/NewsFlow';
+import { DateSelectorStrip, DateDayItem } from './DateSelectorStrip';
 
 interface BriefData {
   headline: string;
@@ -227,6 +228,9 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
   const [events, setEvents] = useState<NewsEventItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+
+  // Selected date filter: 'UPCOMING' | 'TODAY' | 'ALL' | 'PAST' | 'YYYY-MM-DD'
+  const [selectedDateFilter, setSelectedDateFilter] = useState<string>('UPCOMING');
 
   // AHMED AI status from server: 'ON' | 'RETRYING' | 'OFF_RULES_MODE'
   const [ahmedAiStatus, setAhmedAiStatus] = useState<'ON' | 'RETRYING' | 'OFF_RULES_MODE'>('ON');
@@ -665,6 +669,59 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
     }
   }, [nextKeyCatalyst?.id, briefs, fetchBriefForEvent]);
 
+  // Current UTC today key
+  const todayKey = useMemo(() => new Date().toISOString().slice(0, 10), []);
+
+  // Compute counts and DateDayItem array for DateSelectorStrip
+  const dateStats = useMemo(() => {
+    const now = Date.now();
+    let upcoming = 0;
+    let todayC = 0;
+    let past = 0;
+    const map = new Map<string, number>();
+
+    for (const e of events) {
+      const ts = new Date(e.timeUtc).getTime();
+      if (!isNaN(ts)) {
+        if (ts + 15 * 60000 >= now) upcoming++;
+        else past++;
+        const dayKey = new Date(ts).toISOString().slice(0, 10);
+        if (dayKey === todayKey) todayC++;
+        map.set(dayKey, (map.get(dayKey) || 0) + 1);
+      }
+    }
+
+    const items: DateDayItem[] = [];
+    const sortedDayKeys = Array.from(map.keys())
+      .filter((k) => k >= todayKey)
+      .sort();
+
+    for (const k of sortedDayKeys) {
+      const d = new Date(k + 'T12:00:00Z');
+      const isToday = k === todayKey;
+      const dayName = isToday
+        ? '★ TODAY'
+        : d.toLocaleDateString(undefined, { weekday: 'short' }).toUpperCase();
+      const dayDateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }).toUpperCase();
+
+      items.push({
+        dayKey: k,
+        dayName,
+        dayDateStr,
+        isToday,
+        count: map.get(k) || 0,
+      });
+    }
+
+    return {
+      upcomingCount: upcoming,
+      todayCount: todayC,
+      pastCount: past,
+      totalCount: events.length,
+      dayItems: items,
+    };
+  }, [events, todayKey]);
+
   // 3. Group events by day for Timeline
   const timelineGroups = useMemo(() => {
     const groups: {
@@ -704,8 +761,25 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
       });
     }
 
-    return groups;
+    return groups.sort((a, b) => a.dayKey.localeCompare(b.dayKey));
   }, [events]);
+
+  // Filtered timeline groups according to selectedDateFilter
+  const filteredTimelineGroups = useMemo(() => {
+    let filtered = timelineGroups;
+
+    if (selectedDateFilter === 'UPCOMING') {
+      filtered = timelineGroups.filter((g) => g.dayKey >= todayKey);
+    } else if (selectedDateFilter === 'TODAY') {
+      filtered = timelineGroups.filter((g) => g.dayKey === todayKey);
+    } else if (selectedDateFilter === 'PAST') {
+      filtered = timelineGroups.filter((g) => g.dayKey < todayKey).reverse();
+    } else if (selectedDateFilter !== 'ALL') {
+      filtered = timelineGroups.filter((g) => g.dayKey === selectedDateFilter);
+    }
+
+    return filtered;
+  }, [timelineGroups, selectedDateFilter, todayKey]);
 
   const toggleEventExpand = (evt: NewsEventItem) => {
     if (expandedEventId === evt.id) {
@@ -1454,6 +1528,17 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
         </div>
       )}
 
+      {/* DATE SELECTOR STRIP */}
+      <DateSelectorStrip
+        selectedFilter={selectedDateFilter}
+        onSelectFilter={(f) => setSelectedDateFilter(f)}
+        dayItems={dateStats.dayItems}
+        upcomingCount={dateStats.upcomingCount}
+        todayCount={dateStats.todayCount}
+        pastCount={dateStats.pastCount}
+        totalCount={dateStats.totalCount}
+      />
+
       {/* 3. TIMELINE: GROUPED BY DAY */}
       <div className="space-y-4">
         <div className="flex items-center justify-between pb-2 border-b border-white/10">
@@ -1487,7 +1572,20 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
           </div>
         )}
 
-        {timelineGroups.map((group) => {
+        {filteredTimelineGroups.length === 0 ? (
+          <div className="p-6 rounded-2xl bg-black/40 border border-white/10 text-center space-y-3">
+            <p className="text-xs text-neutral-400">
+              No economic releases scheduled for the selected date filter ({selectedDateFilter}).
+            </p>
+            <button
+              onClick={() => setSelectedDateFilter('UPCOMING')}
+              className="px-3 py-1.5 rounded-xl bg-[#E8B84A]/20 border border-[#E8B84A]/40 text-[#FFD97A] text-xs font-bold cursor-pointer"
+            >
+              View Upcoming Catalysts
+            </button>
+          </div>
+        ) : (
+          filteredTimelineGroups.map((group) => {
           const isSpeechesExpanded = !!expandedSpeechesDays[group.dayKey];
 
           return (
@@ -1653,7 +1751,8 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
               )}
             </div>
           );
-        })}
+        })
+        )}
       </div>
 
       {/* 4. FOOTER NOTE */}
