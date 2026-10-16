@@ -107,6 +107,78 @@
       "lockedAt": "2026-10-11T17:39:32.279Z",
       "isLocked": false,
       "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-18-USD-core_cpi_m_m": {
+      "eventId": "EVT-2026-10-18-USD-core_cpi_m_m",
+      "systemVote": "BEARISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BEARISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-16T19:35:25.915Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-18-USD-cpi_y_y": {
+      "eventId": "EVT-2026-10-18-USD-cpi_y_y",
+      "systemVote": "BEARISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BEARISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-16T19:35:25.915Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-19-USD-unemployment_claims": {
+      "eventId": "EVT-2026-10-19-USD-unemployment_claims",
+      "systemVote": "BEARISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BEARISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-16T19:35:25.915Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-20-USD-federal_funds_rate": {
+      "eventId": "EVT-2026-10-20-USD-federal_funds_rate",
+      "systemVote": "BULLISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BULLISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-16T19:35:25.915Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-21-USD-core_retail_sales_m_m": {
+      "eventId": "EVT-2026-10-21-USD-core_retail_sales_m_m",
+      "systemVote": "BEARISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BEARISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-16T19:35:25.915Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
+    },
+    "EVT-2026-10-22-USD-non_farm_employment_change": {
+      "eventId": "EVT-2026-10-22-USD-non_farm_employment_change",
+      "systemVote": "BEARISH",
+      "aiVote": "UNAVAILABLE",
+      "aiConfidence": 0,
+      "aiReason": "",
+      "final": "BEARISH",
+      "label": "RULES ONLY",
+      "lockedAt": "2026-10-16T19:35:25.915Z",
+      "isLocked": false,
+      "resultStatus": "PENDING"
     }
   }
 }

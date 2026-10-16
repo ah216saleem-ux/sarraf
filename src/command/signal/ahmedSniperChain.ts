@@ -32,7 +32,7 @@ export interface SniperEvaluationInput {
   confidence: number; // 0 - 100
   nearestSupport?: number;
   nearestResistance?: number;
-  feedStatus: 'LIVE' | 'RECONNECTING' | 'OFFLINE';
+  feedStatus: 'LIVE' | 'LIVE (POLLING)' | 'STALE' | 'RECONNECTING' | 'MARKET_CLOSED' | 'OFFLINE';
   config?: SniperConfig;
 }
 
@@ -70,7 +70,8 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
   } = input;
 
   // Rule: Never generate a signal from missing, stale, or reconnecting data.
-  if (feedStatus !== 'LIVE' || currentPrice <= 0) {
+  const isFeedActive = feedStatus === 'LIVE' || feedStatus === 'LIVE (POLLING)';
+  if (!isFeedActive || currentPrice <= 0) {
     const isHistoryMissing = d1Candles.length === 0;
     const lockedGates: SniperGateResult[] = [
       { id: 'g1', name: 'W1/D1 Context', shortName: 'D1 Context', timeframe: 'D1', status: 'LOCKED', direction: 'NEUTRAL', reason: isHistoryMissing ? 'History loading (upstream down)' : 'Feed disconnected · Awaiting live stream' },
@@ -94,7 +95,7 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
       canIssueSignal: false,
       waitReason: isHistoryMissing
         ? 'History loading (upstream down)'
-        : 'Feed disconnected · Signals paused until live ticks resume.',
+        : 'Feed reconnecting · Signals paused until live ticks resume.',
     };
   }
 

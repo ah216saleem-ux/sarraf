@@ -575,11 +575,19 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
       );
     }
 
-    // 2. If fewer than 3 events qualify, fill the rest with nearest LOW events (no holidays or speeches)
+    // If fewer than 3 events qualify, fill with low fillers or any valid events from pool
     if (selected.length < 3) {
       const selectedIds = new Set(selected.map((s) => s.id));
-      const lowFillers = validEvents.filter((e) => !selectedIds.has(e.id) && e.ahmedTier === 3 && !e.isSpeech);
+      const lowFillers = validEvents.filter((e) => !selectedIds.has(e.id) && !e.isSpeech);
       selected = [...selected, ...lowFillers].sort(
+        (a, b) => new Date(a.timeUtc).getTime() - new Date(b.timeUtc).getTime()
+      );
+    }
+
+    if (selected.length < 3) {
+      const selectedIds = new Set(selected.map((s) => s.id));
+      const fallbackPool = events.filter((e) => !selectedIds.has(e.id) && !isExcluded(e)).sort((a, b) => new Date(a.timeUtc).getTime() - new Date(b.timeUtc).getTime());
+      selected = [...selected, ...fallbackPool].sort(
         (a, b) => new Date(a.timeUtc).getTime() - new Date(b.timeUtc).getTime()
       );
     }

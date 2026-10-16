@@ -167,19 +167,26 @@ class CommandFeedStore {
   private isSeeded: boolean = false;
   private ticksInCurrentSample: number = 0;
 
-  constructor() {
-    // Initial structures are empty - populated strictly once real candles/ticks arrive
-  }
+  private teardownTimerId: any = null;
 
   public subscribe(listener: StoreListener): () => void {
     this.listeners.add(listener);
+    if (this.teardownTimerId) {
+      clearTimeout(this.teardownTimerId);
+      this.teardownTimerId = null;
+    }
     if (!this.isSubscribed) {
       this.startDataFeed();
     }
     return () => {
       this.listeners.delete(listener);
       if (this.listeners.size === 0) {
-        this.stopDataFeed();
+        if (this.teardownTimerId) clearTimeout(this.teardownTimerId);
+        this.teardownTimerId = setTimeout(() => {
+          if (this.listeners.size === 0) {
+            this.stopDataFeed();
+          }
+        }, 1000);
       }
     };
   }
