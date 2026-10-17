@@ -27,6 +27,7 @@ import {
   Sliders,
   Calendar,
   FileText,
+  Compass,
 } from 'lucide-react';
 import {
   formatNewSignalMessage,
@@ -38,6 +39,7 @@ import { SettingsTab } from './SettingsTab';
 import { PerformanceTab } from './PerformanceTab';
 import { GoLiveChecklistTab } from './GoLiveChecklistTab';
 import { SarrafCommandView } from '../command/SarrafCommandView';
+import { SarrafAtlasView } from '../atlas/SarrafAtlasView';
 import { SpyOptionsView } from '../spy/SpyOptionsView';
 import { useCommandFeed } from '../command/data/useCommandFeed';
 
@@ -92,7 +94,7 @@ const DashboardPriceHeader: React.FC<{ fallbackPrice: number | null; fallbackSta
 
 export const DashboardView: React.FC = () => {
   const { priceData, user, logout, macroEvents } = useMarket();
-  const [sarrafSection, setSarrafSection] = useState<'COMMAND' | 'DECK'>('COMMAND');
+  const [sarrafSection, setSarrafSection] = useState<'COMMAND' | 'DECK' | 'ATLAS'>('COMMAND');
   const [activeMainTab, setActiveMainTab] = useState<
     | 'OVERVIEW'
     | 'TELEGRAM'
@@ -745,16 +747,32 @@ export const DashboardView: React.FC = () => {
                 >
                   <span>TRADING DECK</span>
                 </button>
+                <button
+                  onClick={() => setSarrafSection('ATLAS')}
+                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                    sarrafSection === 'ATLAS'
+                      ? 'bg-[#E8B84A] text-black font-extrabold border-[#E8B84A] shadow-[0_0_15px_rgba(232,184,74,0.35)]'
+                      : 'bg-black/60 text-neutral-400 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
+                  }`}
+                >
+                  <Compass className="w-3.5 h-3.5" />
+                  <span>SARRAF ATLAS</span>
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-black/40 text-black font-bold">
+                    ZONES
+                  </span>
+                </button>
               </div>
 
               <span className="text-[10px] font-mono text-neutral-500 hidden sm:inline">
-                SECTION: {sarrafSection === 'COMMAND' ? 'SARRAF COMMAND' : 'TRADING DECK'}
+                SECTION: {sarrafSection === 'COMMAND' ? 'SARRAF COMMAND' : sarrafSection === 'DECK' ? 'TRADING DECK' : 'SARRAF ATLAS'}
               </span>
             </div>
 
             {/* View Render */}
             {sarrafSection === 'COMMAND' ? (
               <SarrafCommandView />
+            ) : sarrafSection === 'ATLAS' ? (
+              <SarrafAtlasView />
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
             {/* Left Column (8 cols): Interactive Chart & Live Signals */}

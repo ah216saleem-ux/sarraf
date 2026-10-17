@@ -1,0 +1,19 @@
+{
+  "alertsEnabled": false,
+  "alertLogs": [
+    {
+      "id": "alt_test_1792186815289",
+      "timestamp": "2026-10-16T21:40:15.289Z",
+      "eventType": "TOUCH",
+      "zoneId": "R1",
+      "zoneName": "R1 Supply",
+      "tier": "T1 PRIMARY",
+      "grade": "A",
+      "price": 4164.27,
+      "message": "Manual admin Telegram verification test",
+      "status": "SENT",
+      "telegramChatId": "5218548758"
+    }
+  ],
+  "sentAlertsKeys": []
+}

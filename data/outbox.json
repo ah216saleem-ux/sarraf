@@ -400,5 +400,24 @@
     "createdAt": "2026-10-10T22:30:07.925Z",
     "status": "PENDING_DELIVERY",
     "messageText": "Daily Summary 📊 No signals today."
+  },
+  {
+    "eventId": "SUMMARY-W-2026-W42",
+    "signalId": "SUMMARY-W-2026-W42",
+    "type": "WEEKLY_REPORT",
+    "payload": {
+      "signalsCount": 0,
+      "tpCount": 0,
+      "slCount": 0,
+      "beCount": 0,
+      "winRate": 0,
+      "totalDollars": 0,
+      "totalR": 0,
+      "bestDay": "N/A",
+      "worstDay": "N/A"
+    },
+    "createdAt": "2026-10-17T10:52:37.944Z",
+    "status": "PENDING_DELIVERY",
+    "messageText": "Weekly Report 📅 No signals this week."
   }
 ]
