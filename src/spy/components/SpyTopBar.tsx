@@ -102,7 +102,7 @@ export const SpyTopBar: React.FC<SpyTopBarProps> = ({ feed, priceFlash }) => {
             </div>
           ) : (
             <div className="hidden sm:flex flex-col border-l border-white/10 pl-4 font-mono text-[11px] text-neutral-500">
-              <span>SPREAD: INSTITUTIONAL</span>
+              <span>SPREAD: SARRAF</span>
               <span>DEPTH: INTEGRATED</span>
             </div>
           )}

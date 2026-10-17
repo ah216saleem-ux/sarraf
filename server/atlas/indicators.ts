@@ -302,9 +302,9 @@ export function computeParticipationRatio(h1Candles: Candle[]): {
 
   const currentVol = h1Candles[h1Candles.length - 1].volume || 1;
   const lookback = Math.min(20, h1Candles.length - 1);
-  const sample = h1Candles.slice(-lookback - 1, -1);
-  const sumVol = sample.reduce((acc, c) => acc + (c.volume || 1), 0);
-  const avgVol = Math.max(1, sumVol / Math.max(1, sample.length));
+  const recent = h1Candles.slice(-lookback - 1, -1);
+  const sumVol = recent.reduce((acc, c) => acc + (c.volume || 1), 0);
+  const avgVol = Math.max(1, sumVol / Math.max(1, recent.length));
 
   const ratio = Number((currentVol / avgVol).toFixed(2));
   let status: 'HIGH' | 'NORMAL' | 'LOW' = 'NORMAL';

@@ -1,10 +1,15 @@
-// server/atlas/runPhase1EngineTests.ts
-import { evaluateLiveZoneStatus, computeAtlasZonesAndScenarios, getAtlasState } from './atlasEngine';
+import {
+  evaluateLiveZoneStatus,
+  computeAtlasZonesAndScenarios,
+  getAtlasState,
+  computeZoneTradeDetails,
+  onAtlasLiveTick,
+} from './atlasEngine';
 import { countZoneTouches } from './indicators';
 import { AtlasZone } from './atlasTypes';
 import { Candle, getCandleStore } from '../../src/server/candleEngine';
 
-console.log('=== SARRAF ATLAS PHASE 1 ENGINE VERIFICATION TESTS ===\n');
+console.log('=== SARRAF ATLAS PHASE 1 & 2 ENGINE VERIFICATION TESTS ===\n');
 
 let passedTests = 0;
 let totalTests = 0;
@@ -23,7 +28,7 @@ function assert(condition: boolean, testName: string, detail?: string) {
 // -----------------------------------------------------------------------------
 // TEST 1: Price 4164.27 with R1 zone 4182-4189 produces NO TOUCH
 // -----------------------------------------------------------------------------
-const sampleR1: AtlasZone = {
+const recentR1: AtlasZone = {
   id: 'R1',
   name: 'R1 Supply',
   level: 4185.50,
@@ -42,7 +47,7 @@ const sampleR1: AtlasZone = {
   breakInfo: null,
 };
 
-const result1 = evaluateLiveZoneStatus([sampleR1], [], '2026-10-16T12:00:00.000Z', 4164.27);
+const result1 = evaluateLiveZoneStatus([recentR1], [], '2026-10-16T12:00:00.000Z', 4164.27);
 assert(
   result1[0].status === 'FRESH' && result1[0].touchesToday === 0,
   'Price 4164.27 with R1 zone 4182-4189 produces no TOUCH',
@@ -62,7 +67,7 @@ const prePublishBar: Candle = {
   isClosed: true,
 };
 
-const result2 = evaluateLiveZoneStatus([sampleR1], [prePublishBar], '2026-10-16T12:00:00.000Z', 4164.27);
+const result2 = evaluateLiveZoneStatus([recentR1], [prePublishBar], '2026-10-16T12:00:00.000Z', 4164.27);
 assert(
   result2[0].status === 'FRESH' && !result2[0].breakInfo,
   'Candles before publishTime NEVER break or touch a zone',
@@ -72,7 +77,7 @@ assert(
 // -----------------------------------------------------------------------------
 // TEST 3: PP (SARRAF ZONE) NEVER shows BROKEN
 // -----------------------------------------------------------------------------
-const samplePP: AtlasZone = {
+const recentPP: AtlasZone = {
   id: 'PP',
   name: 'SARRAF ZONE',
   level: 4150.00,
@@ -101,7 +106,7 @@ const postPublishBreakBarPP: Candle = {
   isClosed: true,
 };
 
-const result3 = evaluateLiveZoneStatus([samplePP], [postPublishBreakBarPP], '2026-10-16T12:00:00.000Z', 4205.00);
+const result3 = evaluateLiveZoneStatus([recentPP], [postPublishBreakBarPP], '2026-10-16T12:00:00.000Z', 4205.00);
 assert(
   result3[0].status !== 'BROKEN' && result3[0].isFlipped === false,
   'PP (SARRAF ZONE) NEVER shows BROKEN or FLIPPED',
@@ -111,7 +116,7 @@ assert(
 // -----------------------------------------------------------------------------
 // TEST 4: Touch counts are sane (distinct event counts over 20-day H1 feed)
 // -----------------------------------------------------------------------------
-const mock20DaysBars: Candle[] = [];
+const test20DaysBars: Candle[] = [];
 const baseTs = new Date('2026-10-01T00:00:00Z').getTime();
 for (let i = 0; i < 480; i++) {
   const barTs = new Date(baseTs + i * 3600 * 1000).toISOString();
@@ -122,7 +127,7 @@ for (let i = 0; i < 480; i++) {
     high = 4185;
     low = 4180;
   }
-  mock20DaysBars.push({
+  test20DaysBars.push({
     openTime: barTs,
     open: low,
     high,
@@ -133,7 +138,7 @@ for (let i = 0; i < 480; i++) {
   });
 }
 
-const touchCount = countZoneTouches(mock20DaysBars, 4189, 4182, 20);
+const touchCount = countZoneTouches(test20DaysBars, 4189, 4182, 20);
 assert(
   touchCount === 3,
   'Touch counts sane (3 distinct events counted across 480 H1 bars)',
@@ -145,19 +150,67 @@ assert(
 // -----------------------------------------------------------------------------
 const store = getCandleStore();
 store.D1 = [
-  { openTime: '2026-10-14T00:00:00Z', open: 4150, high: 4180, low: 4140, close: 4170, volume: 10000, isClosed: true },
-  { openTime: '2026-10-15T00:00:00Z', open: 4170, high: 4195, low: 4160, close: 4185, volume: 12000, isClosed: true },
-  { openTime: '2026-10-16T00:00:00Z', open: 4185, high: 4200, low: 4175, close: 4190, volume: 8000, isClosed: false },
+  { openTime: '2026-10-14T21:00:00Z', open: 4150, high: 4180, low: 4140, close: 4170, volume: 10000, isClosed: true },
+  { openTime: '2026-10-15T21:00:00Z', open: 4170, high: 4195, low: 4160, close: 4185, volume: 12000, isClosed: true },
+  { openTime: '2026-10-16T21:00:00Z', open: 4185, high: 4200, low: 4175, close: 4190, volume: 8000, isClosed: false },
 ];
-store.H1 = mock20DaysBars;
+store.H1 = test20DaysBars;
 
-computeAtlasZonesAndScenarios();
-
+const computedPayload = computeAtlasZonesAndScenarios();
 const state = getAtlasState();
 assert(
   Boolean(state && state.date && state.zones.length === 7 && state.summary && state.liquidityLevels),
   'API state returns unified single object with date, 7 zones, summary, and liquidity',
   `Got state keys: ${Object.keys(state || {}).join(', ')}`
+);
+
+// -----------------------------------------------------------------------------
+// TEST 6: Deterministic publishedAt anchored to session publish hour (22:00 UTC)
+// -----------------------------------------------------------------------------
+const pubDate = new Date(computedPayload?.publishedAt || '');
+assert(
+  pubDate.getUTCHours() === 22 && pubDate.getUTCMinutes() === 0,
+  'Deterministic publishedAt is anchored to session rollover+1 hour (22:00 UTC)',
+  `Got publishedAt=${computedPayload?.publishedAt}`
+);
+
+// -----------------------------------------------------------------------------
+// TEST 7: computeZoneTradeDetails computes Entry, SL, TP1, TP2 for R1 and null for PP
+// -----------------------------------------------------------------------------
+const r1Trade = computeZoneTradeDetails(recentR1, computedPayload?.pivots, 15.0);
+const ppTrade = computeZoneTradeDetails(recentPP, computedPayload?.pivots, 15.0);
+assert(
+  Boolean(
+    r1Trade &&
+      r1Trade.side === 'SELL' &&
+      r1Trade.entryPrice === 4185.5 &&
+      r1Trade.sl > recentR1.top &&
+      r1Trade.tp1Label === 'PP' &&
+      r1Trade.tp2Label === 'S1' &&
+      ppTrade === null
+  ),
+  'computeZoneTradeDetails returns accurate Entry/SL/TP1/TP2 for R1 and null for neutral PP',
+  `Got r1Trade=${JSON.stringify(r1Trade)}, ppTrade=${JSON.stringify(ppTrade)}`
+);
+
+// -----------------------------------------------------------------------------
+// TEST 8: Active zone trade triggers IN_ZONE with SL/TP1/TP2 and sustains toward TP1
+// -----------------------------------------------------------------------------
+const r1ZoneFromState = state.zones.find((z) => z.id === 'R1')!;
+onAtlasLiveTick(r1ZoneFromState.level);
+const stateInsideR1 = getAtlasState();
+const sustainedPrice = r1ZoneFromState.bottom - 2.0; // Moved 2 pts below R1 box toward TP1 (PP)
+onAtlasLiveTick(sustainedPrice);
+const stateSustained = getAtlasState();
+assert(
+  stateInsideR1.tradeState.status === 'IN_ZONE' &&
+    stateInsideR1.tradeState.activeZone?.id === 'R1' &&
+    typeof stateInsideR1.tradeState.sl === 'number' &&
+    typeof stateInsideR1.tradeState.tp1 === 'number' &&
+    stateSustained.tradeState.status === 'IN_ZONE' &&
+    stateSustained.tradeState.activeZone?.id === 'R1',
+  'Active zone trade triggers IN_ZONE with SL/TP1/TP2 and stays active as price moves toward TP1',
+  `Inside=${stateInsideR1.tradeState.status}, Sustained=${stateSustained.tradeState.status}`
 );
 
 console.log(`\n=== SUMMARY: ${passedTests}/${totalTests} TESTS PASSED ===\n`);

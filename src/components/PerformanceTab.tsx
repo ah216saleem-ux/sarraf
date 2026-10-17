@@ -51,7 +51,7 @@ export const PerformanceTab: React.FC = () => {
                 HISTORY TOO SHORT - STATISTICAL METRICS NOT YET RELIABLE
               </strong>
               <span className="text-[11px] text-amber-300/80">
-                Live database has {metrics?.historyDaysCount ?? 0} days / {metrics?.totalSignals ?? 0} signals. Institutional confidence requires at least 14 days and &ge;30 completed setups.
+                Live database has {metrics?.historyDaysCount ?? 0} days / {metrics?.totalSignals ?? 0} signals. SARRAF confidence requires at least 14 days and &ge;30 completed setups.
               </span>
             </div>
           </div>
@@ -71,7 +71,7 @@ export const PerformanceTab: React.FC = () => {
             </span>
             <div>
               <h2 className="text-base font-bold text-white tracking-wide flex items-center gap-2">
-                SARRAF INSTITUTIONAL PERFORMANCE DESK
+                SARRAF SARRAF PERFORMANCE DESK
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#E8B84A]/15 border border-[#E8B84A]/30 text-[#FFD97A]">
                   AUDITED
                 </span>
@@ -236,7 +236,7 @@ export const PerformanceTab: React.FC = () => {
                   <span className="font-bold text-white">{metrics?.scoreBreakdown?.['85_89']?.winRate ?? 0}% WR</span>
                 </div>
                 <div className="p-2 rounded bg-white/5">
-                  <span className="text-neutral-400 block text-[9px]">90+ INSTITUTIONAL</span>
+                  <span className="text-neutral-400 block text-[9px]">90+ SARRAF</span>
                   <span className="font-bold text-emerald-400">{metrics?.scoreBreakdown?.['90_PLUS']?.winRate ?? 0}% WR</span>
                 </div>
               </div>

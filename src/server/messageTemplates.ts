@@ -224,7 +224,7 @@ export function formatCommandResponse(
   switch (command) {
     case '/start':
       return [
-        '🔱 SARRAF — Institutional Gold Intelligence',
+        '🔱 SARRAF — SARRAF Gold Intelligence',
         'Real-time XAUUSD algorithmic stream & signals.',
         '',
         'Available Commands:',
@@ -240,7 +240,7 @@ export function formatCommandResponse(
       return [
         'SARRAF Gold Terminal Commands:',
         '/status - State, signals today, cooldown',
-        '/test - Send realistic sample trade signal',
+        '/test - Send realistic recent trade signal',
         '/last - Most recent signal outcome',
         '/stats - Win rate and net R performance',
         '/pause or /resume - Desk toggle',

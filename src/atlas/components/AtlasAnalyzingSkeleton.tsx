@@ -21,7 +21,7 @@ export const AtlasAnalyzingSkeleton: React.FC<AtlasAnalyzingSkeletonProps> = ({ 
           ANALYZING MARKET… {timeRemaining} REMAINING
         </h3>
         <p className="text-xs text-neutral-400 max-w-md mx-auto leading-relaxed">
-          60-minute post-rollover analysis window active. Processing institutional order flow, collecting closed H1 candles, and preparing fresh frozen supply/demand zones.
+          60-minute post-rollover analysis window active. Processing sarraf order flow, collecting closed H1 candles, and preparing fresh frozen supply/demand zones.
         </p>
       </div>
 

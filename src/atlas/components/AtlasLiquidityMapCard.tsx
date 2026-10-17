@@ -190,10 +190,10 @@ export const AtlasLiquidityMapCard: React.FC<AtlasLiquidityMapCardProps> = ({
         </div>
       )}
 
-      {/* Institutional Explanatory Footer */}
+      {/* SARRAF Explanatory Footer */}
       <div className="mt-4 pt-3 border-t border-neutral-800/80 flex flex-col sm:flex-row items-start sm:items-center justify-between text-[11px] text-neutral-400 gap-2 font-mono">
         <div>
-          <span className="text-amber-400 font-semibold">Institutional Rule:</span> Sell zones within 0.3×ATR of an intact high, or buy zones near an intact low, earn the <span className="text-amber-300 font-bold">[LIQUIDITY]</span> badge & upgrade to Grade A.
+          <span className="text-amber-400 font-semibold">SARRAF Rule:</span> Sell zones within 0.3×ATR of an intact high, or buy zones near an intact low, earn the <span className="text-amber-300 font-bold">[LIQUIDITY]</span> badge & upgrade to Grade A.
         </div>
         <div className="text-neutral-500 text-[10px]">
           ATR(14): ${atr14.toFixed(1)} | Confluence Threshold: &le; ${(0.3 * atr14).toFixed(1)} pts

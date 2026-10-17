@@ -187,7 +187,7 @@ export const SpyResultCard: React.FC<SpyResultCardProps> = ({ result }) => {
         <div className="py-4 border-b border-white/10 font-mono text-xs text-neutral-400 flex items-center gap-3">
           <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
           <div>
-            <strong className="text-neutral-200">NO TRADE (Selective Discipline):</strong> Smart Money confluence score was {totalScore}% (threshold 70%). Institutional rules require Gate (a) Order Block and Gate (d) CHoCH/BOS to both pass before deploying capital.
+            <strong className="text-neutral-200">NO TRADE (Selective Discipline):</strong> Smart Money confluence score was {totalScore}% (threshold 70%). SARRAF rules require Gate (a) Order Block and Gate (d) CHoCH/BOS to both pass before deploying capital.
           </div>
         </div>
       )}
@@ -195,7 +195,7 @@ export const SpyResultCard: React.FC<SpyResultCardProps> = ({ result }) => {
       {/* 7 Smart Money Gates Checklist */}
       <div className="py-4 border-b border-white/10 space-y-2.5">
         <div className="flex items-center justify-between font-mono text-xs text-neutral-400 pb-1">
-          <span className="font-bold text-neutral-200">SMART MONEY GATES AUDIT (7 INSTITUTIONAL GATES)</span>
+          <span className="font-bold text-neutral-200">SMART MONEY GATES AUDIT (7 SARRAF GATES)</span>
           <span>{gates.filter((g) => g.passed).length} OF {gates.length} PASSED</span>
         </div>
 

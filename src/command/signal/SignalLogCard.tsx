@@ -202,7 +202,7 @@ export const SignalLogCard: React.FC<SignalLogCardProps> = ({
 
       {/* Footer */}
       <div className="pt-2 border-t border-white/5 flex items-center justify-between text-[8px] text-[#8a96a8]">
-        <span>Institutional Verification: Only real closed signals logged</span>
+        <span>SARRAF Verification: Only real closed signals logged</span>
         <span>{telegramStatusText}</span>
       </div>
     </div>

@@ -372,7 +372,7 @@ export function getEventPlaybook(title: string, isSpeech: boolean): EventPlayboo
     return {
       what_it_is: 'Public remarks and economic commentary by a Federal Reserve official.',
       why_gold_cares: 'Hawkish comments about persistent inflation pressure gold, while dovish remarks support bullion.',
-      watch_for: 'Tone-dependent guidance; individual speeches carry low institutional duration.',
+      watch_for: 'Tone-dependent guidance; individual speeches carry low lasting duration.',
     };
   }
 
@@ -708,7 +708,7 @@ async function callOpenAiCompatible(inputPrompt: string): Promise<string | null>
             {
               role: 'system',
               content:
-                'You are AHMED AI, an institutional macro briefing assistant for gold (XAU/USD). Output ONLY a strict JSON object with four string keys: headline (max 12 words), what_it_is (1 short sentence), why_gold_cares (1 short sentence), watch_for (1 short sentence). DO NOT invent or mention any numbers not provided in the input. Never predict the release.',
+                'You are AHMED AI, a macro briefing assistant for gold (XAU/USD). Output ONLY a strict JSON object with four string keys: headline (max 12 words), what_it_is (1 short sentence), why_gold_cares (1 short sentence), watch_for (1 short sentence). DO NOT invent or mention any numbers not provided in the input. Never predict the release.',
             },
             {
               role: 'user',
@@ -760,7 +760,7 @@ async function callGoogleGenAiFallback(inputPrompt: string): Promise<string | nu
     const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
     const systemInstruction =
-      'You are AHMED AI, an institutional gold macro briefing engine. Output ONLY a strict JSON object with four keys: headline, what_it_is, why_gold_cares, watch_for. Each must be 1 short sentence (headline under 12 words). DO NOT introduce any numbers not found in the input. Never predict actual values.';
+      'You are AHMED AI, an sarraf gold macro briefing engine. Output ONLY a strict JSON object with four keys: headline, what_it_is, why_gold_cares, watch_for. Each must be 1 short sentence (headline under 12 words). DO NOT introduce any numbers not found in the input. Never predict actual values.';
 
     const controller = new AbortController();
     let timedOut = false;

@@ -40,8 +40,11 @@ let lastGates: SniperGateResult[] = [];
 let lastAlignedDirection: SignalSide | null = null;
 let lastWaitReason: string = 'Initializing Ahmed Sniper Engine...';
 let lastPathClearDollars: number = 0;
+let lastOpposingObStatus: 'CLEAR_WITH_OB' | 'CLEAR_NO_OB_AHEAD' | 'BLOCKED_BY_OB' | 'NONE' = 'NONE';
+let lastNearestOpposingObPrice: number | null = null;
+let lastNoObLogKey: string = '';
 let lastConfidence: number = 0;
-let lastFeedStatus: 'LIVE' | 'RECONNECTING' | 'OFFLINE' = 'OFFLINE';
+let lastFeedStatus: 'LIVE' | 'LIVE (POLLING)' | 'RECONNECTING' | 'OFFLINE' = 'OFFLINE';
 
 function computeStats(hist: CommandSignalLogEntry[]): SignalEngineStats {
   const total = hist.length;
@@ -198,7 +201,7 @@ export function processCommandSignalTick(
   ask: number,
   spread: number,
   isLive: boolean,
-  feedStatus: 'LIVE' | 'RECONNECTING' | 'OFFLINE' = isLive ? 'LIVE' : 'OFFLINE',
+  feedStatus: 'LIVE' | 'LIVE (POLLING)' | 'RECONNECTING' | 'OFFLINE' = isLive ? 'LIVE' : 'OFFLINE',
   buyRatio: number = 50,
   sellRatio: number = 50,
   buyDelta: number = 0,
@@ -298,8 +301,9 @@ export function processCommandSignalTick(
   // Analysis continues even during ACTIVE or COOLDOWN (per requirements: "While one is active, analysis continues but no new signal is issued.")
   evaluateGatesWithCurrentMarket(price, spread, buyRatio, sellRatio, buyDelta, sellDelta, feedStatus);
 
-  // 4. Issue Signal if conditions met, in WAIT, and feed is LIVE
-  if (lifecycle === 'WAIT' && isLive && feedStatus === 'LIVE') {
+  // 4. Issue Signal if conditions met, in WAIT, and feed is LIVE or LIVE (POLLING)
+  const isFeedActive = feedStatus === 'LIVE' || feedStatus === 'LIVE (POLLING)';
+  if (lifecycle === 'WAIT' && isLive && isFeedActive) {
     // Check if gates allow issuing a signal
     if (lastGates.length === 8 && lastGates.every((g) => g.status === 'PASS') && lastAlignedDirection) {
       if (lastConfidence >= SNIPER_CONFIG.minConfidencePercent && lastPathClearDollars >= SNIPER_CONFIG.minPathClearDollars) {
@@ -316,7 +320,7 @@ function evaluateGatesWithCurrentMarket(
   sellRatio: number,
   buyDelta: number,
   sellDelta: number,
-  feedStatus: 'LIVE' | 'RECONNECTING' | 'OFFLINE'
+  feedStatus: 'LIVE' | 'LIVE (POLLING)' | 'RECONNECTING' | 'OFFLINE'
 ) {
   try {
     const store = getCandleStore();
@@ -340,9 +344,9 @@ function evaluateGatesWithCurrentMarket(
     const m30Candles = mapCandles(store.M30);
     const m15Candles = mapCandles(store.M15);
 
-    // Build derived M5 candles from recent M15
-    const m5Candles: CandleLike[] = [];
-    if (m15Candles.length > 0) {
+    // Use native M5 candles from store when available, otherwise derive from recent M15
+    let m5Candles: CandleLike[] = mapCandles(store.M5);
+    if (m5Candles.length < 3 && m15Candles.length > 0) {
       const recentM15 = m15Candles.slice(-8);
       for (const m of recentM15) {
         for (let i = 0; i < 3; i++) {
@@ -360,16 +364,7 @@ function evaluateGatesWithCurrentMarket(
       }
     }
 
-    // Dynamic nearest support and resistance
-    let sup = price - 12.0;
-    let res = price + 12.0;
-    if (h1Candles.length > 0) {
-      const recentH1 = h1Candles.slice(-10);
-      const lows = recentH1.map((c) => c.low).filter((l) => l < price);
-      const highs = recentH1.map((c) => c.high).filter((h) => h > price);
-      if (lows.length > 0) sup = Math.max(...lows);
-      if (highs.length > 0) res = Math.min(...highs);
-    }
+    const isFeedActive = feedStatus === 'LIVE' || feedStatus === 'LIVE (POLLING)';
 
     // Estimated composite confidence
     const confidenceScore = Math.min(
@@ -379,7 +374,7 @@ function evaluateGatesWithCurrentMarket(
         Math.round(
           (buyRatio >= 50 ? buyRatio : sellRatio) * 0.4 +
             (spread <= 0.4 ? 30 : spread <= 0.8 ? 20 : 10) +
-            (feedStatus === 'LIVE' ? 25 : 0)
+            (isFeedActive ? 25 : 0)
         )
       )
     );
@@ -398,16 +393,29 @@ function evaluateGatesWithCurrentMarket(
       buyDelta60s: buyDelta,
       sellDelta60s: sellDelta,
       confidence: confidenceScore,
-      nearestSupport: sup,
-      nearestResistance: res,
       feedStatus,
     });
 
     lastGates = result.gates;
     lastAlignedDirection = result.alignedDirection;
     lastPathClearDollars = result.pathClearDollars;
+    lastOpposingObStatus = result.opposingObStatus || 'NONE';
+    lastNearestOpposingObPrice = result.nearestOpposingObPrice ?? null;
     lastConfidence = confidenceScore;
     lastWaitReason = result.waitReason;
+
+    // Distinct log entry when no opposing H1 Order Block exists ahead (logged once per direction/hour change)
+    if (lastOpposingObStatus === 'CLEAR_NO_OB_AHEAD') {
+      const candidateDir = result.alignedDirection || (result.gates[0]?.direction === 'SELL' ? 'SELL' : 'BUY');
+      const hourBucket = new Date().toISOString().slice(0, 13);
+      const logKey = `${hourBucket}_${candidateDir}_NO_OB`;
+      if (lastNoObLogKey !== logKey) {
+        lastNoObLogKey = logKey;
+        console.log(
+          `[COMMAND SIGNAL ENGINE] [1R PATH CHECK · NO_OPPOSING_H1_OB_AHEAD] No unmitigated opposing H1 Order Block ahead for ${candidateDir} @ $${price.toFixed(2)} — treating path as CLEAR.`
+        );
+      }
+    }
   } catch (err) {
     console.error('[COMMAND SIGNAL ENGINE] Error during gate evaluation:', err);
   }
@@ -422,6 +430,11 @@ function issueNewSignal(side: SignalSide, entryPrice: number, isTest = false) {
   const tp1 = Number((isBuy ? entry + SNIPER_CONFIG.tp1OffsetDollars : entry - SNIPER_CONFIG.tp1OffsetDollars).toFixed(2));
   const tp2 = Number((isBuy ? entry + SNIPER_CONFIG.tp2OffsetDollars : entry - SNIPER_CONFIG.tp2OffsetDollars).toFixed(2));
   const tp3 = Number((isBuy ? entry + SNIPER_CONFIG.tp3OffsetDollars : entry - SNIPER_CONFIG.tp3OffsetDollars).toFixed(2));
+
+  const pathNote =
+    lastOpposingObStatus === 'CLEAR_NO_OB_AHEAD'
+      ? 'Path CLEAR [NO_OPPOSING_H1_OB_AHEAD]'
+      : `Path +$${lastPathClearDollars.toFixed(1)} clear${lastNearestOpposingObPrice ? ` (Opposing H1 OB @ $${lastNearestOpposingObPrice.toFixed(2)})` : ''}`;
 
   const newSignal: CommandSignal = {
     id: `SIG-${Date.now()}`,
@@ -441,7 +454,7 @@ function issueNewSignal(side: SignalSide, entryPrice: number, isTest = false) {
     isTest,
     confidence: lastConfidence,
     gatesPassedCount: 8,
-    entryReason: `8/8 Ahmed Sniper Chain alignment (${side}) · Entry $${entry} · Path +$${lastPathClearDollars.toFixed(1)} clear`,
+    entryReason: `8/8 Ahmed Sniper Chain alignment (${side}) · Entry $${entry} · ${pathNote}`,
     sentMessageFlags: {
       issued: true,
       tp1: false,
@@ -456,11 +469,14 @@ function issueNewSignal(side: SignalSide, entryPrice: number, isTest = false) {
   activeSignal = newSignal;
   lifecycle = 'ACTIVE';
 
-  console.log(`[COMMAND SIGNAL ENGINE] Issued NEW ${side} Signal: Entry=$${entry}, SL=$${sl}, TP1=$${tp1}, TP2=$${tp2}, TP3=$${tp3} (isTest=${isTest})`);
+  console.log(
+    `[COMMAND SIGNAL ENGINE] Issued NEW ${side} Signal: Entry=$${entry}, SL=$${sl}, TP1=$${tp1}, TP2=$${tp2}, TP3=$${tp3} | ${pathNote} (isTest=${isTest})`
+  );
   saveCommandSignalsToDisk();
 
   // Telegram notification for real signals only (never send test signals to public Telegram chat)
-  if (!isTest && lastFeedStatus === 'LIVE') {
+  const isFeedActive = lastFeedStatus === 'LIVE' || lastFeedStatus === 'LIVE (POLLING)';
+  if (!isTest && isFeedActive) {
     notifyNewSignal(newSignal).catch(() => {});
   }
 }

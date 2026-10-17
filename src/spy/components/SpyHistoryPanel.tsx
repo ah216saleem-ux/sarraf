@@ -69,7 +69,7 @@ export const SpyHistoryPanel: React.FC<SpyHistoryPanelProps> = ({ history, stats
         </div>
       </div>
 
-      {/* Institutional Stats Metric Cards */}
+      {/* SARRAF Stats Metric Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 font-mono">
         <div className="p-3.5 rounded-xl bg-white/5 border border-white/10">
           <div className="text-[10px] text-neutral-400 uppercase tracking-wider">RESOLVED SIGNALS</div>

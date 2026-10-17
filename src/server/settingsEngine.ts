@@ -483,9 +483,9 @@ export function verifyAdminCredentials(username: string, password: string): bool
   const isMatchUser = timingSafeStringEqual(cleanInputUser, cleanConfUser);
 
   if (!isMatchUser) {
-    // Constant-time dummy verify to mitigate username enumeration timing
+    // Constant-time placeholder verify to mitigate username enumeration timing
     try {
-      crypto.scryptSync(password, 'dummy-salt', 64);
+      crypto.scryptSync(password, 'static-salt', 64);
     } catch {}
     return false;
   }

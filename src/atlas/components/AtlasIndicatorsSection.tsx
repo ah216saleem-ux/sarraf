@@ -143,7 +143,7 @@ export const AtlasIndicatorsSection: React.FC<AtlasIndicatorsSectionProps> = ({
           </div>
 
           <p className="text-[11px] text-neutral-400 leading-snug">
-            Each daily pivot zone box expands by ±0.2×ATR(14, H1) to account for institutional liquidity wicks.
+            Each daily pivot zone box expands by ±0.2×ATR(14, H1) to account for sarraf liquidity wicks.
           </p>
         </div>
 

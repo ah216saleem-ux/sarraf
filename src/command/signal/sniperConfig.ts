@@ -1,6 +1,6 @@
 /**
  * AHMED SNIPER CHAIN & SIGNAL ENGINE CONFIGURATION
- * All thresholds and institutional strategy parameters are centralized here.
+ * All thresholds and sarraf strategy parameters are centralized here.
  */
 
 export interface SniperConfig {

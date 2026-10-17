@@ -654,10 +654,19 @@ export function getNewsFeedStatus(displayTz: string = 'UTC'): NewsFeedStatus {
     let goldImpactExplanation = evt.goldImpactExplanation;
 
     if (manualEntry) {
-      actualStr = manualEntry.actual;
-      actualNum = parseFinancialNumber(manualEntry.actual);
-      actualSource = manualEntry.source;
+      if (manualEntry.source === 'UNVERIFIED' || !manualEntry.verified) {
+        actualStr = 'PENDING';
+        actualNum = null;
+        actualSource = 'UNVERIFIED';
+      } else {
+        actualStr = manualEntry.actual;
+        actualNum = parseFinancialNumber(manualEntry.actual);
+        actualSource = manualEntry.source;
+      }
       goldImpactExplanation = manualEntry.explanation;
+    } else if (actualSource === 'UNVERIFIED') {
+      actualStr = 'PENDING';
+      actualNum = null;
     }
 
     const goldImpact = computeGoldImpact(evt.title, evt.forecastNum, actualNum, isReleased);
@@ -705,81 +714,10 @@ export function getNewsFeedStatus(displayTz: string = 'UTC'): NewsFeedStatus {
   };
 }
 
-function ensureUpcomingEvents(list: NewsEvent[]): NewsEvent[] {
-  const now = Date.now();
-  const upcomingCount = list.filter((e) => new Date(e.timeUtc).getTime() + 15 * 60000 >= now).length;
-  if (upcomingCount >= 3) return list;
-
-  const dayMs = 24 * 3600 * 1000;
-  const templates: Array<{
-    title: string;
-    impact: NewsImpact;
-    tier: NewsTier;
-    ahmedTier: 1 | 2 | 3;
-    isSpeech: boolean;
-    forecastStr: string;
-    previousStr: string;
-    dayOffset: number;
-    hourOffset: number;
-  }> = [
-    { title: 'Core CPI m/m', impact: 'High', tier: 'TIER_1', ahmedTier: 1, isSpeech: false, forecastStr: '0.3%', previousStr: '0.2%', dayOffset: 1, hourOffset: 13.5 },
-    { title: 'CPI y/y', impact: 'High', tier: 'TIER_1', ahmedTier: 1, isSpeech: false, forecastStr: '2.6%', previousStr: '2.5%', dayOffset: 1, hourOffset: 13.5 },
-    { title: 'Unemployment Claims', impact: 'Medium', tier: 'TIER_2', ahmedTier: 2, isSpeech: false, forecastStr: '221K', previousStr: '225K', dayOffset: 2, hourOffset: 12.5 },
-    { title: 'Federal Funds Rate', impact: 'High', tier: 'TIER_1', ahmedTier: 1, isSpeech: false, forecastStr: '4.75%', previousStr: '5.00%', dayOffset: 3, hourOffset: 18 },
-    { title: 'Fed Chair Speaks', impact: 'High', tier: 'TIER_1', ahmedTier: 1, isSpeech: true, forecastStr: 'Speaks', previousStr: '--', dayOffset: 3, hourOffset: 18.5 },
-    { title: 'Core Retail Sales m/m', impact: 'Medium', tier: 'TIER_2', ahmedTier: 2, isSpeech: false, forecastStr: '0.4%', previousStr: '0.1%', dayOffset: 4, hourOffset: 12.5 },
-    { title: 'Non-Farm Employment Change', impact: 'High', tier: 'TIER_1', ahmedTier: 1, isSpeech: false, forecastStr: '165K', previousStr: '142K', dayOffset: 5, hourOffset: 12.5 },
-  ];
-
-  const merged = [...list];
-  const upcomingTitles = new Set(
-    list.filter((e) => new Date(e.timeUtc).getTime() + 15 * 60000 >= now).map((e) => e.title.toLowerCase())
-  );
-
-  for (const t of templates) {
-    const timeMs = now + t.dayOffset * dayMs + Math.round(t.hourOffset * 3600000);
-    const timeUtc = new Date(timeMs).toISOString();
-    const id = `EVT-${timeUtc.slice(0, 10)}-USD-${t.title.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`;
-
-    if (!upcomingTitles.has(t.title.toLowerCase())) {
-      upcomingTitles.add(t.title.toLowerCase());
-      merged.push({
-        id,
-        title: t.title,
-        country: 'USD',
-        impact: t.impact,
-        tier: t.tier,
-        ahmedTier: t.ahmedTier,
-        isSpeech: t.isSpeech,
-        timeUtc,
-        displayTime: new Date(timeMs).toUTCString(),
-        rawDate: timeUtc,
-        forecastStr: t.forecastStr,
-        previousStr: t.previousStr,
-        actualStr: null,
-        forecastNum: parseFloat(t.forecastStr) || null,
-        previousNum: parseFloat(t.previousStr) || null,
-        actualNum: null,
-        actualSource: null,
-        goldImpact: 'UPCOMING',
-        isHighImpactUsd: t.impact === 'High',
-        isTentative: false,
-        isAllDay: false,
-        isCancelledOrRemoved: false,
-        minutesUntil: Math.round((timeMs - now) / 60000),
-        isReleased: false,
-        isInsideLockWindow: false,
-      });
-    }
-  }
-
-  return merged.sort((a, b) => new Date(a.timeUtc).getTime() - new Date(b.timeUtc).getTime());
-}
-
 export function getNewsEventsForUI(): NewsEvent[] {
-  // Returns formatted and refreshed events
+  // Returns formatted and refreshed authentic Forex Factory events (zero synthetic fallback events)
   getNewsFeedStatus();
-  const rawList = ensureUpcomingEvents(cachedEvents);
+  const rawList = cachedEvents;
   return rawList.map((evt) => {
     const eventTimeMs = new Date(evt.timeUtc).getTime();
     const now = Date.now();
@@ -793,10 +731,19 @@ export function getNewsEventsForUI(): NewsEvent[] {
     let goldImpactExplanation = evt.goldImpactExplanation;
 
     if (manualEntry) {
-      actualStr = manualEntry.actual;
-      actualNum = parseFinancialNumber(manualEntry.actual);
-      actualSource = manualEntry.source;
+      if (manualEntry.source === 'UNVERIFIED' || !manualEntry.verified) {
+        actualStr = 'PENDING';
+        actualNum = null;
+        actualSource = 'UNVERIFIED';
+      } else {
+        actualStr = manualEntry.actual;
+        actualNum = parseFinancialNumber(manualEntry.actual);
+        actualSource = manualEntry.source;
+      }
       goldImpactExplanation = manualEntry.explanation;
+    } else if (actualSource === 'UNVERIFIED') {
+      actualStr = 'PENDING';
+      actualNum = null;
     }
 
     const goldImpact = computeGoldImpact(evt.title, evt.forecastNum, actualNum, isReleased);
@@ -842,10 +789,11 @@ export function setManualActualValue(
   explanation?: string
 ) {
   loadManualActuals();
+  const isVerified = source === 'MANUAL' && actualValue.trim().toUpperCase() !== 'PENDING';
   manualActuals[eventId] = {
-    actual: actualValue.trim(),
-    source,
-    verified: source === 'MANUAL',
+    actual: isVerified ? actualValue.trim() : 'PENDING',
+    source: isVerified ? 'MANUAL' : 'UNVERIFIED',
+    verified: isVerified,
     note,
     explanation,
   };
@@ -854,24 +802,47 @@ export function setManualActualValue(
 
 export async function lookupActualValueWithGemini(
   event: NewsEvent
-): Promise<{ actual: string; explanation: string } | null> {
+): Promise<{ actual: string; explanation: string; verified?: boolean }> {
+  const hasVerifiedFeedActual =
+    event.isReleased &&
+    Boolean(event.actualStr) &&
+    event.actualStr !== 'PENDING' &&
+    event.actualStr !== '--' &&
+    (event.actualSource === 'FEED' || event.actualSource === 'MANUAL');
+
+  // Strict rule: Never guess an unverified actual value with Gemini. Always return PENDING when unverified.
+  if (!hasVerifiedFeedActual) {
+    return {
+      actual: 'PENDING',
+      explanation: 'Official actual figure is not yet verified in the live feed — showing PENDING (guessing disabled).',
+      verified: false,
+    };
+  }
+
+  const verifiedActual = event.actualStr!;
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') return null;
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+    return {
+      actual: verifiedActual,
+      explanation: `Verified actual print ${verifiedActual} vs forecast ${event.forecastStr || 'N/A'}.`,
+      verified: true,
+    };
+  }
 
   try {
     const ai = new GoogleGenAI({ apiKey });
     const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
     const prompt = `You are SARRAF News Intelligence Assistant.
-Lookup and report the actual figure for this macroeconomic release:
+Explain in 1 short sentence (max 20 words) the gold (XAU/USD) impact of this verified macroeconomic release.
+DO NOT invent or alter any numbers.
 Event: ${event.title} (${event.country})
-Release UTC Time: ${event.timeUtc}
+Verified Actual: ${verifiedActual}
 Forecast: ${event.forecastStr || 'N/A'}
 Previous: ${event.previousStr || 'N/A'}
 
-Provide the reported actual economic figure if already released, and a concise 1-line explanation (max 20 words) on gold impact.
 Return ONLY valid JSON:
-{"actual":"e.g. 3.2% or 210K","explanation":"max 20 words rationale"}`;
+{"explanation":"max 20 words rationale"}`;
 
     const res = await ai.models.generateContent({
       model,
@@ -880,15 +851,26 @@ Return ONLY valid JSON:
 
     const text = res.text?.trim() || '';
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
+    if (!match) {
+      return {
+        actual: verifiedActual,
+        explanation: `Verified actual print ${verifiedActual} vs forecast ${event.forecastStr || 'N/A'}.`,
+        verified: true,
+      };
+    }
     const parsed = JSON.parse(match[0]);
     return {
-      actual: parsed.actual || '',
-      explanation: (parsed.explanation || '').slice(0, 140),
+      actual: verifiedActual,
+      explanation: (parsed.explanation || `Verified actual print ${verifiedActual}.`).slice(0, 140),
+      verified: true,
     };
   } catch (err: any) {
     console.warn('[NEWS ENGINE] Gemini lookup error:', err.message);
-    return null;
+    return {
+      actual: verifiedActual,
+      explanation: `Verified actual print ${verifiedActual} vs forecast ${event.forecastStr || 'N/A'}.`,
+      verified: true,
+    };
   }
 }
 

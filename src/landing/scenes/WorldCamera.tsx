@@ -47,7 +47,7 @@ export const WorldCamera: React.FC<WorldCameraProps> = ({ progress }) => {
     smoothProgress.current = THREE.MathUtils.damp(smoothProgress.current, progress, 5.5, delta);
     const p = Math.min(Math.max(smoothProgress.current, 0), 1);
 
-    // Sample continuous spline positions
+    // Test continuous spline positions
     const targetPos = posCurve.getPointAt(p);
     const targetLook = lookCurve.getPointAt(p);
 

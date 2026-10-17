@@ -107,7 +107,7 @@ export function createDateFromNY(
   return d;
 }
 
-// Institutional Gold / Spot market schedule (DST-aware America/New_York):
+// SARRAF Gold / Spot market schedule (DST-aware America/New_York):
 // - Weekly close: Friday 17:00 America/New_York
 // - Weekly open: Sunday 18:00 America/New_York
 // - Daily break: Monday-Thursday 17:00-18:00 America/New_York

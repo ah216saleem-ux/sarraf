@@ -523,7 +523,7 @@ export function formatLearningsForAI(): { text: string; count: number } {
 
   if (activeLessons.length === 0) {
     return {
-      text: 'No active curated lessons recorded in institutional memory.',
+      text: 'No active curated lessons recorded in system memory.',
       count: 0,
     };
   }
@@ -633,7 +633,7 @@ export function revalidateSetupForApproval(
   }
 
   if (isZoneBroken) {
-    return { ok: false, reason: 'M30 institutional zone was breached and invalidated during review window.' };
+    return { ok: false, reason: 'M30 SARRAF zone was breached and invalidated during review window.' };
   }
 
   // Price distance check: max $3 beyond entry limit

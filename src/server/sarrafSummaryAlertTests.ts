@@ -50,7 +50,7 @@ export function runSummaryAlertTestSuite(): SummaryAlertTestSuiteReport {
   // no loss-based stop exists anywhere in the code
   // -------------------------------------------------------------
   {
-    const mockSignal: SignalRecord = {
+    const testSignal: SignalRecord = {
       id: 'TEST-SRF-LOSS-001',
       version: 1,
       direction: 'BUY',
@@ -80,7 +80,7 @@ export function runSummaryAlertTestSuite(): SummaryAlertTestSuiteReport {
     };
 
     // Simulate closing on SL
-    closeActiveSignal(mockSignal, 'SL', 'LOSS', 4140.0, 0, false, 'Simulated stop hit');
+    closeActiveSignal(testSignal, 'SL', 'LOSS', 4140.0, 0, false, 'Simulated stop hit');
     const managerStateAfterLoss = getFullManagerState();
 
     // Verify manager entered COOLDOWN, cooldownEndsAt is set, and state is COOLDOWN (not permanently stopped or disabled)
@@ -129,11 +129,11 @@ export function runSummaryAlertTestSuite(): SummaryAlertTestSuiteReport {
   }
 
   // -------------------------------------------------------------
-  // Test c: Daily and weekly summary numbers match a hand-checked sample, including zero-signal days
+  // Test c: Daily and weekly summary numbers match hand-checked data, including zero-signal days
   // -------------------------------------------------------------
   {
     const todayStr = '2026-10-08';
-    const mockHistory: SignalRecord[] = [
+    const testHistory: SignalRecord[] = [
       {
         id: 'SRF-20261008-001',
         version: 1,
@@ -197,19 +197,19 @@ export function runSummaryAlertTestSuite(): SummaryAlertTestSuiteReport {
     ];
 
     // Compute Daily Summary
-    const dailyData = computeDailySummaryData(mockHistory, todayStr);
+    const dailyData = computeDailySummaryData(testHistory, todayStr);
     const dailyText = formatDailySummary(dailyData);
 
     // Compute Zero-Signal Daily Summary
-    const zeroDailyData = computeDailySummaryData(mockHistory, '2026-10-09');
+    const zeroDailyData = computeDailySummaryData(testHistory, '2026-10-09');
     const zeroDailyText = formatDailySummary(zeroDailyData);
 
-    // Hand checked sample for weekly report
-    const weeklySampleHistory: SignalRecord[] = [
-      ...mockHistory,
+    // Hand checked dataset for weekly report
+    const weeklyDatasetHistory: SignalRecord[] = [
+      ...testHistory,
       // 4 more Wins
       ...[3, 4, 5, 6].map((i) => ({
-        ...mockHistory[0],
+        ...testHistory[0],
         id: `SRF-20261008-00${i}`,
         createdAt: '2026-10-06T10:00:00.000Z',
         closedAt: '2026-10-06T11:00:00.000Z', // Tuesday
@@ -218,7 +218,7 @@ export function runSummaryAlertTestSuite(): SummaryAlertTestSuiteReport {
       })),
       // 1 more Loss
       {
-        ...mockHistory[1],
+        ...testHistory[1],
         id: 'SRF-20261008-007',
         createdAt: '2026-10-08T15:00:00.000Z',
         closedAt: '2026-10-08T16:00:00.000Z', // Thursday
@@ -227,7 +227,7 @@ export function runSummaryAlertTestSuite(): SummaryAlertTestSuiteReport {
       },
       // 1 Breakeven
       {
-        ...mockHistory[0],
+        ...testHistory[0],
         id: 'SRF-20261008-008',
         createdAt: '2026-10-07T10:00:00.000Z',
         closedAt: '2026-10-07T11:00:00.000Z', // Wednesday
@@ -238,7 +238,7 @@ export function runSummaryAlertTestSuite(): SummaryAlertTestSuiteReport {
       },
     ];
 
-    const weeklyData = computeWeeklyReportData(weeklySampleHistory, new Date('2026-10-09T23:00:00Z'));
+    const weeklyData = computeWeeklyReportData(weeklyDatasetHistory, new Date('2026-10-09T23:00:00Z'));
     const weeklyText = formatWeeklyReport(weeklyData);
 
     const zeroWeeklyData = computeWeeklyReportData([], new Date('2026-10-09T23:00:00Z'));
@@ -294,14 +294,14 @@ export function runSummaryAlertTestSuite(): SummaryAlertTestSuiteReport {
     const isoWeek = getIsoWeekString(new Date());
     const weeklyEventId = `SUMMARY-W-${isoWeek}`;
 
-    const mockOutbox = [
+    const testOutbox = [
       { eventId: dailyEventId, signalId: dailyEventId, type: 'DAILY_SUMMARY', status: 'SENT' },
       { eventId: weeklyEventId, signalId: weeklyEventId, type: 'WEEKLY_REPORT', status: 'SENT' },
     ];
 
     // Check idempotency: outbox.some prevents duplicate queue insertion
-    const isDailyDuplicate = mockOutbox.some((item) => item.eventId === dailyEventId);
-    const isWeeklyDuplicate = mockOutbox.some((item) => item.eventId === weeklyEventId);
+    const isDailyDuplicate = testOutbox.some((item) => item.eventId === dailyEventId);
+    const isWeeklyDuplicate = testOutbox.some((item) => item.eventId === weeklyEventId);
 
     // Check late-send logic: scheduled 2 hours ago (< 12 hours late) -> valid for catch-up dispatch
     const twoHoursAgoMs = Date.now() - 2 * 3600 * 1000;

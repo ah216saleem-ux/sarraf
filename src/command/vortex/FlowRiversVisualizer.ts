@@ -316,7 +316,7 @@ export class FlowRiversVisualizer {
             verticalDrift = -normProgress * (uSellRatio - 0.3) * 0.48;
           }
 
-          // 4. Sample the price thread texture at normProgress
+          // 4. Test the price thread texture at normProgress
           vec4 threadSample = texture2D(uPriceTexture, vec2(clamp(normProgress, 0.005, 0.995), 0.5));
           float threadNormY = threadSample.r;
           float threadWorldY = (threadNormY - 0.5) * uPriceYScale;
@@ -690,7 +690,7 @@ export class FlowRiversVisualizer {
     const posAttr = lineGeo.getAttribute('position') as THREE.BufferAttribute;
     const pointsCount = posAttr.count;
 
-    // Sample history across pointsCount
+    // Test history across pointsCount
     const histLen = history.length;
     const yRange = Math.max(this.currentYMax - this.currentYMin, 0.01);
 
@@ -865,25 +865,25 @@ export class FlowRiversVisualizer {
   private updateComets(delta: number) {
     if (!this.cometMesh) return;
 
-    const dummy = new THREE.Object3D();
+    const test = new THREE.Object3D();
 
     for (let i = 0; i < this.maxComets; i++) {
       const comet = this.comets[i];
       if (!comet.active) {
-        dummy.position.set(0, 0, -100);
-        dummy.scale.set(0, 0, 0);
-        dummy.updateMatrix();
-        this.cometMesh.setMatrixAt(i, dummy.matrix);
+        test.position.set(0, 0, -100);
+        test.scale.set(0, 0, 0);
+        test.updateMatrix();
+        this.cometMesh.setMatrixAt(i, test.matrix);
         continue;
       }
 
       comet.life += delta;
       if (comet.life >= comet.maxLife) {
         comet.active = false;
-        dummy.position.set(0, 0, -100);
-        dummy.scale.set(0, 0, 0);
-        dummy.updateMatrix();
-        this.cometMesh.setMatrixAt(i, dummy.matrix);
+        test.position.set(0, 0, -100);
+        test.scale.set(0, 0, 0);
+        test.updateMatrix();
+        this.cometMesh.setMatrixAt(i, test.matrix);
         continue;
       }
 
@@ -894,12 +894,12 @@ export class FlowRiversVisualizer {
       const scaleX = (1.0 - progress) * (comet.length / 0.035);
       const scaleY = (1.0 - progress * 0.7);
 
-      dummy.position.set(comet.x, comet.y, 0.07);
-      dummy.scale.set(scaleX, scaleY, 1.0);
-      dummy.rotation.z = Math.atan2(comet.vy, comet.vx);
-      dummy.updateMatrix();
+      test.position.set(comet.x, comet.y, 0.07);
+      test.scale.set(scaleX, scaleY, 1.0);
+      test.rotation.z = Math.atan2(comet.vy, comet.vx);
+      test.updateMatrix();
 
-      this.cometMesh.setMatrixAt(i, dummy.matrix);
+      this.cometMesh.setMatrixAt(i, test.matrix);
     }
 
     this.cometMesh.instanceMatrix.needsUpdate = true;

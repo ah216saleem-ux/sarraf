@@ -87,8 +87,8 @@ export async function validateSignalWithGemini(signal: {
 
   const { text: learningsContext, count: lessonsUsedCount } = formatLearningsForAI();
 
-  const prompt = `You are the SARRAF Institutional Gold Intelligence Validator.
-Evaluate this prospective XAU/USD trade setup with institutional macro risk discipline.
+  const prompt = `You are the SARRAF Gold Intelligence Validator.
+Evaluate this prospective XAU/USD trade setup with macro risk discipline.
 
 SETUP DATA:
 - Symbol: XAUUSD Spot
@@ -139,7 +139,7 @@ CRITICAL INSTRUCTIONS:
       }
 
       const confidence = typeof parsed.confidence === 'number' ? Math.min(100, Math.max(0, parsed.confidence)) : 75;
-      const reason = typeof parsed.reason === 'string' ? parsed.reason.slice(0, 160) : 'Standard institutional structure confirmed';
+      const reason = typeof parsed.reason === 'string' ? parsed.reason.slice(0, 160) : 'Standard structure confirmed';
 
       return {
         verdict: parsed.verdict,
@@ -214,7 +214,7 @@ export async function generateMarketChat(
 
   const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
-  const systemInstruction = `You are SARRAF AI — an elite institutional macro bullion strategist and algorithmic risk advisor for XAU/USD spot trading desks.
+  const systemInstruction = `You are SARRAF AI — an elite macro bullion strategist and algorithmic risk advisor for XAU/USD spot trading desks.
 
 LIVE TERMINAL CONTEXT:
 - XAU/USD Current Price: $${liveContext.livePrice ? liveContext.livePrice.toFixed(2) : 'OFFLINE'}
@@ -224,7 +224,7 @@ LIVE TERMINAL CONTEXT:
 - Macro News Radar: ${JSON.stringify(liveContext.macroEvents || [])}
 
 STRICT OPERATIONAL DIRECTIVES:
-1. Provide concise, institutional analysis on gold price action, macro liquidity, yields, and geopolitical demand.
+1. Provide concise analysis on gold price action, macro liquidity, yields, and geopolitical demand.
 2. You CANNOT place, modify, or cancel trades. You have read-only terminal visibility.
 3. Keep responses punchy, professional, and within 3 paragraphs.
 4. Always conclude with the mandatory disclaimer: "Not financial advice."`;

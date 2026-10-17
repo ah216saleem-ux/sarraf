@@ -1,6 +1,6 @@
 /**
  * SPY Smart Money Confluence Options-Signal Engine
- * Deterministic institutional analysis across 7 Smart Money gates.
+ * Deterministic sarraf analysis across 7 Smart Money gates.
  *
  * Expiry Timeframes:
  * - 15m: bias 15m, entry 1m/5m
@@ -184,7 +184,7 @@ export function getExpiryLockStatus(expiry: SpyExpiryOption): {
       isLocked: true,
       isCooldown: true,
       cooldownSecondsLeft: secondsLeft,
-      lockReason: `15-minute institutional cooldown active (${minsLeft}m left)`,
+      lockReason: `15-minute sarraf cooldown active (${minsLeft}m left)`,
     };
   }
 
@@ -899,14 +899,14 @@ export function evaluateSpySignal(params: {
       if (currentPrice >= ob.bottom - zoneTolerance && currentPrice <= ob.top + zoneTolerance) {
         gateAPassed = true;
         activeOB = ob;
-        gateADetail = `Price ($${currentPrice.toFixed(2)}) is inside unmitigated Demand Zone ($${ob.bottom.toFixed(2)} - $${ob.top.toFixed(2)}). Institutional accumulation active.`;
+        gateADetail = `Price ($${currentPrice.toFixed(2)}) is inside unmitigated Demand Zone ($${ob.bottom.toFixed(2)} - $${ob.top.toFixed(2)}). SARRAF accumulation active.`;
         break;
       }
     } else if (candidateBias === 'BEARISH' && ob.type === 'SUPPLY') {
       if (currentPrice >= ob.bottom - zoneTolerance && currentPrice <= ob.top + zoneTolerance) {
         gateAPassed = true;
         activeOB = ob;
-        gateADetail = `Price ($${currentPrice.toFixed(2)}) is inside unmitigated Supply Zone ($${ob.bottom.toFixed(2)} - $${ob.top.toFixed(2)}). Institutional distribution active.`;
+        gateADetail = `Price ($${currentPrice.toFixed(2)}) is inside unmitigated Supply Zone ($${ob.bottom.toFixed(2)} - $${ob.top.toFixed(2)}). SARRAF distribution active.`;
         break;
       }
     }
@@ -1085,10 +1085,10 @@ export function evaluateSpySignal(params: {
 
   if (relativeVolume >= 1.05) {
     gateFPassed = true;
-    gateFDetail = `Relative volume is ${relativeVolume.toFixed(2)}x the 20-bar average (${avgVolume20.toFixed(0)} bars). Institutional activity verified.`;
+    gateFDetail = `Relative volume is ${relativeVolume.toFixed(2)}x the 20-bar average (${avgVolume20.toFixed(0)} bars). SARRAF activity verified.`;
   } else {
     gateFPassed = false;
-    gateFDetail = `Relative volume is ${relativeVolume.toFixed(2)}x (below 1.05x hurdle). Lacks institutional participation thrust.`;
+    gateFDetail = `Relative volume is ${relativeVolume.toFixed(2)}x (below 1.05x hurdle). Lacks sarraf participation thrust.`;
   }
 
   gates.push({
@@ -1164,7 +1164,7 @@ export function evaluateSpySignal(params: {
     bias: gateGPassed ? 'BULLISH' : 'NEUTRAL',
     weight: 0,
     score: gateGPassed ? 0 : 0,
-    detail: gateGPassed ? 'All regime filters clear: Past opening 5m, no high-impact USD events +-15m, ATR within normal institutional distribution.' : filterBlockReasons.join(' '),
+    detail: gateGPassed ? 'All regime filters clear: Past opening 5m, no high-impact USD events +-15m, ATR within normal sarraf distribution.' : filterBlockReasons.join(' '),
     metric: gateGPassed ? 'CLEAR' : 'BLOCKED',
     threshold: 'Session open > 5m, No High USD News +-15m, ATR 5-95%',
   });
@@ -1239,11 +1239,11 @@ export function evaluateSpySignal(params: {
     if (!gateGPassed) {
       reasons.push(`Regime filter blocked execution: ${filterBlockReasons.join(' ')}`);
     } else if (!gateAPassed || !gateDPassed) {
-      reasons.push('Mandatory core gates failed: Both Gate (a) Order Block and Gate (d) CHoCH/BOS are required for institutional entry.');
+      reasons.push('Mandatory core gates failed: Both Gate (a) Order Block and Gate (d) CHoCH/BOS are required for sarraf entry.');
     } else if (!atrFeasible) {
       reasons.push(`ATR feasibility failed: Expected move over ${expiry} ($${expectedMove.toFixed(2)}) is smaller than required TP distance ($${distanceToTp.toFixed(2)}).`);
     } else if (totalScore < 70) {
-      reasons.push(`Confluence score (${totalScore}%) is below institutional threshold (70%). Selectivity preserves capital.`);
+      reasons.push(`Confluence score (${totalScore}%) is below sarraf threshold (70%). Selectivity preserves capital.`);
     }
 
     // Add failing gate details

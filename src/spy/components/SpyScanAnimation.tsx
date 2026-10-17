@@ -257,7 +257,7 @@ export const SpyScanAnimation: React.FC<SpyScanAnimationProps> = ({
       {/* 3D Canvas Mount */}
       <div ref={mountRef} className="w-full h-72 sm:h-80" />
 
-      {/* Floating Institutional Scan Overlay HUD */}
+      {/* Floating SARRAF Scan Overlay HUD */}
       <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-4 sm:p-5 bg-gradient-to-t from-black/80 via-transparent to-black/60">
         {/* Top Scan Status Bar */}
         <div className="flex items-center justify-between">

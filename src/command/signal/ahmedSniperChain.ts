@@ -10,10 +10,21 @@ export interface CandleLike {
   time?: number | string;
 }
 
+export type OpposingObStatus = 'CLEAR_WITH_OB' | 'CLEAR_NO_OB_AHEAD' | 'BLOCKED_BY_OB' | 'NONE';
+
+export interface H1OrderBlockZone {
+  side: 'BUY' | 'SELL'; // BUY = Bullish Demand OB, SELL = Bearish Supply OB
+  top: number;
+  bottom: number;
+  mid: number;
+  createdAt?: number | string;
+}
+
 export interface OpposingZoneCheck {
   nearestOpposingZonePrice: number | null;
   pathClearDollars: number;
   isClear1R: boolean;
+  opposingObStatus: OpposingObStatus;
 }
 
 export interface SniperEvaluationInput {
@@ -42,10 +53,223 @@ export interface SniperEvaluationOutput {
   alignedDirection: SignalSide | null;
   pathClearDollars: number;
   isPathClear: boolean;
+  opposingObStatus?: OpposingObStatus;
+  nearestOpposingObPrice?: number | null;
   confidence: number;
   isConfidenceMet: boolean;
   canIssueSignal: boolean;
   waitReason: string;
+}
+
+function computeLocalAtr14(candles: CandleLike[]): number {
+  if (!candles || candles.length < 2) return 5.0;
+  const slice = candles.slice(-15);
+  let sum = 0;
+  let count = 0;
+  for (let i = 1; i < slice.length; i++) {
+    const tr = Math.max(
+      slice[i].high - slice[i].low,
+      Math.abs(slice[i].high - slice[i - 1].close),
+      Math.abs(slice[i].low - slice[i - 1].close)
+    );
+    sum += tr;
+    count++;
+  }
+  return count > 0 ? sum / count : 5.0;
+}
+
+/**
+ * Finds unmitigated Bullish (Demand) and Bearish (Supply) H1 Order Blocks from historical H1 candles.
+ * An Order Block is formed by the last opposing candle before a displacement move (>= 1.0x ATR with BOS or >= 1.3x ATR)
+ * and remains unmitigated until a subsequent bar closes beyond its invalidation edge or trades through its 50% mean threshold.
+ */
+export function findUnmitigatedH1OrderBlocks(candles: CandleLike[]): {
+  bullObs: H1OrderBlockZone[];
+  bearObs: H1OrderBlockZone[];
+} {
+  const bullObs: H1OrderBlockZone[] = [];
+  const bearObs: H1OrderBlockZone[] = [];
+  if (!candles || candles.length < 10) return { bullObs, bearObs };
+
+  for (let i = 4; i < candles.length - 1; i++) {
+    const dispBar = candles[i];
+    const body = Math.abs(dispBar.close - dispBar.open);
+    const localAtr = computeLocalAtr14(candles.slice(Math.max(0, i - 14), i + 1));
+    if (body < 1.0 * localAtr) continue;
+
+    if (dispBar.close > dispBar.open) {
+      let priorHigh = -Infinity;
+      for (let s = Math.max(0, i - 6); s < i; s++) {
+        if (candles[s].high > priorHigh) priorHigh = candles[s].high;
+      }
+      if (dispBar.close > priorHigh || body >= 1.3 * localAtr) {
+        let obIdx = i - 1;
+        for (let k = i - 1; k >= Math.max(0, i - 4); k--) {
+          if (candles[k].close < candles[k].open) {
+            obIdx = k;
+            break;
+          }
+        }
+        const obBar = candles[obIdx];
+        const top = Number(Math.max(obBar.open, obBar.close).toFixed(2));
+        const bottom = Number(obBar.low.toFixed(2));
+        const mid = Number(((top + bottom) / 2).toFixed(2));
+
+        let mitigated = false;
+        for (let j = i + 1; j < candles.length; j++) {
+          if (candles[j].close < bottom || (j > i + 1 && candles[j].low <= mid)) {
+            mitigated = true;
+            break;
+          }
+        }
+        if (!mitigated) {
+          bullObs.push({ side: 'BUY', top, bottom, mid, createdAt: obBar.time });
+        }
+      }
+    } else if (dispBar.close < dispBar.open) {
+      let priorLow = Infinity;
+      for (let s = Math.max(0, i - 6); s < i; s++) {
+        if (candles[s].low < priorLow) priorLow = candles[s].low;
+      }
+      if (dispBar.close < priorLow || body >= 1.3 * localAtr) {
+        let obIdx = i - 1;
+        for (let k = i - 1; k >= Math.max(0, i - 4); k--) {
+          if (candles[k].close > candles[k].open) {
+            obIdx = k;
+            break;
+          }
+        }
+        const obBar = candles[obIdx];
+        const top = Number(obBar.high.toFixed(2));
+        const bottom = Number(Math.min(obBar.open, obBar.close).toFixed(2));
+        const mid = Number(((top + bottom) / 2).toFixed(2));
+
+        let mitigated = false;
+        for (let j = i + 1; j < candles.length; j++) {
+          if (candles[j].close > top || (j > i + 1 && candles[j].high >= mid)) {
+            mitigated = true;
+            break;
+          }
+        }
+        if (!mitigated) {
+          bearObs.push({ side: 'SELL', top, bottom, mid, createdAt: obBar.time });
+        }
+      }
+    }
+  }
+
+  return { bullObs, bearObs };
+}
+
+/**
+ * Evaluates 1R path clearance against the nearest unmitigated opposing H1 Order Block.
+ * If no opposing H1 Order Block exists ahead of price, the path is treated as CLEAR with status 'CLEAR_NO_OB_AHEAD'.
+ */
+export function evaluateOpposingH1OrderBlockPath(
+  h1Candles: CandleLike[],
+  currentPrice: number,
+  direction: SignalSide | null,
+  minPathClearDollars: number = 10.0,
+  explicitSupport?: number,
+  explicitResistance?: number
+): OpposingZoneCheck {
+  if (!direction || currentPrice <= 0) {
+    return {
+      nearestOpposingZonePrice: null,
+      pathClearDollars: 0,
+      isClear1R: false,
+      opposingObStatus: 'NONE',
+    };
+  }
+
+  if (h1Candles && h1Candles.length >= 10) {
+    const { bullObs, bearObs } = findUnmitigatedH1OrderBlocks(h1Candles);
+
+    if (direction === 'BUY') {
+      const opposingBear = bearObs
+        .filter((o) => o.bottom > currentPrice)
+        .sort((a, b) => a.bottom - b.bottom);
+
+      if (opposingBear.length === 0) {
+        return {
+          nearestOpposingZonePrice: null,
+          pathClearDollars: 15.0,
+          isClear1R: true,
+          opposingObStatus: 'CLEAR_NO_OB_AHEAD',
+        };
+      }
+
+      const nearest = opposingBear[0];
+      const dist = Number(Math.max(0, nearest.bottom - currentPrice).toFixed(2));
+      const isClear = dist >= minPathClearDollars;
+      return {
+        nearestOpposingZonePrice: nearest.bottom,
+        pathClearDollars: dist,
+        isClear1R: isClear,
+        opposingObStatus: isClear ? 'CLEAR_WITH_OB' : 'BLOCKED_BY_OB',
+      };
+    } else {
+      const opposingBull = bullObs
+        .filter((o) => o.top < currentPrice)
+        .sort((a, b) => b.top - a.top);
+
+      if (opposingBull.length === 0) {
+        return {
+          nearestOpposingZonePrice: null,
+          pathClearDollars: 15.0,
+          isClear1R: true,
+          opposingObStatus: 'CLEAR_NO_OB_AHEAD',
+        };
+      }
+
+      const nearest = opposingBull[0];
+      const dist = Number(Math.max(0, currentPrice - nearest.top).toFixed(2));
+      const isClear = dist >= minPathClearDollars;
+      return {
+        nearestOpposingZonePrice: nearest.top,
+        pathClearDollars: dist,
+        isClear1R: isClear,
+        opposingObStatus: isClear ? 'CLEAR_WITH_OB' : 'BLOCKED_BY_OB',
+      };
+    }
+  }
+
+  // Fallback when fewer than 10 H1 candles are provided (e.g. unit test harness with explicit support/resistance)
+  if (direction === 'BUY') {
+    if (explicitResistance !== undefined) {
+      const dist = Number(Math.max(0, explicitResistance - currentPrice).toFixed(2));
+      const isClear = dist >= minPathClearDollars;
+      return {
+        nearestOpposingZonePrice: explicitResistance,
+        pathClearDollars: dist,
+        isClear1R: isClear,
+        opposingObStatus: isClear ? 'CLEAR_WITH_OB' : 'BLOCKED_BY_OB',
+      };
+    }
+    return {
+      nearestOpposingZonePrice: null,
+      pathClearDollars: 15.0,
+      isClear1R: true,
+      opposingObStatus: 'CLEAR_NO_OB_AHEAD',
+    };
+  } else {
+    if (explicitSupport !== undefined) {
+      const dist = Number(Math.max(0, currentPrice - explicitSupport).toFixed(2));
+      const isClear = dist >= minPathClearDollars;
+      return {
+        nearestOpposingZonePrice: explicitSupport,
+        pathClearDollars: dist,
+        isClear1R: isClear,
+        opposingObStatus: isClear ? 'CLEAR_WITH_OB' : 'BLOCKED_BY_OB',
+      };
+    }
+    return {
+      nearestOpposingZonePrice: null,
+      pathClearDollars: 15.0,
+      isClear1R: true,
+      opposingObStatus: 'CLEAR_NO_OB_AHEAD',
+    };
+  }
 }
 
 /**
@@ -148,7 +372,7 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
   }
 
   // -------------------------------------------------------------
-  // GATE 2: H4 Bias (Institutional Liquidity Sweeps & Order Block)
+  // GATE 2: H4 Bias (SARRAF Liquidity Sweeps & Order Block)
   // -------------------------------------------------------------
   let g2Status: 'PASS' | 'FAIL' | 'LOCKED' = 'LOCKED';
   let g2Dir: GateDirection = 'NEUTRAL';
@@ -468,29 +692,38 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
     }
   }
 
-  // 1R (10 dollars) opposing path check
-  let pathClearDollars = 0;
-  let isPathClear = false;
+  // Option B: 1R ($10.0) opposing path check against nearest unmitigated opposing H1 Order Block
+  const candidateDirection: SignalSide | null =
+    alignedDirection ||
+    (g1Dir === 'BUY' || g1Dir === 'SELL' ? g1Dir : buyRatio >= 50 ? 'BUY' : 'SELL');
 
-  if (alignedDirection === 'BUY') {
-    const res = input.nearestResistance ?? (currentPrice + 15.0);
-    pathClearDollars = Math.max(0, res - currentPrice);
-    isPathClear = pathClearDollars >= cfg.minPathClearDollars;
-  } else if (alignedDirection === 'SELL') {
-    const sup = input.nearestSupport ?? (currentPrice - 15.0);
-    pathClearDollars = Math.max(0, currentPrice - sup);
-    isPathClear = pathClearDollars >= cfg.minPathClearDollars;
-  }
+  const obPathEval = evaluateOpposingH1OrderBlockPath(
+    h1Candles,
+    currentPrice,
+    candidateDirection,
+    cfg.minPathClearDollars,
+    input.nearestSupport,
+    input.nearestResistance
+  );
+
+  const pathClearDollars = obPathEval.pathClearDollars;
+  const isPathClear = alignedDirection ? obPathEval.isClear1R : false;
+  const opposingObStatus = obPathEval.opposingObStatus;
+  const nearestOpposingObPrice = obPathEval.nearestOpposingZonePrice;
 
   const isConfidenceMet = confidence >= cfg.minConfidencePercent;
 
-  // Signal is issued only when all gates PASS in the same direction AND confidence is at least 65% AND path to opposing zone is at least 1R clear
+  // Signal is issued only when all gates PASS in the same direction AND confidence is at least 65% AND path to opposing H1 OB is at least 1R clear
   const canIssueSignal = !!(allPassed && alignedDirection && isConfidenceMet && isPathClear);
 
   // Formulate concise human-readable one-line wait/entry reason
   let waitReason = '';
   if (canIssueSignal && alignedDirection) {
-    waitReason = `8/8 SNIPER GATES ALIGNED (${alignedDirection}): Clear path +$${pathClearDollars.toFixed(1)} (Confidence: ${confidence.toFixed(0)}%)`;
+    if (opposingObStatus === 'CLEAR_NO_OB_AHEAD') {
+      waitReason = `8/8 SNIPER GATES ALIGNED (${alignedDirection}): Path CLEAR [NO_OPPOSING_H1_OB_AHEAD] (Confidence: ${confidence.toFixed(0)}%)`;
+    } else {
+      waitReason = `8/8 SNIPER GATES ALIGNED (${alignedDirection}): Clear path +$${pathClearDollars.toFixed(1)} to opposing H1 OB @ $${(nearestOpposingObPrice ?? 0).toFixed(2)} (Confidence: ${confidence.toFixed(0)}%)`;
+    }
   } else if (!allPassed) {
     const failedGate = gates.find((g) => g.status === 'FAIL');
     const lockedGate = gates.find((g) => g.status === 'LOCKED');
@@ -502,9 +735,9 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
       waitReason = 'WAIT: Awaiting multi-timeframe Ahmed sniper convergence';
     }
   } else if (!isConfidenceMet) {
-    waitReason = `WAIT: Confidence ${confidence.toFixed(0)}% below 65% institutional minimum`;
+    waitReason = `WAIT: Confidence ${confidence.toFixed(0)}% below 65% sarraf minimum`;
   } else if (!isPathClear) {
-    waitReason = `WAIT: Opposing liquidity zone too close ($${pathClearDollars.toFixed(1)} < $10.0 required)`;
+    waitReason = `WAIT: Opposing H1 Order Block ${nearestOpposingObPrice ? `@ $${nearestOpposingObPrice.toFixed(2)} ` : ''}too close ($${pathClearDollars.toFixed(1)} < $10.0 required)`;
   }
 
   return {
@@ -513,6 +746,8 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
     alignedDirection,
     pathClearDollars,
     isPathClear,
+    opposingObStatus,
+    nearestOpposingObPrice,
     confidence,
     isConfidenceMet,
     canIssueSignal,

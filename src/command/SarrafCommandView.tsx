@@ -63,9 +63,6 @@ export const SarrafCommandView: React.FC = React.memo(() => {
   const candleFreshness = formatFreshness(feed.lastCandleTimestamp);
   const derivedFreshness = formatFreshness(feed.lastDerivedTimestamp || feed.lastCandleTimestamp || feed.lastTickTimestamp);
 
-  const nearestSup = feed.liquidityZones.find((z) => z.type === 'SUPPORT')?.mid || (feed.currentPrice > 0 ? feed.currentPrice - 3.5 : 0);
-  const nearestRes = feed.liquidityZones.find((z) => z.type === 'RESISTANCE')?.mid || (feed.currentPrice > 0 ? feed.currentPrice + 3.5 : 0);
-
   return (
     <div className="relative min-h-screen w-full bg-[#04060b] text-[#e8edf5] px-2 sm:px-3 py-2 font-mono select-none overflow-x-hidden">
       {/* 2-Second Cinematic Intro Overlay with Tap-to-Skip */}

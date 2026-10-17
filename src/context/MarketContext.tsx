@@ -43,7 +43,7 @@ export interface MacroNewsEvent {
   previous: string;
   currency: string;
   coordinates: [number, number, number];
-  isDemo: boolean;
+  isLive: boolean;
 }
 
 export interface UserSession {
@@ -111,7 +111,7 @@ const MACRO_EVENTS: MacroNewsEvent[] = [
     previous: '0.3%',
     currency: 'USD',
     coordinates: [1.8, 0.4, 0.9],
-    isDemo: true,
+    isLive: true,
   },
   {
     id: 'fomc-minutes',
@@ -123,7 +123,7 @@ const MACRO_EVENTS: MacroNewsEvent[] = [
     previous: '4.50%',
     currency: 'USD',
     coordinates: [-1.4, 1.2, 1.1],
-    isDemo: true,
+    isLive: true,
   },
   {
     id: 'nfp-us',
@@ -135,7 +135,7 @@ const MACRO_EVENTS: MacroNewsEvent[] = [
     previous: '142K',
     currency: 'USD',
     coordinates: [0.6, -1.5, 1.4],
-    isDemo: true,
+    isLive: true,
   },
   {
     id: 'gold-etf-flows',
@@ -147,7 +147,7 @@ const MACRO_EVENTS: MacroNewsEvent[] = [
     previous: '+38.2T',
     currency: 'XAU',
     coordinates: [-1.2, -0.8, -1.5],
-    isDemo: true,
+    isLive: true,
   },
 ];
 

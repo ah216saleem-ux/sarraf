@@ -129,7 +129,7 @@ export const SettingsTab: React.FC = () => {
 
   const handleReset = async () => {
     const confirmed = window.confirm(
-      'Reset all engine risk parameters and thresholds to institutional defaults?'
+      'Reset all engine risk parameters and thresholds to sarraf defaults?'
     );
     if (!confirmed) return;
 
@@ -139,7 +139,7 @@ export const SettingsTab: React.FC = () => {
         const json = await res.json();
         setSettings(json.settings);
         setFormState(json.settings);
-        setActionNotice('Settings reset to institutional defaults.');
+        setActionNotice('Settings reset to sarraf defaults.');
         fetchSettings();
       }
     } catch {
@@ -472,7 +472,7 @@ export const SettingsTab: React.FC = () => {
 
         {/* Right Column (5 cols): Invariant Rules & Audit History */}
         <div className="lg:col-span-5 space-y-6">
-          {/* Institutional Immutable Safety Invariants */}
+          {/* SARRAF Immutable Safety Invariants */}
           <div className="glass-panel p-5 rounded-2xl border border-[#E8B84A]/30 space-y-3 bg-[#E8B84A]/5">
             <h3 className="text-sm font-bold text-white tracking-wider flex items-center gap-2 pb-2 border-b border-white/10">
               <Lock className="w-4 h-4 text-[#FFD97A]" />

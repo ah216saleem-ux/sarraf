@@ -381,8 +381,16 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
       });
       if (res.ok) {
         const json = await res.json();
-        setManualActualInput(json.lookup.actual || '');
-        setActionNotice(`AHMED AI retrieved: ${json.lookup.actual} (Marked UNVERIFIED until confirmed)`);
+        const actualVal = json.lookup?.actual || 'PENDING';
+        if (actualVal === 'PENDING' || json.lookup?.verified === false) {
+          setManualActualInput('');
+          setActionNotice(
+            `AHMED AI Lookup: PENDING — Official actual print is not yet verified in live feed (guessing disabled).`
+          );
+        } else {
+          setManualActualInput(actualVal);
+          setActionNotice(`AHMED AI verified actual from feed: ${actualVal}`);
+        }
       }
     } finally {
       setIsLookingUpAi(false);
@@ -422,7 +430,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
         color: 'text-rose-400',
         bg: 'bg-rose-950/40 border-rose-500/40',
         badge: 'bg-rose-500/20 text-rose-300 border-rose-500/50',
-        sentence: `Heavy institutional volatility expected with ${tier1Count} high-impact release${
+        sentence: `Heavy sarraf volatility expected with ${tier1Count} high-impact release${
           tier1Count > 1 ? 's' : ''
         } scheduled within 24 hours.`,
       };
@@ -839,8 +847,13 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
   // Section 2: SINGLE DETERMINISTIC SOURCE FOR THE LEAN CHIP
   // Identical in all 3 places: Week Ahead strip, Next Key Catalyst card, and Timeline rows
   const renderLeanOrResultChip = (evt: NewsEventItem) => {
-    // 1. Post-release with actual value: show real result chip
-    if (evt.isReleased && evt.actualStr && evt.scenarios?.surpriseChip) {
+    const isUnverifiedOrPending =
+      !evt.actualStr ||
+      evt.actualStr.trim().toUpperCase() === 'PENDING' ||
+      evt.actualSource === 'UNVERIFIED';
+
+    // 1. Post-release with verified actual value: show real result chip
+    if (evt.isReleased && !isUnverifiedOrPending && evt.scenarios?.surpriseChip) {
       const { sentiment, size, diffPct } = evt.scenarios.surpriseChip;
       const isBull = sentiment === 'BULLISH';
       const isBear = sentiment === 'BEARISH';
@@ -863,15 +876,15 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
       );
     }
 
-    // 2. Post-release within 10 min awaiting actual
-    if (evt.isReleased && !evt.actualStr && evt.minutesUntil >= -10 && evt.minutesUntil <= 0) {
+    // 2. Post-release awaiting verified actual -> show PENDING (never guess or revert to pre-news lean)
+    if (evt.isReleased && isUnverifiedOrPending) {
       return (
         <span
           className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border bg-amber-500/10 border-amber-500/30 text-amber-300 shrink-0 whitespace-nowrap"
-          title="Release time reached. Auto-checking feed for reported actual value."
+          title="Release time reached. Official actual value is not yet verified — showing PENDING."
         >
           <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping shrink-0" />
-          <span>Waiting for result…</span>
+          <span>PENDING</span>
         </span>
       );
     }
@@ -1036,7 +1049,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
       return (
         <div
           className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold border transition-colors select-none bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
-          title="Institutional AI active and verified"
+          title="SARRAF AI active and verified"
         >
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399]" />
           <span>AHMED AI: ON</span>
@@ -1175,7 +1188,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
           </div>
         </div>
 
-        {/* 3-line Institutional Content */}
+        {/* 3-line SARRAF Content */}
         <div className="space-y-2 text-xs">
           {brief ? (
             <>
@@ -1207,7 +1220,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
           ) : isBriefLoading ? (
             <div className="py-2 text-neutral-400 text-xs italic flex items-center gap-2">
               <Sparkles className="w-3.5 h-3.5 text-[#FFD97A] animate-pulse" />
-              <span>Synthesizing institutional gold brief...</span>
+              <span>Synthesizing sarraf gold brief...</span>
             </div>
           ) : (
             <>
@@ -1461,7 +1474,10 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
             <div className="p-2 sm:p-2.5 rounded-xl bg-black/60 border border-white/10">
               <span className="text-[9px] text-neutral-500 block uppercase">ACTUAL</span>
               <span className="text-xs sm:text-sm font-bold text-[#FFD97A] font-mono">
-                {nextKeyCatalyst.actualStr || '--'}
+                {nextKeyCatalyst.actualSource === 'UNVERIFIED' ||
+                (nextKeyCatalyst.isReleased && !nextKeyCatalyst.actualStr)
+                  ? 'PENDING'
+                  : nextKeyCatalyst.actualStr || '--'}
               </span>
             </div>
           </div>
@@ -1573,16 +1589,51 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
         )}
 
         {filteredTimelineGroups.length === 0 ? (
-          <div className="p-6 rounded-2xl bg-black/40 border border-white/10 text-center space-y-3">
-            <p className="text-xs text-neutral-400">
-              No economic releases scheduled for the selected date filter ({selectedDateFilter}).
-            </p>
-            <button
-              onClick={() => setSelectedDateFilter('UPCOMING')}
-              className="px-3 py-1.5 rounded-xl bg-[#E8B84A]/20 border border-[#E8B84A]/40 text-[#FFD97A] text-xs font-bold cursor-pointer"
-            >
-              View Upcoming Catalysts
-            </button>
+          <div className="p-6 sm:p-8 rounded-2xl bg-black/40 border border-white/10 text-center space-y-3">
+            <div className="w-10 h-10 rounded-full bg-[#E8B84A]/10 border border-[#E8B84A]/30 flex items-center justify-center mx-auto">
+              <Calendar className="w-5 h-5 text-[#FFD97A]" />
+            </div>
+            <div className="space-y-1">
+              <h4 className="text-xs sm:text-sm font-bold text-white uppercase tracking-wider">
+                {events.length === 0
+                  ? 'No Live Economic Releases Available'
+                  : `No Releases Scheduled (${selectedDateFilter})`}
+              </h4>
+              <p className="text-xs text-neutral-400 max-w-md mx-auto leading-relaxed">
+                {events.length === 0
+                  ? 'The live Forex Factory USD calendar currently has no events loaded. Synthetic fallback events are disabled to ensure 100% real macro data.'
+                  : `No verified USD economic catalysts are scheduled for the selected date filter (${selectedDateFilter}).`}
+              </p>
+            </div>
+            <div className="flex items-center justify-center gap-2 pt-1 flex-wrap">
+              {selectedDateFilter !== 'UPCOMING' && dateStats.upcomingCount > 0 && (
+                <button
+                  onClick={() => setSelectedDateFilter('UPCOMING')}
+                  className="px-3 py-1.5 rounded-xl bg-[#E8B84A]/20 border border-[#E8B84A]/40 text-[#FFD97A] text-xs font-bold cursor-pointer"
+                >
+                  View Upcoming ({dateStats.upcomingCount})
+                </button>
+              )}
+              {selectedDateFilter !== 'ALL' && events.length > 0 && (
+                <button
+                  onClick={() => setSelectedDateFilter('ALL')}
+                  className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-200 text-xs font-bold cursor-pointer"
+                >
+                  View All Events ({events.length})
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  setIsLoading(true);
+                  fetchNews().finally(() => setIsLoading(false));
+                }}
+                disabled={isLoading}
+                className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-300 text-xs font-bold cursor-pointer inline-flex items-center gap-1.5"
+              >
+                <RefreshCw className={`w-3 h-3 ${isLoading ? 'animate-spin' : ''}`} />
+                <span>Refresh Live Feed</span>
+              </button>
+            </div>
           </div>
         ) : (
           filteredTimelineGroups.map((group) => {
@@ -1646,10 +1697,13 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
                           </div>
                         </div>
 
-                        {/* LINE 2: small muted row "F: x · P: y · A: z" in ONE line (inline, separated by dots; "--" when empty), and the lean chip below or beside it (wrap allowed) */}
+                        {/* LINE 2: small muted row "F: x · P: y · A: z" in ONE line (inline, separated by dots; "--" when empty, "PENDING" when released & unverified), and the lean chip below or beside it (wrap allowed) */}
                         <div className="flex items-center justify-between gap-2 flex-wrap pt-0.5 w-full">
                           <span className="text-[10px] text-neutral-400 font-mono whitespace-nowrap">
-                            F: {evt.forecastStr?.trim() || '--'} · P: {evt.previousStr?.trim() || '--'} · A: {evt.actualStr?.trim() || '--'}
+                            F: {evt.forecastStr?.trim() || '--'} · P: {evt.previousStr?.trim() || '--'} · A:{' '}
+                            {evt.actualSource === 'UNVERIFIED' || (evt.isReleased && !evt.actualStr?.trim())
+                              ? 'PENDING'
+                              : evt.actualStr?.trim() || '--'}
                           </span>
 
                           <div className="shrink-0">

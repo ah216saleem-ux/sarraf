@@ -135,46 +135,87 @@ export function isTelegramConfigured(): boolean {
   return Boolean(tokenPresent && chatIdPresent && chatIdIsNumeric);
 }
 
+const deliveredCommandTelegramKeys = new Map<string, number>();
+const inFlightCommandTelegramKeys = new Map<
+  string,
+  Promise<{ success: boolean; error?: string; errorCode?: number; nonRetryable?: boolean }>
+>();
+
 /**
  * Raw send to Telegram without mutating settings (used internally and for verification)
+ * Includes in-flight & delivered deduplication so a retry never duplicates an already-delivered message.
  */
 async function sendRawTelegramMessage(
   token: string,
   chatId: string,
-  text: string
-): Promise<{ success: boolean; error?: string; errorCode?: number }> {
-  try {
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        disable_web_page_preview: true,
-      }),
-    });
-
-    const data = (await res.json().catch(() => ({}))) as any;
-
-    if (res.ok && data.ok) {
-      return { success: true };
-    }
-
-    const desc = data.description || `HTTP ${res.status}`;
-    return { success: false, error: desc, errorCode: data.error_code || res.status };
-  } catch (err: any) {
-    return { success: false, error: err.message || 'Network fetch error' };
+  text: string,
+  idempotencyKey?: string
+): Promise<{ success: boolean; error?: string; errorCode?: number; nonRetryable?: boolean }> {
+  const now = Date.now();
+  for (const [k, ts] of deliveredCommandTelegramKeys.entries()) {
+    const ttl = k.startsWith('idemp:') ? 24 * 60 * 60 * 1000 : 60 * 1000;
+    if (now - ts > ttl) deliveredCommandTelegramKeys.delete(k);
   }
+
+  const dedupeKey = idempotencyKey ? `idemp:${chatId}:${idempotencyKey}` : `hash:${chatId}:${text.trim()}`;
+  if (deliveredCommandTelegramKeys.has(dedupeKey)) {
+    console.log(`[SARRAF TELEGRAM DEDUPE] Skipping duplicate retry for already-delivered message (${idempotencyKey || 'content-hash'})`);
+    return { success: true };
+  }
+
+  const inFlight = inFlightCommandTelegramKeys.get(dedupeKey);
+  if (inFlight) {
+    console.log(`[SARRAF TELEGRAM DEDUPE] Joining in-flight request (${idempotencyKey || 'content-hash'}) instead of re-sending`);
+    return inFlight;
+  }
+
+  const reqPromise = (async () => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const url = `https://api.telegram.org/bot${token}/sendMessage`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text,
+          disable_web_page_preview: true,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      const data = (await res.json().catch(() => ({}))) as any;
+
+      if (res.ok && data.ok) {
+        deliveredCommandTelegramKeys.set(dedupeKey, Date.now());
+        return { success: true };
+      }
+
+      const code = data.error_code || res.status;
+      const nonRetryable = code >= 400 && code < 500 && code !== 429;
+      const desc = data.description || `HTTP ${res.status}`;
+      return { success: false, error: desc, errorCode: code, nonRetryable };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network fetch error' };
+    } finally {
+      inFlightCommandTelegramKeys.delete(dedupeKey);
+    }
+  })();
+
+  inFlightCommandTelegramKeys.set(dedupeKey, reqPromise);
+  return reqPromise;
 }
 
 /**
- * Sends a message to Telegram with 3 retries, exponential backoff, and rate limiting.
+ * Sends a message to Telegram with 3 retries, exponential backoff, rate limiting, and duplicate retry protection.
  * Tokens are NEVER logged.
  */
 export async function sendTelegramMessageWithRetry(
   text: string,
-  maxRetries = 3
+  maxRetries = 3,
+  idempotencyKey?: string
 ): Promise<{ success: boolean; error?: string }> {
   const creds = getCredentials();
 
@@ -214,7 +255,7 @@ export async function sendTelegramMessageWithRetry(
 
   while (attempt < maxRetries) {
     attempt++;
-    const sendRes = await sendRawTelegramMessage(creds.token, creds.chatId, text);
+    const sendRes = await sendRawTelegramMessage(creds.token, creds.chatId, text, idempotencyKey);
 
     if (sendRes.success) {
       settings.lastMessageTime = Date.now();
@@ -228,6 +269,10 @@ export async function sendTelegramMessageWithRetry(
     lastSafeError = sendRes.error || 'Failed to dispatch message';
     console.warn(`[SARRAF TELEGRAM SAFE] Attempt ${attempt}/${maxRetries} failed: ${lastSafeError}`);
 
+    if (sendRes.nonRetryable) {
+      break;
+    }
+
     if (attempt < maxRetries) {
       // Exponential backoff: 1000ms -> 2000ms
       const delayMs = attempt * 1000;
@@ -239,7 +284,7 @@ export async function sendTelegramMessageWithRetry(
   settings.lastMessageStatus = 'FAILED';
   settings.lastErrorMessage = lastSafeError;
   saveTelegramSettings();
-  console.error(`[SARRAF TELEGRAM SAFE] Message dispatch failed after ${maxRetries} attempts`);
+  console.error(`[SARRAF TELEGRAM SAFE] Message dispatch failed after ${attempt} attempt(s)`);
   return { success: false, error: lastSafeError };
 }
 
@@ -330,28 +375,28 @@ function shouldSendSignal(): boolean {
 export async function notifyNewSignal(signal: CommandSignal) {
   if (!shouldSendSignal()) return;
   const text = formatNewSignalMessage(signal);
-  await sendTelegramMessageWithRetry(text);
+  await sendTelegramMessageWithRetry(text, 3, `cmd_${signal.id}_ISSUED`);
 }
 
-export async function notifyTargetHit(target: 'TP1' | 'TP2', _signal: CommandSignal) {
+export async function notifyTargetHit(target: 'TP1' | 'TP2', signal: CommandSignal) {
   if (!shouldSendSignal()) return;
   const text = formatTargetHitMessage(target);
-  await sendTelegramMessageWithRetry(text);
+  await sendTelegramMessageWithRetry(text, 3, `cmd_${signal.id}_${target}`);
 }
 
 export async function notifySignalClosed(
   reason: SignalCloseReason,
   realizedDollars: number,
   closePrice: number,
-  _signal: CommandSignal
+  signal: CommandSignal
 ) {
   if (!shouldSendSignal()) return;
   const resultText = formatFinalResultMessage(reason, realizedDollars, closePrice);
-  await sendTelegramMessageWithRetry(resultText);
+  await sendTelegramMessageWithRetry(resultText, 3, `cmd_${signal.id}_CLOSED_${reason}`);
 
   // Send cooldown notice immediately after result
   const cooldownText = formatCooldownMessage();
-  await sendTelegramMessageWithRetry(cooldownText);
+  await sendTelegramMessageWithRetry(cooldownText, 3, `cmd_${signal.id}_COOLDOWN`);
 }
 
 /**
@@ -454,7 +499,7 @@ export async function startTelegramSignals(): Promise<{
   // Step b: Send the message "SARRAF signals are LIVE" to the chat
   const sendRes = await sendTelegramMessageWithRetry('SARRAF signals are LIVE');
 
-  // Step c: Only if that message is delivered: turn master toggle ON and Send paper signals ON
+  // Step c: Only if that message is delivered: turn master toggle ON and Send alert signals ON
   if (!sendRes.success) {
     // Delivery failed: keep everything OFF
     settings.enabled = false;
@@ -507,7 +552,7 @@ export async function startTelegramSignals(): Promise<{
 
 /**
  * STOP SIGNALS (one tap):
- * Turns both Telegram master toggle and Send paper signals OFF and persists.
+ * Turns both Telegram master toggle and Send alert signals OFF and persists.
  */
 export function stopTelegramSignals(): {
   success: boolean;

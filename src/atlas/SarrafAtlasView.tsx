@@ -509,19 +509,31 @@ export const SarrafAtlasView: React.FC = () => {
       <div className="atlas-pn" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
         <div className="atlas-lb">Live trade</div>
         {tradeState?.status === 'IN_ZONE' && tradeState.activeZone ? (
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px' }}>
-            <span style={{ color: '#2ee66b', fontWeight: 700 }}>
-              IN {tradeState.activeZone.tier} ({tradeState.entrySide})
-            </span>
-            <span
-              style={{
-                color: tradeState.livePnLPoints >= 0 ? '#2ee66b' : '#ff4d4f',
-                fontWeight: 700,
-              }}
-            >
-              {tradeState.livePnLPoints >= 0 ? '+' : ''}
-              {tradeState.livePnLPoints.toFixed(1)} PTS
-            </span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ color: tradeState.entrySide === 'SELL' ? '#ff4d4f' : '#2ee66b', fontWeight: 700 }}>
+                ACTIVE · {tradeState.activeZone.tier} {tradeState.entrySide} ({tradeState.activeZone.id})
+              </span>
+              <span
+                style={{
+                  color: tradeState.livePnLPoints >= 0 ? '#2ee66b' : '#ff4d4f',
+                  fontWeight: 700,
+                }}
+              >
+                {tradeState.livePnLPoints >= 0 ? '+' : ''}
+                {tradeState.livePnLPoints.toFixed(1)} PTS
+              </span>
+            </div>
+            <div className="atlas-dim" style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px' }}>
+              <span>
+                ENTRY <b style={{ color: '#e8eaed' }}>{tradeState.entryPrice?.toFixed(2) ?? '--'}</b> · SL{' '}
+                <b style={{ color: '#ff4d4f' }}>{tradeState.sl?.toFixed(2) ?? '--'}</b>
+              </span>
+              <span>
+                TP1 <b style={{ color: '#2ee66b' }}>{tradeState.tp1?.toFixed(2) ?? '--'}</b> · TP2{' '}
+                <b style={{ color: '#2ee66b' }}>{tradeState.tp2?.toFixed(2) ?? '--'}</b>
+              </span>
+            </div>
           </div>
         ) : (
           <div className="atlas-dim" style={{ fontSize: '11px' }}>
@@ -1084,7 +1096,7 @@ export const SarrafAtlasView: React.FC = () => {
                     }}
                   >
                     {(yesterdayReportCard?.totalEvaluated ?? 0) < 5
-                      ? 'LOW SAMPLE'
+                      ? 'LOW DATA'
                       : `${yesterdayReportCard?.accuracyPercent ?? 0}% ACCURACY (n=${yesterdayReportCard?.totalEvaluated ?? 0})`}
                   </span>
                 </div>
@@ -1252,7 +1264,22 @@ export const SarrafAtlasView: React.FC = () => {
                     </span>
                   </span>
                   {isAdmin && (
-                    <div style={{ display: 'flex', gap: '6px' }}>
+                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                      {state?.dataDirWarning && (
+                        <span
+                          style={{
+                            fontSize: '9px',
+                            color: '#ff4d4f',
+                            border: '1px solid rgba(255,77,79,.6)',
+                            background: 'rgba(255,77,79,.1)',
+                            padding: '2px 6px',
+                            borderRadius: '3px',
+                            fontWeight: 700,
+                          }}
+                        >
+                          History will be lost on restart
+                        </span>
+                      )}
                       <button
                         onClick={handleToggleAlerts}
                         style={{

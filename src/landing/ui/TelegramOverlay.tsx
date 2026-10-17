@@ -98,7 +98,7 @@ STATUS: One Signal Active · Cooldown On Close`;
             </div>
           </div>
 
-          {/* Right column: Realistic glass telegram message window with Sample Signal & Outcome */}
+          {/* Right column: Realistic glass telegram message window with Test Signal & Outcome */}
           <div className="lg:col-span-6 flex justify-center lg:justify-end w-full">
             <div className="w-full max-w-md rounded-2xl p-5 border border-[#E8B84A]/30 bg-[#09090d]/90 backdrop-blur-xl shadow-[0_0_30px_rgba(0,0,0,0.8)]">
               {/* Window header */}
@@ -113,7 +113,7 @@ STATUS: One Signal Active · Cooldown On Close`;
                         SARRAF BOT
                       </h4>
                       <span className="text-[9px] font-mono font-bold tracking-wider px-1.5 py-0.5 rounded bg-[#E8B84A]/20 text-[#FFD97A] border border-[#E8B84A]/35">
-                        SAMPLE
+                        TEST
                       </span>
                     </div>
                     <span className="text-[10px] font-mono text-emerald-400 flex items-center gap-1">
@@ -133,14 +133,14 @@ STATUS: One Signal Active · Cooldown On Close`;
                 )}
               </div>
 
-              {/* Sample Outcome Message Pop-in */}
+              {/* Test Outcome Message Pop-in */}
               {showOutcome && (
                 <div className="mt-3 p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/40 font-mono text-xs animate-in fade-in slide-in-from-top-2 duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]">
                   <div className="flex items-center justify-between text-emerald-300 font-bold mb-1">
                     <div className="flex items-center gap-1.5">
                       <span>🎯 TARGET 1 HIT</span>
                       <span className="text-[9px] px-1 rounded bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 font-normal">
-                        SAMPLE UPDATE
+                        TEST UPDATE
                       </span>
                     </div>
                     <span className="text-[10px] text-emerald-400/80">JUST NOW</span>

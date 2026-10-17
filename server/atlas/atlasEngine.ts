@@ -82,13 +82,40 @@ interface AtlasSseClient {
 }
 const atlasSseClients = new Map<string, AtlasSseClient>();
 
+let lastLoggedRolloverSource = '';
+
 function getRolloverUtcHour(): number {
+  const d1Closed = getClosedCandles('D1');
+  if (d1Closed && d1Closed.length > 0) {
+    const latestD1 = d1Closed[d1Closed.length - 1];
+    const parsedDate = new Date(latestD1.openTime);
+    if (!isNaN(parsedDate.getTime())) {
+      const d1Hour = parsedDate.getUTCHours();
+      const sourceKey = `D1_${d1Hour}_${latestD1.openTime}`;
+      if (lastLoggedRolloverSource !== sourceKey) {
+        lastLoggedRolloverSource = sourceKey;
+        console.log(`[ATLAS ROLLOVER] Derived rollover UTC hour ${d1Hour} from BiQuote D1 candle openTime (${latestD1.openTime}).`);
+      }
+      return d1Hour;
+    }
+  }
+
   const envVal = process.env.ATLAS_ROLLOVER_UTC_HOUR;
   if (envVal) {
     const parsed = parseInt(envVal, 10);
     if (!isNaN(parsed) && parsed >= 0 && parsed <= 23) {
+      const sourceKey = `ENV_${parsed}`;
+      if (lastLoggedRolloverSource !== sourceKey) {
+        lastLoggedRolloverSource = sourceKey;
+        console.log(`[ATLAS ROLLOVER] Using ATLAS_ROLLOVER_UTC_HOUR env fallback (${parsed}).`);
+      }
       return parsed;
     }
+  }
+  const defaultKey = `DEFAULT_${ROLLOVER_HOUR_DEFAULT}`;
+  if (lastLoggedRolloverSource !== defaultKey) {
+    lastLoggedRolloverSource = defaultKey;
+    console.log(`[ATLAS ROLLOVER] Using default rollover UTC hour fallback (${ROLLOVER_HOUR_DEFAULT}).`);
   }
   return ROLLOVER_HOUR_DEFAULT;
 }
@@ -96,8 +123,8 @@ function getRolloverUtcHour(): number {
 // Format duration into hh:mm:ss
 function formatCountdown(sec: number): string {
   if (sec <= 0) return 'NEW ZONES IN 00:00:00';
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
+  const h = Math.floor(sec / (60 * 60));
+  const m = Math.floor((sec % (60 * 60)) / 60);
   const s = Math.floor(sec % 60);
   const hh = h.toString().padStart(2, '0');
   const mm = m.toString().padStart(2, '0');
@@ -120,6 +147,12 @@ function computeNextPublishTimestamp(nowMs: number = Date.now()): number {
   }
 
   return publishTarget.getTime();
+}
+
+// Calculate the deterministic start publish timestamp of the current trading session
+function computeSessionPublishTimestamp(nowMs: number = Date.now()): number {
+  const nextPublishMs = computeNextPublishTimestamp(nowMs);
+  return nextPublishMs - 24 * (60 * 60) * 1000;
 }
 
 // Load frozen set from disk
@@ -491,7 +524,7 @@ export function computeAtlasZonesAndScenarios(): FrozenAtlasPayload | null {
   if (overallBias === 'BEARISH') {
     mainScenario = {
       type: 'MAIN',
-      title: 'PRIMARY: Institutional Supply Rejection',
+      title: 'PRIMARY: SARRAF Supply Rejection',
       bias: 'BEARISH (Sell-the-Rally)',
       description: `Sell rallies entering R1 Supply ($${(R1 - halfWidth).toFixed(2)} - $${(R1 + halfWidth).toFixed(2)}). Confirmation via M15 rejection wick.`,
       triggerZone: `R1 Supply ($${R1.toFixed(2)})`,
@@ -517,7 +550,7 @@ export function computeAtlasZonesAndScenarios(): FrozenAtlasPayload | null {
   } else if (overallBias === 'BULLISH') {
     mainScenario = {
       type: 'MAIN',
-      title: 'PRIMARY: Institutional Demand Absorption',
+      title: 'PRIMARY: SARRAF Demand Absorption',
       bias: 'BULLISH (Buy-the-Dip)',
       description: `Buy pullbacks into S1 Demand ($${(S1 - halfWidth).toFixed(2)} - $${(S1 + halfWidth).toFixed(2)}). Confirmation via M15 absorption candle.`,
       triggerZone: `S1 Demand ($${S1.toFixed(2)})`,
@@ -569,10 +602,11 @@ export function computeAtlasZonesAndScenarios(): FrozenAtlasPayload | null {
 
   const nowMs = Date.now();
   const nextPublishMs = computeNextPublishTimestamp(nowMs);
+  const sessionPublishMs = computeSessionPublishTimestamp(nowMs);
 
   return {
     date: dateStr,
-    publishedAt: new Date(nowMs).toISOString(),
+    publishedAt: new Date(sessionPublishMs).toISOString(),
     nextPublishAt: new Date(nextPublishMs).toISOString(),
     prevDayCandle: {
       date: prevD1.openTime.slice(0, 10),
@@ -592,8 +626,99 @@ export function computeAtlasZonesAndScenarios(): FrozenAtlasPayload | null {
   };
 }
 
+export interface ZoneTradeDetails {
+  side: 'SELL' | 'BUY';
+  entryPrice: number;
+  sl: number;
+  tp1: number;
+  tp2: number;
+  tp1Label: string;
+  tp2Label: string;
+  invalidationText: string;
+}
+
+export function computeZoneTradeDetails(
+  zone: AtlasZone,
+  pivots: AtlasPivotLevels | null | undefined,
+  atr14: number = 15
+): ZoneTradeDetails | null {
+  if (zone.id === 'PP' || zone.side === 'NEUTRAL') return null;
+
+  const side: 'SELL' | 'BUY' = zone.side === 'SELL' ? 'SELL' : 'BUY';
+  const entryPrice = Number(zone.level.toFixed(2));
+  const slBuffer = Math.max(3.0, Number((0.25 * (atr14 > 0 ? atr14 : 15)).toFixed(2)));
+  const sl =
+    side === 'SELL'
+      ? Number((zone.top + slBuffer).toFixed(2))
+      : Number((zone.bottom - slBuffer).toFixed(2));
+
+  const invalidationText =
+    side === 'SELL'
+      ? `H1 close > $${zone.top.toFixed(2)} (SL $${sl.toFixed(2)})`
+      : `H1 close < $${zone.bottom.toFixed(2)} (SL $${sl.toFixed(2)})`;
+
+  let tp1 = side === 'SELL' ? Number((entryPrice - 15).toFixed(2)) : Number((entryPrice + 15).toFixed(2));
+  let tp2 = side === 'SELL' ? Number((entryPrice - 30).toFixed(2)) : Number((entryPrice + 30).toFixed(2));
+  let tp1Label = 'TP1';
+  let tp2Label = 'TP2';
+
+  if (pivots) {
+    if (zone.id === 'R1') {
+      tp1 = pivots.PP;
+      tp1Label = 'PP';
+      tp2 = pivots.S1;
+      tp2Label = 'S1';
+    } else if (zone.id === 'R2') {
+      tp1 = pivots.R1;
+      tp1Label = 'R1';
+      tp2 = pivots.PP;
+      tp2Label = 'PP';
+    } else if (zone.id === 'R3') {
+      tp1 = pivots.R2;
+      tp1Label = 'R2';
+      tp2 = pivots.R1;
+      tp2Label = 'R1';
+    } else if (zone.id === 'S1') {
+      tp1 = pivots.PP;
+      tp1Label = 'PP';
+      tp2 = pivots.R1;
+      tp2Label = 'R1';
+    } else if (zone.id === 'S2') {
+      tp1 = pivots.S1;
+      tp1Label = 'S1';
+      tp2 = pivots.PP;
+      tp2Label = 'PP';
+    } else if (zone.id === 'S3') {
+      tp1 = pivots.S2;
+      tp1Label = 'S2';
+      tp2 = pivots.S1;
+      tp2Label = 'S1';
+    }
+  }
+
+  return {
+    side,
+    entryPrice,
+    sl,
+    tp1: Number(tp1.toFixed(2)),
+    tp2: Number(tp2.toFixed(2)),
+    tp1Label,
+    tp2Label,
+    invalidationText,
+  };
+}
+
+let activeTrackedZoneId: string | null = null;
+let activeTrackedSessionDate: string = '';
+
 // Compute live trade state based on current price
-function computeLiveTradeState(livePrice: number, zones: AtlasZone[]): AtlasLiveTradeState {
+function computeLiveTradeState(
+  livePrice: number,
+  zones: AtlasZone[],
+  pivots?: AtlasPivotLevels | null,
+  atr14: number = 15,
+  sessionDate: string = ''
+): AtlasLiveTradeState {
   if (livePrice <= 0 || zones.length === 0) {
     return {
       status: 'STANDBY',
@@ -606,31 +731,63 @@ function computeLiveTradeState(livePrice: number, zones: AtlasZone[]): AtlasLive
     };
   }
 
-  // Check if price is inside any zone
+  if (sessionDate && activeTrackedSessionDate !== sessionDate) {
+    activeTrackedSessionDate = sessionDate;
+    activeTrackedZoneId = null;
+  }
+
+  // Only tradable non-broken BUY/SELL zones can trigger or sustain a trade
+  const tradableZones = zones.filter((z) => z.id !== 'PP' && z.side !== 'NEUTRAL' && z.status !== 'BROKEN');
+
+  // 1. Check if price is currently inside any tradable non-broken zone
   let activeZone: AtlasZone | null = null;
-  for (const z of zones) {
+  for (const z of tradableZones) {
     if (livePrice >= z.bottom && livePrice <= z.top) {
       activeZone = z;
+      activeTrackedZoneId = z.id;
       break;
     }
   }
 
+  // 2. If not currently inside the box, check if a previously triggered zone trade is still active (between SL and TP2)
+  if (!activeZone && activeTrackedZoneId) {
+    const tracked = tradableZones.find((z) => z.id === activeTrackedZoneId);
+    if (tracked) {
+      const details = computeZoneTradeDetails(tracked, pivots, atr14);
+      if (details) {
+        const hitSl = details.side === 'SELL' ? livePrice >= details.sl : livePrice <= details.sl;
+        const hitTp2 = details.side === 'SELL' ? livePrice <= details.tp2 : livePrice >= details.tp2;
+        if (!hitSl && !hitTp2) {
+          activeZone = tracked;
+        } else {
+          activeTrackedZoneId = null;
+        }
+      }
+    } else {
+      activeTrackedZoneId = null;
+    }
+  }
+
   if (activeZone) {
-    const entrySide = activeZone.side === 'SELL' ? 'SELL' : activeZone.side === 'BUY' ? 'BUY' : null;
-    const entryPrice = activeZone.level;
+    const details = computeZoneTradeDetails(activeZone, pivots, atr14);
+    const entrySide = details?.side || (activeZone.side === 'SELL' ? 'SELL' : 'BUY');
+    const entryPrice = details?.entryPrice || activeZone.level;
     const distanceToEntry = Number(Math.abs(livePrice - entryPrice).toFixed(2));
     const livePnLPoints =
       entrySide === 'BUY'
         ? Number((livePrice - entryPrice).toFixed(2))
-        : entrySide === 'SELL'
-        ? Number((entryPrice - livePrice).toFixed(2))
-        : 0;
+        : Number((entryPrice - livePrice).toFixed(2));
 
     return {
       status: 'IN_ZONE',
       activeZone,
       entrySide,
       entryPrice,
+      sl: details?.sl ?? null,
+      tp1: details?.tp1 ?? null,
+      tp2: details?.tp2 ?? null,
+      tp1Label: details?.tp1Label,
+      tp2Label: details?.tp2Label,
       distanceToEntry,
       livePnLPoints,
       nearestZone: {
@@ -642,11 +799,11 @@ function computeLiveTradeState(livePrice: number, zones: AtlasZone[]): AtlasLive
     };
   }
 
-  // STANDBY: find nearest zone
+  // STANDBY: find nearest tradable non-broken zone
   let nearest: { id: string; name: string; distance: number; side: AtlasZone['side'] } | null = null;
   let minDiff = Infinity;
 
-  for (const z of zones) {
+  for (const z of tradableZones) {
     let diff = 0;
     if (livePrice > z.top) {
       diff = livePrice - z.top;
@@ -1138,19 +1295,25 @@ function loadAlertsConfig() {
         alertsEnabled = data.alertsEnabled;
       }
       if (Array.isArray(data.alertLogs)) {
-        // Purge old bad log entries (entries with invalid price, mock/paper markers, or missing timestamp)
+        // Purge old bad log entries (entries with invalid price or missing timestamp)
         alertLogs = data.alertLogs.filter(
           (l: any) =>
             l &&
             l.timestamp &&
             typeof l.price === 'number' &&
             l.price > 1000 &&
-            !JSON.stringify(l).includes('PAPER') &&
-            !JSON.stringify(l).includes('MOCK')
+            l.eventType !== 'TEST'
         );
       }
       if (Array.isArray(data.sentAlertsKeys)) {
-        for (const k of data.sentAlertsKeys) sentAlertsKeys.add(k);
+        for (const k of data.sentAlertsKeys) {
+          if (typeof k === 'string') sentAlertsKeys.add(k);
+        }
+      }
+      if (data.lastAlertTimes && typeof data.lastAlertTimes === 'object') {
+        for (const [k, v] of Object.entries(data.lastAlertTimes)) {
+          if (typeof v === 'number') lastAlertTimeByZone.set(k, v);
+        }
       }
     }
   } catch (err) {
@@ -1160,12 +1323,22 @@ function loadAlertsConfig() {
 
 function saveAlertsConfig() {
   try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    const lastAlertTimesObj: Record<string, number> = {};
+    for (const [k, v] of lastAlertTimeByZone.entries()) {
+      lastAlertTimesObj[k] = v;
+    }
     const data = {
       alertsEnabled,
       alertLogs: alertLogs.slice(0, 50),
-      sentAlertsKeys: Array.from(sentAlertsKeys).slice(-200),
+      sentAlertsKeys: Array.from(sentAlertsKeys).slice(-300),
+      lastAlertTimes: lastAlertTimesObj,
     };
-    fs.writeFileSync(ATLAS_ALERTS_FILE, JSON.stringify(data, null, 2), 'utf-8');
+    const tmpFile = `${ATLAS_ALERTS_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2), 'utf-8');
+    fs.renameSync(tmpFile, ATLAS_ALERTS_FILE);
 
     // Also persist sent alerts into atlas_history.json
     if (fs.existsSync(ATLAS_HISTORY_FILE)) {
@@ -1174,7 +1347,9 @@ function saveAlertsConfig() {
         const history = JSON.parse(rawHistory);
         if (Array.isArray(history) && history.length > 0) {
           history[history.length - 1].alertLogs = alertLogs.slice(0, 50);
-          fs.writeFileSync(ATLAS_HISTORY_FILE, JSON.stringify(history, null, 2), 'utf-8');
+          const tmpHist = `${ATLAS_HISTORY_FILE}.tmp`;
+          fs.writeFileSync(tmpHist, JSON.stringify(history, null, 2), 'utf-8');
+          fs.renameSync(tmpHist, ATLAS_HISTORY_FILE);
         }
       } catch (hErr) {
         console.error('[ATLAS ALERTS] Error updating atlas_history.json:', hErr);
@@ -1207,7 +1382,7 @@ export function getAtlasAlertLogs(): AtlasAlertLogItem[] {
   return alertLogs.slice(0, 10);
 }
 
-// Internal Telegram message dispatcher with logging
+// Internal Telegram message dispatcher with 3 retries, duplicate retry protection, and persistent logging
 async function dispatchAlert(item: {
   eventType: 'APPROACH' | 'TOUCH' | 'BROKEN' | 'PUBLISH';
   zoneId?: string;
@@ -1217,6 +1392,7 @@ async function dispatchAlert(item: {
   price: number;
   message: string;
   formattedText?: string;
+  idempotencyKey?: string;
 }) {
   const schedule = getMarketSchedule();
   // Strictly enforce: nothing is sent or logged when dispatch is OFF or the market is closed
@@ -1238,22 +1414,33 @@ async function dispatchAlert(item: {
     ].join('\n');
   }
 
-  try {
-    const res = await sendTelegramHttpRequest(text, undefined, undefined, undefined, 'HTML');
-    if (res.success) {
-      status = 'SENT';
-      console.log(`[ATLAS ALERTS] Dispatched Telegram alert for ${item.eventType} (${item.zoneId || 'ALL'})`);
-    } else {
+  const dedupeKey = item.idempotencyKey || `atlas_${item.eventType}_${item.zoneId || 'ALL'}_${new Date().toISOString().slice(0, 13)}`;
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await sendTelegramHttpRequest(text, undefined, undefined, undefined, 'HTML', dedupeKey);
+      if (res.success) {
+        status = 'SENT';
+        console.log(`[ATLAS ALERTS] Dispatched Telegram alert for ${item.eventType} (${item.zoneId || 'ALL'}) on attempt ${attempt}`);
+        break;
+      } else {
+        status = 'FAILED';
+        console.warn(`[ATLAS ALERTS] Telegram dispatch attempt ${attempt}/${maxAttempts} failed: ${res.error}`);
+        if (res.nonRetryable) {
+          break;
+        }
+      }
+    } catch (err: any) {
       status = 'FAILED';
-      console.warn(`[ATLAS ALERTS] Telegram dispatch failed: ${res.error}`);
+      console.error(`[ATLAS ALERTS] Telegram error on attempt ${attempt}/${maxAttempts}:`, err?.message);
     }
-  } catch (err: any) {
-    status = 'FAILED';
-    console.error(`[ATLAS ALERTS] Telegram error:`, err?.message);
+    if (attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, attempt * 1000));
+    }
   }
 
   const logItem: AtlasAlertLogItem = {
-    id: `alt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    id: `alt_${Date.now()}_${Date.now().toString(36).slice(-4)}`,
     timestamp: new Date().toISOString(),
     eventType: item.eventType,
     zoneId: item.zoneId,
@@ -1272,11 +1459,12 @@ async function dispatchAlert(item: {
   saveAlertsConfig();
 }
 
-// Real-time zone alerts checker (approaching, touching, or broken)
+// Real-time zone alerts checker (approaching, active zone trade / touching, or broken)
 export async function checkAndDispatchZoneAlerts(
   livePrice: number,
   zones: AtlasZone[],
-  payload: FrozenAtlasPayload | null
+  payload: FrozenAtlasPayload | null,
+  atr14: number = 15
 ) {
   const schedule = getMarketSchedule();
   // Strictly enforce: nothing is sent or logged when dispatch is OFF or the market is closed
@@ -1284,62 +1472,25 @@ export async function checkAndDispatchZoneAlerts(
 
   const now = Date.now();
   const sessionDate = payload?.date || new Date().toISOString().slice(0, 10);
-  const rateLimitMs = 30 * 60 * 1000; // max 1 alert per zone per 30 min
+  const rateLimitMs = 30 * 60 * 1000; // max 1 alert per zone+eventType per 30 min
   const tickMargin = 0.10; // +/- 1 tick
   const approachThreshold = 5.0; // within 5 pts
 
+  const nowDate = new Date(now);
+  const utcTimeStr = `${nowDate.getUTCHours().toString().padStart(2, '0')}:${nowDate.getUTCMinutes().toString().padStart(2, '0')} UTC`;
+
   for (const zone of zones) {
-    // 1. TOUCH: price inside the zone box +/- 1 tick
-    const isInside = livePrice >= (zone.bottom - tickMargin) && livePrice <= (zone.top + tickMargin);
-
-    const distToCorridor = isInside
-      ? 0
-      : livePrice > zone.top
-      ? livePrice - zone.top
-      : zone.bottom - livePrice;
-
-    const lastAlertTime = lastAlertTimeByZone.get(zone.id) || 0;
-    const isRateLimited = now - lastAlertTime < rateLimitMs;
-
-    if (isInside) {
-      const touchKey = `${sessionDate}_${zone.id}_TOUCH`;
-      if (!sentAlertsKeys.has(touchKey) && !isRateLimited) {
-        sentAlertsKeys.add(touchKey);
-        lastAlertTimeByZone.set(zone.id, now);
-        await dispatchAlert({
-          eventType: 'TOUCH',
-          zoneId: zone.id,
-          zoneName: zone.name,
-          tier: zone.tier,
-          grade: zone.grade,
-          price: livePrice,
-          message: `Price entered ${zone.tier} (${zone.name}) at $${livePrice.toFixed(2)} [${zone.bottom.toFixed(0)} – ${zone.top.toFixed(0)}]`,
-        });
-      }
-    } else if (distToCorridor <= approachThreshold && distToCorridor > 0) {
-      // 2. APPROACH: within 5 pts of a zone (and not inside)
-      const approachKey = `${sessionDate}_${zone.id}_APPROACH`;
-      if (!sentAlertsKeys.has(approachKey) && !isRateLimited) {
-        sentAlertsKeys.add(approachKey);
-        lastAlertTimeByZone.set(zone.id, now);
-        await dispatchAlert({
-          eventType: 'APPROACH',
-          zoneId: zone.id,
-          zoneName: zone.name,
-          tier: zone.tier,
-          grade: zone.grade,
-          price: livePrice,
-          message: `Price approaching ${zone.tier} (${zone.name}) — ${distToCorridor.toFixed(1)} pts away from $${(zone.side === 'SELL' ? zone.bottom : zone.top).toFixed(2)}`,
-        });
-      }
-    }
-
-    // 3. BROKEN: H1 close beyond the zone, with the reason
+    // 1. BROKEN: H1 close beyond the zone, with the reason (checked first using separate BROKEN rate-limit key)
     if (zone.status === 'BROKEN') {
       const brokenKey = `${sessionDate}_${zone.id}_BROKEN`;
-      if (!sentAlertsKeys.has(brokenKey) && !isRateLimited) {
+      const brokenRateKey = `${zone.id}_BROKEN`;
+      const lastBrokenTime = lastAlertTimeByZone.get(brokenRateKey) || 0;
+      const isBrokenRateLimited = now - lastBrokenTime < rateLimitMs;
+
+      if (!sentAlertsKeys.has(brokenKey) && !isBrokenRateLimited) {
         sentAlertsKeys.add(brokenKey);
-        lastAlertTimeByZone.set(zone.id, now);
+        lastAlertTimeByZone.set(brokenRateKey, now);
+        saveAlertsConfig();
         await dispatchAlert({
           eventType: 'BROKEN',
           zoneId: zone.id,
@@ -1348,6 +1499,90 @@ export async function checkAndDispatchZoneAlerts(
           grade: zone.grade,
           price: livePrice,
           message: `Zone ${zone.tier} (${zone.name}) BROKEN: ${zone.breakInfo?.reason || 'H1 close beyond zone'}`,
+          idempotencyKey: `atlas_${brokenKey}`,
+        });
+      }
+      // Do not send TOUCH or APPROACH alerts for an already broken zone
+      continue;
+    }
+
+    // 2. TOUCH (ACTIVE ZONE TRADE): price inside the zone box +/- 1 tick
+    const isInside = livePrice >= (zone.bottom - tickMargin) && livePrice <= (zone.top + tickMargin);
+
+    const distToCorridor = isInside
+      ? 0
+      : livePrice > zone.top
+      ? livePrice - zone.top
+      : zone.bottom - livePrice;
+
+    if (isInside) {
+      const touchKey = `${sessionDate}_${zone.id}_TOUCH`;
+      const touchRateKey = `${zone.id}_TOUCH`;
+      const lastTouchTime = lastAlertTimeByZone.get(touchRateKey) || 0;
+      const isTouchRateLimited = now - lastTouchTime < rateLimitMs;
+
+      if (!sentAlertsKeys.has(touchKey) && !isTouchRateLimited) {
+        sentAlertsKeys.add(touchKey);
+        lastAlertTimeByZone.set(touchRateKey, now);
+        saveAlertsConfig();
+
+        const tradeDetails = computeZoneTradeDetails(zone, payload?.pivots, atr14);
+        let formattedTradeText: string | undefined = undefined;
+        let summaryMessage = `Price entered ${zone.tier} (${zone.name}) at $${livePrice.toFixed(2)} [${zone.bottom.toFixed(0)} – ${zone.top.toFixed(0)}]`;
+
+        if (tradeDetails) {
+          const dirIcon = tradeDetails.side === 'SELL' ? '🔴' : '🟢';
+          const invalidationCondition =
+            tradeDetails.side === 'SELL'
+              ? `H1 close > $${zone.top.toFixed(2)}`
+              : `H1 close < $${zone.bottom.toFixed(2)}`;
+          summaryMessage = `${tradeDetails.side} ${zone.tier} (${zone.name}) ACTIVE @ $${livePrice.toFixed(2)} | Entry: $${tradeDetails.entryPrice.toFixed(2)} | SL: $${tradeDetails.sl.toFixed(2)} | TP1: $${tradeDetails.tp1.toFixed(2)} (${tradeDetails.tp1Label}) | TP2: $${tradeDetails.tp2.toFixed(2)} (${tradeDetails.tp2Label})`;
+          formattedTradeText = [
+            `🏛 <b>SARRAF ATLAS · ZONE ACTIVE TRADE</b>\n`,
+            `${dirIcon} <b>XAUUSD ${tradeDetails.side} — ${zone.tier} (${zone.name})</b>`,
+            `📊 <b>Zone Box:</b> $${zone.bottom.toFixed(2)} – $${zone.top.toFixed(2)} (Level: $${zone.level.toFixed(2)})`,
+            `📍 <b>Entry Price:</b> $${tradeDetails.entryPrice.toFixed(2)} (Live: $${livePrice.toFixed(2)})`,
+            `🛡 <b>SL (Invalidation):</b> $${tradeDetails.sl.toFixed(2)} (${invalidationCondition})`,
+            `🎯 <b>TP1 (${tradeDetails.tp1Label}):</b> $${tradeDetails.tp1.toFixed(2)}`,
+            `🎯 <b>TP2 (${tradeDetails.tp2Label}):</b> $${tradeDetails.tp2.toFixed(2)}`,
+            `⭐ <b>Quality:</b> Grade ${zone.grade} · ${zone.touchesCount} touches`,
+            `🕒 <b>Time:</b> ${utcTimeStr}\n`,
+            `<i>SARRAF ATLAS · Active Zone Trade Setup (Session ${sessionDate})</i>`,
+          ].join('\n');
+        }
+
+        await dispatchAlert({
+          eventType: 'TOUCH',
+          zoneId: zone.id,
+          zoneName: zone.name,
+          tier: zone.tier,
+          grade: zone.grade,
+          price: livePrice,
+          message: summaryMessage,
+          formattedText: formattedTradeText,
+          idempotencyKey: `atlas_${touchKey}`,
+        });
+      }
+    } else if (distToCorridor <= approachThreshold && distToCorridor > 0) {
+      // 3. APPROACH: within 5 pts of a zone (and not inside), using separate APPROACH rate-limit key
+      const approachKey = `${sessionDate}_${zone.id}_APPROACH`;
+      const approachRateKey = `${zone.id}_APPROACH`;
+      const lastApproachTime = lastAlertTimeByZone.get(approachRateKey) || 0;
+      const isApproachRateLimited = now - lastApproachTime < rateLimitMs;
+
+      if (!sentAlertsKeys.has(approachKey) && !isApproachRateLimited) {
+        sentAlertsKeys.add(approachKey);
+        lastAlertTimeByZone.set(approachRateKey, now);
+        saveAlertsConfig();
+        await dispatchAlert({
+          eventType: 'APPROACH',
+          zoneId: zone.id,
+          zoneName: zone.name,
+          tier: zone.tier,
+          grade: zone.grade,
+          price: livePrice,
+          message: `Price approaching ${zone.tier} (${zone.name}) — ${distToCorridor.toFixed(1)} pts away from $${(zone.side === 'SELL' ? zone.bottom : zone.top).toFixed(2)}`,
+          idempotencyKey: `atlas_${approachKey}`,
         });
       }
     }
@@ -1401,13 +1636,13 @@ export async function sendTestAtlasAlert(): Promise<{ success: boolean; messageI
     };
   }
 
-  const testPrice = lastEvaluatedTickPrice > 0 ? lastEvaluatedTickPrice : 4165.25;
+  const testPrice = lastEvaluatedTickPrice > 0 ? lastEvaluatedTickPrice : (currentPublishedPayload?.pivots?.PP || 0);
   const text = [
     `🏛 <b>SARRAF ATLAS · TEST ALERT</b>\n`,
     `📍 <b>Spot Benchmark:</b> $${testPrice.toFixed(2)}`,
     `🎯 <b>Zone Test:</b> T1 PRIMARY SELL (Daily Pivot R1)`,
     `🏷 <b>Tier:</b> T1 PRIMARY | Grade: A [LIQUIDITY]`,
-    `ℹ️ <b>Verification:</b> Real-time institutional Telegram alerting engine is ONLINE & ACTIVE.\n`,
+    `ℹ️ <b>Verification:</b> Real-time sarraf Telegram alerting engine is ONLINE & ACTIVE.\n`,
     `<i>Analysis, not a signal. Entry only after structure + price action confirm.</i>`,
   ].join('\n');
 
@@ -1750,12 +1985,23 @@ export function onAtlasLiveTick(price: number, timestamp: number = Date.now()) {
     lastEvaluatedTickPrice = Number(price.toFixed(2));
     lastTickTimestamp = timestamp;
 
-    // Check alerts in background
+    // Evaluate live zone status first so BROKEN and TOUCH states are accurate
     if (alertsEnabled && currentPublishedPayload) {
-      checkAndDispatchZoneAlerts(lastEvaluatedTickPrice, currentPublishedPayload.zones, currentPublishedPayload).catch(
+      const rawH1 = getClosedCandles('H1') || [];
+      const atr14 = calculateATR(rawH1, 14) || 15;
+      const liveEvaluatedZones = evaluateLiveZoneStatus(
+        currentPublishedPayload.zones,
+        rawH1,
+        currentPublishedPayload.publishedAt,
+        lastEvaluatedTickPrice
+      );
+      checkAndDispatchZoneAlerts(lastEvaluatedTickPrice, liveEvaluatedZones, currentPublishedPayload, atr14).catch(
         (err) => console.error('[ATLAS ALERTS] Live tick check error:', err)
       );
     }
+
+    // Broadcast updated state to connected SSE clients
+    broadcastAtlasState();
   }
 }
 
@@ -1833,7 +2079,11 @@ export function getAtlasState(): AtlasState {
   const rawH1 = getClosedCandles('H1');
   const d1Closed = getClosedCandles('D1');
   const sessionDateStr = payload?.date || new Date().toISOString().slice(0, 10);
-  const sessionCandles = (rawH1 || []).filter((c) => c.openTime.startsWith(sessionDateStr));
+  const publishedAtMs = payload?.publishedAt ? new Date(payload.publishedAt).getTime() : computeSessionPublishTimestamp(nowMs);
+  const sessionCandles = (rawH1 || []).filter((c) => {
+    const ts = new Date(c.openTime).getTime();
+    return !isNaN(ts) && ts >= publishedAtMs;
+  });
 
   // Compute live indicators first to get ATR
   const indicators = computeLiveIndicators();
@@ -1866,7 +2116,7 @@ export function getAtlasState(): AtlasState {
     }
   }
 
-  const tradeState = computeLiveTradeState(livePrice, evaluatedZones);
+  const tradeState = computeLiveTradeState(livePrice, evaluatedZones, payload?.pivots, atr14, sessionDateStr);
   const summary = computeAtlasSummary(rawH1 || [], livePrice, evaluatedZones, atr14, payload?.bias?.overall || 'RANGE');
 
   const h1Candles = (rawH1 || []).slice(-120).map((c) => ({
@@ -1899,7 +2149,7 @@ export function getAtlasState(): AtlasState {
 
   const rollingAccuracy7d: number | string | null =
     sumReached < 5
-      ? 'LOW SAMPLE'
+      ? 'LOW DATA'
       : Number(((sumRespected / sumReached) * 100).toFixed(1));
 
   // Last 5 published sets for the History Selector
@@ -1928,6 +2178,15 @@ export function getAtlasState(): AtlasState {
     yesterdayReportCard,
     rollingAccuracy7d,
     historyList,
+    dataDirWarning: (() => {
+      try {
+        if (!fs.existsSync(DATA_DIR)) return true;
+        fs.accessSync(DATA_DIR, fs.constants.W_OK);
+      } catch {
+        return true;
+      }
+      return !Boolean(process.env.DATA_DIR || process.env.PERSISTENT_VOLUME);
+    })(),
     liquidityLevels,
     alertsEnabled,
     alertLogs: alertLogs.slice(0, 10),

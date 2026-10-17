@@ -118,7 +118,7 @@ export const AhmedSniperChainCard: React.FC<AhmedSniperChainCardProps> = ({
         })}
       </div>
 
-      {/* Institutional Thresholds Verification Footer */}
+      {/* SARRAF Thresholds Verification Footer */}
       <div className="pt-1.5 border-t border-white/5 flex items-center justify-between text-[8px] text-[#8a96a8]">
         <div className="flex items-center gap-2">
           <span>

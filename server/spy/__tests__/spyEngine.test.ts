@@ -1,5 +1,5 @@
 /**
- * SPY Institutional Engine Unit Tests
+ * SPY SARRAF Engine Unit Tests
  * Tests market hours / DST calculations and Smart Money evaluation gates.
  * Run with: tsx server/spy/__tests__/spyEngine.test.ts
  */
@@ -104,7 +104,7 @@ console.log('\n====================================================');
 console.log('🧪 SUITE 2: SMART MONEY CONFLUENCE GATES');
 console.log('====================================================');
 
-// Mock helper to create deterministic candles
+// Test helper to create deterministic candles
 function createCandles(specs: Array<{ open: number; high: number; low: number; close: number; volume?: number }>): SpyCandle[] {
   const baseTime = Date.now() - specs.length * 60000;
   return specs.map((s, idx) => ({

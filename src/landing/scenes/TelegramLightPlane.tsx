@@ -14,10 +14,10 @@ export const TelegramLightPlane: React.FC<TelegramLightPlaneProps> = ({ progress
   // Scene 5 active around 0.74 -> 0.92
   const sceneProgress = THREE.MathUtils.smoothstep(progress, 0.74, 0.90);
 
-  // Procedural origami paper-plane geometry
+  // Procedural origami alert-plane geometry
   const planeGeometry = useMemo(() => {
     const geom = new THREE.BufferGeometry();
-    // Vertices of classic aerodynamic paper airplane:
+    // Vertices of classic aerodynamic alert airplane:
     // Nose, Left wing tip, Right wing tip, Tail center, Keel bottom
     const vertices = new Float32Array([
       // Top left wing face
@@ -69,7 +69,7 @@ export const TelegramLightPlane: React.FC<TelegramLightPlaneProps> = ({ progress
       (ribbonMesh.material as THREE.LineBasicMaterial).opacity = 0.4 * sceneProgress;
     }
 
-    // Paper plane flies forward and banks towards camera
+    // Alert plane flies forward and banks towards camera
     if (planeGroupRef.current) {
       // Flight trajectory driven by scroll + continuous hover
       const flyZ = -22 + sceneProgress * 12 + Math.sin(time * 2) * 0.2;
@@ -82,7 +82,7 @@ export const TelegramLightPlane: React.FC<TelegramLightPlaneProps> = ({ progress
       planeGroupRef.current.rotation.y = 0.15 + Math.sin(time * 1.2) * 0.1;
     }
 
-    // 3D Phone mock floating and turning
+    // 3D Phone test floating and turning
     if (phoneGroupRef.current) {
       phoneGroupRef.current.rotation.y = -0.35 + Math.sin(time * 0.8) * 0.06;
       phoneGroupRef.current.rotation.x = 0.12 + Math.cos(time * 0.6) * 0.04;
@@ -92,7 +92,7 @@ export const TelegramLightPlane: React.FC<TelegramLightPlaneProps> = ({ progress
 
   return (
     <group position={[0, 0, -10]}>
-      {/* Light Paper Plane */}
+      {/* Light Alert Plane */}
       <group ref={planeGroupRef} position={[-1.2, 0, -15]}>
         {/* Translucent emissive wings */}
         <mesh geometry={planeGeometry}>

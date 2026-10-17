@@ -148,7 +148,7 @@ export const DashboardView: React.FC = () => {
   const [chatMessages, setChatMessages] = useState<Array<{ role: 'user' | 'model'; text: string; time: string }>>([
     {
       role: 'model',
-      text: 'SARRAF Institutional Intelligence ready. Live XAU/USD telemetry, macro order flow, and liquidity structures are synchronized. How can I assist your desk today?',
+      text: 'SARRAF SARRAF Intelligence ready. Live XAU/USD telemetry, macro order flow, and liquidity structures are synchronized. How can I assist your desk today?',
       time: new Date().toLocaleTimeString(),
     },
   ]);
@@ -783,7 +783,7 @@ export const DashboardView: React.FC = () => {
                   <div>
                     <div className="flex items-center gap-2">
                       <h3 className="font-mono text-sm font-bold text-white tracking-wider">
-                        XAUUSD SPOT INSTITUTIONAL STREAM
+                        XAUUSD SPOT SARRAF STREAM
                       </h3>
                       <span
                         className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
@@ -809,7 +809,7 @@ export const DashboardView: React.FC = () => {
                       {priceData.status === 'LIVE'
                         ? `Connected to biquote.io COMEX Gold Feed (Tick age: ${priceData.quoteAgeSeconds}s)`
                         : priceData.status === 'MARKET_CLOSED'
-                        ? 'Market session closed. Showing last recorded institutional price.'
+                        ? 'Market session closed. Showing last recorded sarraf price.'
                         : priceData.status === 'FEED_STALE'
                         ? `Feed latency high: latest tick is ${priceData.quoteAgeSeconds}s old`
                         : 'Real-time feed unavailable. Waiting for server reconnection.'}
@@ -1086,7 +1086,7 @@ export const DashboardView: React.FC = () => {
                             )}
                           </div>
                           <span className="text-[11px] text-neutral-400">
-                            Institutional Score: <strong className="text-[#FFD97A]">{activeSig.score}/100</strong>
+                            SARRAF Score: <strong className="text-[#FFD97A]">{activeSig.score}/100</strong>
                           </span>
                         </div>
                       </div>
@@ -1182,7 +1182,7 @@ export const DashboardView: React.FC = () => {
                   <div className="py-6 px-3 text-center space-y-2 font-mono">
                     <Zap className="w-6 h-6 text-[#FFD97A] mx-auto animate-pulse" />
                     <div className="text-white font-bold text-sm">
-                      ACTIVE SCANNING FOR INSTITUTIONAL CONVICTION
+                      ACTIVE SCANNING FOR SARRAF CONVICTION
                     </div>
                     <p className="text-xs text-neutral-400 max-w-md mx-auto">
                       Engine evaluating M15/M30/H1 structure, sweeps, and HTF confluence.
@@ -1194,7 +1194,7 @@ export const DashboardView: React.FC = () => {
 
             {/* Right Column (4 cols): Macro Radar & Quick Telegram Status */}
             <section className="lg:col-span-4 space-y-6">
-              {/* Macro Radar Widget (DEMO TAGGED) */}
+              {/* Macro Radar Widget (LIVE TAGGED) */}
               <div className="glass-panel p-4 sm:p-5 rounded-2xl border border-[#E8B84A]/25">
                 <div className="flex items-center justify-between pb-3 border-b border-white/10">
                   <div className="flex items-center gap-2">
@@ -1622,7 +1622,7 @@ export const DashboardView: React.FC = () => {
                 <Bot className="w-5 h-5 text-[#FFD97A]" />
                 <div>
                   <h3 className="font-mono text-sm font-bold text-white tracking-wider">
-                    SARRAF INSTITUTIONAL AI STRATEGIST
+                    SARRAF SARRAF AI STRATEGIST
                   </h3>
                   <span className="font-mono text-[10px] text-neutral-400 block">
                     Real-time market context synchronized with XAU/USD live order flow
@@ -2062,10 +2062,10 @@ export const DashboardView: React.FC = () => {
         )}
       </main>
 
-      {/* Institutional Risk Disclaimer Footer */}
+      {/* SARRAF Risk Disclaimer Footer */}
       <footer className="border-t border-white/5 py-4 px-6 text-center font-mono text-[11px] text-neutral-500 bg-black/60">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2">
-          <span>SARRAF Institutional Gold Terminal v5.0.0</span>
+          <span>SARRAF SARRAF Gold Terminal v5.0.0</span>
           <span>Trading involves risk. Signals are not financial advice. Past results do not guarantee future results.</span>
           <span>COMEX / Spot XAUUSD</span>
         </div>

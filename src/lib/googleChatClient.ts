@@ -147,7 +147,7 @@ export async function sendSpaceMessage(
 }
 
 /**
- * Builds an institutional SARRAF card for Google Chat
+ * Builds an sarraf SARRAF card for Google Chat
  */
 export function buildSetupReviewCard(setup: SetupPreReviewPayload) {
   const isBuy = setup.direction === 'BUY';
@@ -158,7 +158,7 @@ export function buildSetupReviewCard(setup: SetupPreReviewPayload) {
       cardId: `setup_${setup.signalId}`,
       card: {
         header: {
-          title: `SARRAF Institutional Setup Pre-Review: ${setup.signalId}`,
+          title: `SARRAF SARRAF Setup Pre-Review: ${setup.signalId}`,
           subtitle: `XAUUSD Spot ${setup.direction} Setup | Score ${setup.score}/100`,
           imageUrl: 'https://fonts.gstatic.com/s/i/short-term/release/googlegsymbol/finance/default/24px.svg',
           imageType: 'CIRCLE',
@@ -176,7 +176,7 @@ export function buildSetupReviewCard(setup: SetupPreReviewPayload) {
               },
               {
                 decoratedText: {
-                  topLabel: 'Target Objectives (Conservative Institutional Scaling)',
+                  topLabel: 'Target Objectives (Conservative SARRAF Scaling)',
                   text: `TP1: $${setup.tp1.toFixed(2)} | TP2: $${setup.tp2.toFixed(2)} | TP3: $${setup.tp3.toFixed(2)} | TP4: $${setup.tp4.toFixed(2)}`,
                 },
               },

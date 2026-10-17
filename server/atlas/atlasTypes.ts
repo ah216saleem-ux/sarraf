@@ -194,6 +194,11 @@ export interface AtlasLiveTradeState {
   activeZone: AtlasZone | null;
   entrySide: 'SELL' | 'BUY' | null;
   entryPrice: number | null;
+  sl?: number | null;
+  tp1?: number | null;
+  tp2?: number | null;
+  tp1Label?: string;
+  tp2Label?: string;
   distanceToEntry: number;
   livePnLPoints: number;
   nearestZone: {
@@ -205,6 +210,7 @@ export interface AtlasLiveTradeState {
 }
 
 export interface AtlasState {
+  dataDirWarning?: boolean;
   date: string;
   status: 'PUBLISHED' | 'ANALYZING';
   marketStatus: 'LIVE' | 'MARKET_CLOSED' | 'OFFLINE';

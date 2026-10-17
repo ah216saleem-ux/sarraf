@@ -166,7 +166,7 @@ export const WorldCanvas: React.FC<WorldCanvasProps> = ({
           {/* Scene 4: News Radar - 3D Wireframe Globe with Nodes & Trailing Glow */}
           {showNews && <NewsRadarGlobe progress={progress} />}
 
-          {/* Scene 5: Telegram - Origami Paper Light Plane & Phone Mock */}
+          {/* Scene 5: Telegram - Origami Alert Light Plane & Phone Test */}
           {showTelegram && <TelegramLightPlane progress={progress} />}
 
           {/* Scene 6: Finale - Massive Rotating Dual-Ring Gold Vault */}

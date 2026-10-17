@@ -86,7 +86,7 @@ export function runGoogleChatHardeningTests(): HardeningTestSuiteReport {
     let passB = false;
     let detailsB = '';
     try {
-      const mockSignal: SignalRecord = {
+      const testSignal: SignalRecord = {
         id: `SRF-TEST-TIMEOUT-${Date.now()}`,
         version: 1,
         direction: 'BUY',
@@ -115,19 +115,19 @@ export function runGoogleChatHardeningTests(): HardeningTestSuiteReport {
         events: [],
       };
 
-      closePendingReview(mockSignal, 'REVIEW_TIMEOUT', 'Test timeout simulation');
+      closePendingReview(testSignal, 'REVIEW_TIMEOUT', 'Test timeout simulation');
       const stateAfter = getFullManagerState();
 
       if (
-        mockSignal.status === 'CLOSED' &&
-        mockSignal.closeReason === 'REVIEW_TIMEOUT' &&
-        mockSignal.resultClass === 'REVIEW_TIMEOUT' &&
+        testSignal.status === 'CLOSED' &&
+        testSignal.closeReason === 'REVIEW_TIMEOUT' &&
+        testSignal.resultClass === 'REVIEW_TIMEOUT' &&
         stateAfter.currentSignal === null
       ) {
         passB = true;
         detailsB = `Signal cancelled as REVIEW_TIMEOUT; lock released cleanly (state: ${stateAfter.state}).`;
       } else {
-        detailsB = `Signal status=${mockSignal.status}, closeReason=${mockSignal.closeReason}, activeSignal=${stateAfter.currentSignal?.id}`;
+        detailsB = `Signal status=${testSignal.status}, closeReason=${testSignal.closeReason}, activeSignal=${stateAfter.currentSignal?.id}`;
       }
     } catch (e: any) {
       detailsB = `Error in Test B: ${e.message}`;
@@ -148,7 +148,7 @@ export function runGoogleChatHardeningTests(): HardeningTestSuiteReport {
     let passC = false;
     let detailsC = '';
     try {
-      const mockReview: SetupReviewRecord = {
+      const testReview: SetupReviewRecord = {
         id: 'REV-TEST-001',
         signalId: 'SRF-TEST-001',
         direction: 'BUY',
@@ -167,10 +167,10 @@ export function runGoogleChatHardeningTests(): HardeningTestSuiteReport {
       };
 
       // Case 1: Price drifted $4.50 beyond entry (max allowed is $3.00)
-      const revalDrift = revalidateSetupForApproval(mockReview, 4164.5, 'LIVE', false, false);
+      const revalDrift = revalidateSetupForApproval(testReview, 4164.5, 'LIVE', false, false);
 
       // Case 2: Zone was breached during review
-      const revalZone = revalidateSetupForApproval(mockReview, 4160.5, 'LIVE', false, true);
+      const revalZone = revalidateSetupForApproval(testReview, 4160.5, 'LIVE', false, true);
 
       if (!revalDrift.ok && !revalZone.ok) {
         passC = true;
@@ -289,7 +289,7 @@ export function runGoogleChatHardeningTests(): HardeningTestSuiteReport {
     let passG = false;
     let detailsG = '';
     try {
-      const secretToken = 'ya29.a0AfH6SMDUMMY_SECRET_TEST_TOKEN_XYZ1234567890';
+      const secretToken = 'ya29.a0AfH6SMTEST_SECRET_TEST_TOKEN_XYZ1234567890';
       storeEncryptedGoogleToken(secretToken, 'test_operator@sarraf.gold');
 
       const authStatus = getGoogleAuthStatus();

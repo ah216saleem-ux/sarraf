@@ -350,7 +350,7 @@ export const GoogleChatHub: React.FC<GoogleChatHubProps> = ({ currentPrice, acti
         if (!res.ok) {
           setAuthError(data.error || 'Failed to update lesson.');
         } else {
-          setActionNotice('Lesson updated in institutional memory bank.');
+          setActionNotice('Lesson updated in sarraf memory bank.');
           setIsAddLessonOpen(false);
           setEditingLessonId(null);
           setLessonInsightText('');
@@ -371,7 +371,7 @@ export const GoogleChatHub: React.FC<GoogleChatHubProps> = ({ currentPrice, acti
         if (!res.ok) {
           setAuthError(data.error || 'Failed to add lesson.');
         } else {
-          setActionNotice('Lesson sanitized and added to institutional memory bank.');
+          setActionNotice('Lesson sanitized and added to sarraf memory bank.');
           setIsAddLessonOpen(false);
           setLessonInsightText('');
           fetchBackendData();
@@ -411,7 +411,7 @@ export const GoogleChatHub: React.FC<GoogleChatHubProps> = ({ currentPrice, acti
         body: JSON.stringify({ action: 'DELETE', id }),
       });
       if (res.ok) {
-        setActionNotice('Lesson deleted from institutional memory.');
+        setActionNotice('Lesson deleted from sarraf memory.');
         fetchBackendData();
       }
     } catch {}
@@ -854,7 +854,7 @@ export const GoogleChatHub: React.FC<GoogleChatHubProps> = ({ currentPrice, acti
             <div>
               <h3 className="font-mono text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
                 <BrainCircuit className="w-4 h-4 text-[#E8B84A]" />
-                Institutional Lessons Memory Bank (Admin-Curated)
+                SARRAF Lessons Memory Bank (Admin-Curated)
               </h3>
               <p className="text-[11px] text-neutral-400 font-mono">
                 Active: <span className="text-white font-bold">{activeLessonsCount}</span> / 20 Maximum. Lessons act as context hints only and cannot override technical rules or alter levels.
@@ -1197,7 +1197,7 @@ export const GoogleChatHub: React.FC<GoogleChatHubProps> = ({ currentPrice, acti
             <div className="flex items-center justify-between border-b border-white/10 pb-3 mb-3">
               <h4 className="font-bold text-white flex items-center gap-2">
                 <History className="w-4 h-4 text-[#E8B84A]" />
-                Institutional Lessons Change Log
+                SARRAF Lessons Change Log
               </h4>
               <button onClick={() => setIsChangeLogOpen(false)} className="text-neutral-400 hover:text-white">
                 ✕

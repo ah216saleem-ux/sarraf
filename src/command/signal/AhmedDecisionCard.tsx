@@ -74,15 +74,16 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = React.memo(({
   const isHistoryTrulyEmpty = typeof candlesCount === 'number' ? candlesCount === 0 : false;
 
   const missingGate = gates.find((g) => g.status === 'FAIL' || g.status === 'LOCKED');
-  let blockingReason = waitReason || 'Awaiting institutional gate convergence';
+  let blockingReason = waitReason || 'Awaiting sarraf gate convergence';
 
   if (isUpstreamTrulyDown) {
     blockingReason = 'History loading (upstream down)';
   } else if (isHistoryTrulyEmpty) {
     blockingReason = 'History loading... awaiting first candle bar';
   } else if (pathClearR > 0 && pathClearR < 10 && gates.filter((g) => g.status === 'PASS').length >= 6) {
-    const opposingPrice = activeSignal?.side === 'BUY' ? currentPrice + pathClearR : currentPrice - pathClearR;
-    blockingReason = `only ${(pathClearR / 10).toFixed(2)}R clear to the opposing zone ${opposingPrice.toFixed(2)}`;
+    const dir = state.alignedDirection || activeSignal?.side || (gates[0]?.direction === 'SELL' ? 'SELL' : 'BUY');
+    const opposingPrice = dir === 'BUY' ? currentPrice + pathClearR : currentPrice - pathClearR;
+    blockingReason = `only ${(pathClearR / 10).toFixed(2)}R clear to opposing H1 Order Block ${opposingPrice.toFixed(2)}`;
   } else if (missingGate) {
     blockingReason = `${missingGate.name} missing: ${missingGate.reason}`;
   }
@@ -91,7 +92,7 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = React.memo(({
   if (!isUpstreamTrulyDown && !isHistoryTrulyEmpty && blockingReason.includes('History loading')) {
     blockingReason = missingGate
       ? `${missingGate.name} missing: ${missingGate.reason}`
-      : 'Monitoring institutional order flow';
+      : 'Monitoring sarraf order flow';
   }
 
   // Compute WATCHING line from real candidate and real missing gate
@@ -99,7 +100,7 @@ export const AhmedDecisionCard: React.FC<AhmedDecisionCardProps> = React.memo(({
   if (isUpstreamTrulyDown) {
     watchingLine = 'History loading (upstream down) - awaiting live stream reconnect';
   } else if (isHistoryTrulyEmpty) {
-    watchingLine = 'Synchronizing market candles from institutional archive...';
+    watchingLine = 'Synchronizing market candles from sarraf archive...';
   } else if (watchingCandidate) {
     const gateLabel = missingGate ? missingGate.shortName || missingGate.name : 'M15 close';
     const targetPrice =

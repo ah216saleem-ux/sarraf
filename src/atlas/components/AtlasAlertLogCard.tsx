@@ -93,7 +93,7 @@ export const AtlasAlertLogCard: React.FC<AtlasAlertLogCardProps> = ({
                 onClick={handleTest}
                 disabled={isTesting}
                 className="px-2.5 py-1.5 rounded text-xs font-mono font-semibold bg-neutral-900 border border-neutral-700 hover:border-neutral-500 text-neutral-200 hover:text-white transition flex items-center gap-1.5 disabled:opacity-50"
-                title="Send a sample Sarraf Atlas alert to the Telegram group to verify credentials"
+                title="Send a recent Sarraf Atlas alert to the Telegram group to verify credentials"
               >
                 {isTesting ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3 text-sky-400" />}
                 <span>TEST DISPATCH</span>
@@ -251,7 +251,7 @@ export const AtlasAlertLogCard: React.FC<AtlasAlertLogCardProps> = ({
       </div>
 
       <div className="mt-3 text-[10px] text-neutral-500 font-mono italic">
-        Analysis, not a signal · Sent with SARRAF ATLAS institutional branding
+        Analysis, not a signal · Sent with SARRAF ATLAS sarraf branding
       </div>
     </div>
   );

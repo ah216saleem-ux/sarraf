@@ -275,7 +275,7 @@ const QuantumVortexInner = forwardRef<QuantumVortexHooks, QuantumVortexProps & {
         if (fvgVal.toLowerCase().includes('bull')) fvgTone = 'bull';
         else if (fvgVal.toLowerCase().includes('bear')) fvgTone = 'bear';
         else fvgTone = 'neutral';
-        fvgDetail = `Nearest institutional key level or imbalance: ${fvgVal}.`;
+        fvgDetail = `Nearest sarraf key level or imbalance: ${fvgVal}.`;
       } else {
         fvgVal = 'location weak';
         fvgTone = 'neutral';

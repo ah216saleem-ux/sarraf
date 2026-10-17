@@ -54,7 +54,7 @@ class CommandFeedStore {
     lastTickAgeSeconds: 0,
     quoteAgeSeconds: 0,
     reconnectAttempts: 0,
-    source: 'Live Institutional Feed',
+    source: 'Live SARRAF Feed',
     upstreamStatusText: '',
     lastDisconnectReason: '',
   };
@@ -861,7 +861,7 @@ class CommandFeedStore {
       lastTickAgeSeconds: tickAgeSec,
       quoteAgeSeconds: tickAgeSec,
       reconnectAttempts: this.reconnectCount,
-      source: 'Live Institutional Feed',
+      source: 'Live SARRAF Feed',
       upstreamStatusText: this.upstreamStatusText,
       reasonCategory: this.upstreamReasonCategory,
       downSeconds: this.upstreamDownSeconds,

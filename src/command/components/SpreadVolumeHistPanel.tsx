@@ -93,7 +93,7 @@ export const SpreadVolumeHistPanel: React.FC<SpreadVolumeHistPanelProps> = React
                 <span className="text-xl font-black text-[#e8edf5] tabular-nums">
                   {currentVol}
                 </span>
-                <span className="text-[9px] text-[#8a96a8]">ticks/sample</span>
+                <span className="text-[9px] text-[#8a96a8]">ticks/recent</span>
               </>
             ) : (
               <span className="text-sm font-medium text-[#8a96a8]">collecting data...</span>

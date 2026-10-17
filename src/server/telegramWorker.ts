@@ -217,75 +217,118 @@ export function maskIdentifier(val?: string): string {
   return `****${val.slice(-4)}`;
 }
 
-// Send HTTP message to Telegram API with backoff & 429 handling, supporting inline keyboards and parse modes
+const deliveredTelegramKeys = new Map<string, { messageId?: number; deliveredAt: number }>();
+const inFlightTelegramRequests = new Map<
+  string,
+  Promise<{ success: boolean; messageId?: number; error?: string; retryAfterSec?: number; nonRetryable?: boolean }>
+>();
+
+// Send HTTP message to Telegram API with backoff & 429 handling, supporting inline keyboards, parse modes, and retry duplicate protection
 export async function sendTelegramHttpRequest(
   text: string,
   replyToMessageId?: number,
   targetChatId?: string | number,
   replyMarkup?: any,
-  parseMode?: 'HTML' | 'Markdown'
-): Promise<{ success: boolean; messageId?: number; error?: string; retryAfterSec?: number }> {
+  parseMode?: 'HTML' | 'Markdown',
+  idempotencyKey?: string
+): Promise<{ success: boolean; messageId?: number; error?: string; retryAfterSec?: number; nonRetryable?: boolean }> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const effectiveChat = targetChatId ? String(targetChatId) : getEffectiveTelegramChatId();
 
   if (!token || token === '123456789:ABCdefGhIJKlmNoPQRstuVWXyz') {
-    return { success: false, error: 'Telegram bot token unconfigured.' };
+    return { success: false, error: 'Telegram bot token unconfigured.', nonRetryable: true };
   }
 
   if (!effectiveChat || isInvalidTelegramChatId(effectiveChat)) {
     return {
       success: false,
       error: "Telegram target chat ID is not registered or is set to the bot's own username (@Sarraftelegrambot). Send /start to @Sarraftelegrambot in Telegram or set your numeric Chat ID in dashboard settings.",
+      nonRetryable: true,
     };
   }
 
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const body: Record<string, any> = {
-    chat_id: effectiveChat,
-    text,
-    disable_web_page_preview: true,
-  };
-
-  if (replyToMessageId) {
-    body.reply_to_message_id = replyToMessageId;
+  const now = Date.now();
+  // Prune expired entries
+  for (const [k, v] of deliveredTelegramKeys.entries()) {
+    const ttl = k.startsWith('idemp:') ? 24 * 60 * 60 * 1000 : 60 * 1000;
+    if (now - v.deliveredAt > ttl) {
+      deliveredTelegramKeys.delete(k);
+    }
   }
 
-  if (replyMarkup) {
-    body.reply_markup = replyMarkup;
+  const dedupeKey = idempotencyKey
+    ? `idemp:${effectiveChat}:${idempotencyKey}`
+    : `hash:${effectiveChat}:${replyToMessageId || 0}:${text.trim()}`;
+
+  const alreadyDelivered = deliveredTelegramKeys.get(dedupeKey);
+  if (alreadyDelivered) {
+    console.log(`[TELEGRAM DEDUPE] Skipping duplicate retry send for already-delivered key (${idempotencyKey || 'content-hash'})`);
+    return { success: true, messageId: alreadyDelivered.messageId };
   }
 
-  if (parseMode) {
-    body.parse_mode = parseMode;
+  const existingInFlight = inFlightTelegramRequests.get(dedupeKey);
+  if (existingInFlight) {
+    console.log(`[TELEGRAM DEDUPE] Joining in-flight Telegram request (${idempotencyKey || 'content-hash'}) instead of sending duplicate`);
+    return existingInFlight;
   }
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+  const requestPromise = (async () => {
+    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+    const body: Record<string, any> = {
+      chat_id: effectiveChat,
+      text,
+      disable_web_page_preview: true,
+    };
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    const data = await res.json();
-
-    if (res.status === 429) {
-      const retryAfter = data.parameters?.retry_after || 5;
-      return { success: false, error: `Telegram Rate Limited (429). Retry after ${retryAfter}s`, retryAfterSec: retryAfter };
+    if (replyToMessageId) {
+      body.reply_to_message_id = replyToMessageId;
     }
 
-    if (!res.ok || !data.ok) {
-      return { success: false, error: data.description || `HTTP ${res.status}` };
+    if (replyMarkup) {
+      body.reply_markup = replyMarkup;
     }
 
-    return { success: true, messageId: data.result?.message_id };
-  } catch (err: any) {
-    return { success: false, error: err.message || 'Network fetch error' };
-  }
+    if (parseMode) {
+      body.parse_mode = parseMode;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      const data = await res.json();
+
+      if (res.status === 429) {
+        const retryAfter = data.parameters?.retry_after || 5;
+        return { success: false, error: `Telegram Rate Limited (429). Retry after ${retryAfter}s`, retryAfterSec: retryAfter };
+      }
+
+      if (!res.ok || !data.ok) {
+        const nonRetryable = res.status >= 400 && res.status < 500 && res.status !== 429;
+        return { success: false, error: data.description || `HTTP ${res.status}`, nonRetryable };
+      }
+
+      const msgId = data.result?.message_id;
+      deliveredTelegramKeys.set(dedupeKey, { messageId: msgId, deliveredAt: Date.now() });
+      return { success: true, messageId: msgId };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network fetch error' };
+    } finally {
+      inFlightTelegramRequests.delete(dedupeKey);
+    }
+  })();
+
+  inFlightTelegramRequests.set(dedupeKey, requestPromise);
+  return requestPromise;
 }
 
 // Answer Callback Query (for interactive inline button clicks)
@@ -439,6 +482,11 @@ async function processOutboxItem(item: OutboxRecord): Promise<void> {
   }
 
   // LIVE DISPATCH
+  if (item.status === 'SENT' || item.telegramMessageId) {
+    item.status = 'SENT';
+    return;
+  }
+
   const effectiveChat = getEffectiveTelegramChatId();
   if (!effectiveChat) {
     item.lastError = "Waiting for target Telegram chat registration. Open @Sarraftelegrambot and send /start or enter Chat ID in dashboard Settings.";
@@ -446,25 +494,27 @@ async function processOutboxItem(item: OutboxRecord): Promise<void> {
     return;
   }
 
-  const result = await sendTelegramHttpRequest(messageText, replyToId, effectiveChat);
+  const result = await sendTelegramHttpRequest(messageText, replyToId, effectiveChat, undefined, undefined, `outbox_${item.eventId}`);
 
-  if (result.success && result.messageId) {
+  if (result.success) {
     item.status = 'SENT';
     item.deliveryMode = 'LIVE';
-    item.telegramMessageId = result.messageId;
+    if (result.messageId) {
+      item.telegramMessageId = result.messageId;
+    }
 
-    if (item.type === 'SIGNAL_CREATED') {
-      signalThreadMap[item.signalId] = result.messageId;
+    if (item.type === 'SIGNAL_CREATED' && item.telegramMessageId) {
+      signalThreadMap[item.signalId] = item.telegramMessageId;
       saveThreadMap();
     }
 
     // Send cooldown line as reply if trade closed
     if (isSignalLifecycle && ['TP4', 'SL', 'BE_STOP', 'TIMEOUT', 'MARKET_CLOSE'].includes(item.type)) {
       const cdLine = formatCooldownLine(35);
-      await sendTelegramHttpRequest(cdLine, signalThreadMap[item.signalId]);
+      await sendTelegramHttpRequest(cdLine, signalThreadMap[item.signalId], effectiveChat, undefined, undefined, `outbox_cd_${item.eventId}`);
     }
 
-    console.log(`[TELEGRAM WORKER - LIVE] Delivered ${item.type} for ${item.signalId} (msg_id: ${result.messageId})`);
+    console.log(`[TELEGRAM WORKER - LIVE] Delivered ${item.type} for ${item.signalId} (msg_id: ${item.telegramMessageId || 'deduped'})`);
   } else {
     item.retryCount = (item.retryCount || 0) + 1;
     item.lastError = result.error || 'Failed to dispatch';
@@ -546,7 +596,7 @@ export async function registerBotCommands(token: string) {
           { command: 'start', description: '🚀 Main Control Terminal & Interactive Dashboard' },
           { command: 'menu', description: '📱 Open Interactive Control Buttons' },
           { command: 'status', description: '📊 Live Engine, Price, Cooldown & Outbox Status' },
-          { command: 'testsignal', description: '⚡ Send Live Sample Gold Trade Signal' },
+          { command: 'testsignal', description: '⚡ Send Live Verification Gold Trade Signal' },
           { command: 'signals', description: '📈 Active Trade & Last Executed Signals' },
           { command: 'dryrun', description: '🔄 Toggle DRY RUN / LIVE Dispatch Mode' },
           { command: 'price', description: '💰 Live Gold XAU/USD Quote & Structure Biases' },
@@ -587,7 +637,7 @@ async function executeTelegramAction(
     setDynamicTelegramChatId(String(chatId));
 
     const text = [
-      '🔱 <b>SARRAF INSTITUTIONAL COMMAND TERMINAL</b>',
+      '🔱 <b>SARRAF COMMAND TERMINAL</b>',
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
       `✅ <b>CHAT REGISTERED SUCCESSFULLY!</b>`,
       `📡 <b>Target Chat ID:</b> <code>${chatId}</code>`,
@@ -647,8 +697,8 @@ async function executeTelegramAction(
     const tp3 = Number((entry + (settings.tp3Dollars || 10.0)).toFixed(2));
     const tp4 = Number((entry + (settings.tp4Dollars || 12.0)).toFixed(2));
 
-    const sampleSignalMsg = [
-      '🔱 <b>SARRAF INSTITUTIONAL TRADE ALERT</b>',
+    const testSignalMsg = [
+      '🔱 <b>SARRAF TRADE ALERT</b>',
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
       '<b>Instrument:</b> XAUUSD (Gold)',
       '<b>Action:</b> BUY 🟢',
@@ -661,7 +711,7 @@ async function executeTelegramAction(
       `• TP3: $${tp3.toFixed(2)} (+1.0R)`,
       `• TP4: $${tp4.toFixed(2)} (+1.2R)`,
       '',
-      '<b>📊 Institutional Confluence:</b>',
+      '<b>📊 Signal Confluence:</b>',
       '• Confluence Score: <b>94/100</b>',
       '• Structure: M15 Order Block + H1 Liquidity Sweep',
       '• Risk/Reward: 1:1.20',
@@ -669,7 +719,7 @@ async function executeTelegramAction(
       `⚡ [LIVE TEST SIGNAL] Delivered at ${new Date().toLocaleTimeString()} UTC. Telegram live alerts verified ✅`,
     ].join('\n');
 
-    await sendTelegramHttpRequest(sampleSignalMsg, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+    await sendTelegramHttpRequest(testSignalMsg, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
     return;
   }
 
@@ -712,8 +762,7 @@ async function executeTelegramAction(
       const text = [
         '▶️ <b>SARRAF SCANNER RESUMED</b>',
         '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        'Automated multi-timeframe liquidity scanning is now active.',
-        'High-probability institutional setups will be evaluated in real-time.',
+        'High-probability setups will be evaluated in real-time.',
       ].join('\n');
       await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
     }
@@ -918,7 +967,7 @@ async function executeTelegramAction(
     const successText = [
       '✅ <b>TELEGRAM CHAT REGISTERED SUCCESSFULLY</b>',
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `This chat (ID: <code>${chatId}</code>) is now registered as the active target for all institutional setups, market summaries, and system notifications.`,
+      `This chat (ID: <code>${chatId}</code>) is now registered as the active target for all setups, market summaries, and system notifications.`,
       '',
       '⚙️ <b>Live automatic trades will start dispatching here immediately!</b>',
       '━━━━━━━━━━━━━━━━━━━━━━━━━',
@@ -1017,7 +1066,7 @@ async function pollTelegramCommands() {
       if (!text.startsWith('/')) {
         if (incomingChatId && isPrivateChat) {
           const welcome = [
-            '🔱 <b>SARRAF INSTITUTIONAL GOLD TERMINAL</b>',
+            '🔱 <b>SARRAF GOLD TERMINAL</b>',
             '━━━━━━━━━━━━━━━━━━━━━━━━━',
             `✅ <b>CHAT REGISTERED SUCCESSFULLY!</b>`,
             `📡 <b>Target Chat ID:</b> <code>${incomingChatId}</code> (@${fromUser})`,
@@ -1365,7 +1414,7 @@ export async function sendAdminAlert(type: AdminAlertType) {
 
 // Manual Test Message sender
 export async function sendManualTestMessage(adminEmail: string): Promise<{ success: boolean; message: string }> {
-  const testText = `[SARRAF TEST] Institutional dispatch test triggered by ${adminEmail} at ${new Date().toUTCString()}.`;
+  const testText = `[SARRAF TEST] Dispatch test triggered by ${adminEmail} at ${new Date().toUTCString()}.`;
 
   if (getIsDryRun()) {
     console.log(`[TELEGRAM TEST - DRY RUN] ${testText}`);
@@ -1448,9 +1497,9 @@ export async function sendManualTestWeeklyReport(targetChatId?: string): Promise
   }
 }
 
-// Manual Sample Signal Dispatcher to verify live Telegram trade alerts
-export async function sendSampleTestSignal(targetChatId?: string): Promise<{ success: boolean; message: string; messageId?: number }> {
-  const sampleSignalText = [
+// Manual Verification Signal Dispatcher to verify live Telegram trade alerts
+export async function sendVerificationTestSignal(targetChatId?: string): Promise<{ success: boolean; message: string; messageId?: number }> {
+  const testSignalText = [
     'XAUUSD BUY 🟢',
     'Entry: 4168.50',
     'SL: 4158.50',
@@ -1462,7 +1511,7 @@ export async function sendSampleTestSignal(targetChatId?: string): Promise<{ suc
     `⚡ [LIVE TEST SIGNAL] Sent at ${new Date().toLocaleTimeString()} UTC. Telegram trade alerts verified.`,
   ].join('\n');
 
-  const result = await sendTelegramHttpRequest(sampleSignalText, undefined, targetChatId);
+  const result = await sendTelegramHttpRequest(testSignalText, undefined, targetChatId);
   if (result.success) {
     return { success: true, message: `Live test signal delivered to Telegram (Msg ID: ${result.messageId})!`, messageId: result.messageId };
   } else {

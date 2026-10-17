@@ -901,41 +901,39 @@
   },
   {
     "date": "2026-10-15",
-    "publishedAt": "2026-10-17T11:31:17.870Z",
-    "nextPublishAt": "2026-10-17T23:00:00.000Z",
+    "publishedAt": "2026-10-15T00:00:00.000Z",
     "prevDayCandle": {
-      "date": "2026-10-15",
-      "high": 4195,
-      "low": 4160,
-      "close": 4185
+      "date": "2026-10-14",
+      "high": 4170.63,
+      "low": 4073.32,
+      "close": 4111.97
     },
     "pivots": {
-      "H": 4195,
-      "L": 4160,
-      "C": 4185,
-      "PP": 4180,
-      "R1": 4200,
-      "S1": 4165,
-      "R2": 4215,
-      "S2": 4145,
-      "R3": 4235,
-      "S3": 4130
+      "H": 4170.63,
+      "L": 4073.32,
+      "C": 4111.97,
+      "PP": 4118.64,
+      "R1": 4163.96,
+      "S1": 4066.65,
+      "R2": 4215.95,
+      "S2": 4021.33,
+      "R3": 4261.27,
+      "S3": 3969.34
     },
     "zones": [
       {
         "id": "R3",
         "name": "R3 Supply",
-        "level": 4235,
-        "top": 4237,
-        "bottom": 4233,
-        "halfWidth": 2,
+        "level": 4261.27,
+        "top": 4264.27,
+        "bottom": 4258.27,
+        "halfWidth": 3,
         "side": "SELL",
         "type": "SUPPLY",
         "tier": "T3 EXTREME",
-        "grade": "B",
-        "touchesCount": 0,
-        "reason": "Standard pivot band (0 touches in last 20d)",
-        "confluenceList": [],
+        "grade": "A",
+        "touchesCount": 1,
+        "reason": "Historical Pivot",
         "status": "FRESH",
         "touchesToday": 0,
         "isFlipped": false,
@@ -944,17 +942,16 @@
       {
         "id": "R2",
         "name": "R2 Supply",
-        "level": 4215,
-        "top": 4217,
-        "bottom": 4213,
-        "halfWidth": 2,
+        "level": 4215.95,
+        "top": 4218.95,
+        "bottom": 4212.95,
+        "halfWidth": 3,
         "side": "SELL",
         "type": "SUPPLY",
         "tier": "T2 STRONG",
-        "grade": "B",
-        "touchesCount": 0,
-        "reason": "Standard pivot band (0 touches in last 20d)",
-        "confluenceList": [],
+        "grade": "A",
+        "touchesCount": 3,
+        "reason": "Historical Pivot",
         "status": "FRESH",
         "touchesToday": 0,
         "isFlipped": false,
@@ -963,17 +960,16 @@
       {
         "id": "R1",
         "name": "R1 Supply",
-        "level": 4200,
-        "top": 4202,
-        "bottom": 4198,
-        "halfWidth": 2,
+        "level": 4163.96,
+        "top": 4166.96,
+        "bottom": 4160.96,
+        "halfWidth": 3,
         "side": "SELL",
         "type": "SUPPLY",
         "tier": "T1 PRIMARY",
-        "grade": "B",
-        "touchesCount": 0,
-        "reason": "Standard pivot band (0 touches in last 20d)",
-        "confluenceList": [],
+        "grade": "A",
+        "touchesCount": 12,
+        "reason": "Historical Pivot",
         "status": "FRESH",
         "touchesToday": 0,
         "isFlipped": false,
@@ -982,19 +978,16 @@
       {
         "id": "PP",
         "name": "SARRAF ZONE",
-        "level": 4180,
-        "top": 4182,
-        "bottom": 4178,
-        "halfWidth": 2,
+        "level": 4118.64,
+        "top": 4121.64,
+        "bottom": 4115.64,
+        "halfWidth": 3,
         "side": "NEUTRAL",
         "type": "SARRAF_ZONE",
         "tier": "SARRAF ZONE",
-        "grade": "B",
-        "touchesCount": 3,
-        "reason": "3 distinct touches in last 20d",
-        "confluenceList": [
-          "3 distinct touches in last 20d"
-        ],
+        "grade": "A",
+        "touchesCount": 20,
+        "reason": "Historical Central Pivot",
         "status": "FRESH",
         "touchesToday": 0,
         "isFlipped": false,
@@ -1003,17 +996,16 @@
       {
         "id": "S1",
         "name": "S1 Demand",
-        "level": 4165,
-        "top": 4167,
-        "bottom": 4163,
-        "halfWidth": 2,
+        "level": 4066.65,
+        "top": 4069.65,
+        "bottom": 4063.65,
+        "halfWidth": 3,
         "side": "BUY",
         "type": "DEMAND",
         "tier": "T1 PRIMARY",
-        "grade": "B",
-        "touchesCount": 0,
-        "reason": "Standard pivot band (0 touches in last 20d)",
-        "confluenceList": [],
+        "grade": "A",
+        "touchesCount": 10,
+        "reason": "Historical Pivot",
         "status": "FRESH",
         "touchesToday": 0,
         "isFlipped": false,
@@ -1022,17 +1014,16 @@
       {
         "id": "S2",
         "name": "S2 Demand",
-        "level": 4145,
-        "top": 4147,
-        "bottom": 4143,
-        "halfWidth": 2,
+        "level": 4021.33,
+        "top": 4024.33,
+        "bottom": 4018.33,
+        "halfWidth": 3,
         "side": "BUY",
         "type": "DEMAND",
         "tier": "T2 STRONG",
-        "grade": "B",
-        "touchesCount": 0,
-        "reason": "Standard pivot band (0 touches in last 20d)",
-        "confluenceList": [],
+        "grade": "A",
+        "touchesCount": 4,
+        "reason": "Historical Pivot",
         "status": "FRESH",
         "touchesToday": 0,
         "isFlipped": false,
@@ -1041,17 +1032,16 @@
       {
         "id": "S3",
         "name": "S3 Demand",
-        "level": 4130,
-        "top": 4132,
-        "bottom": 4128,
-        "halfWidth": 2,
+        "level": 3969.34,
+        "top": 3972.34,
+        "bottom": 3966.34,
+        "halfWidth": 3,
         "side": "BUY",
         "type": "DEMAND",
         "tier": "T3 EXTREME",
         "grade": "B",
         "touchesCount": 0,
-        "reason": "Standard pivot band (0 touches in last 20d)",
-        "confluenceList": [],
+        "reason": "Historical Pivot",
         "status": "FRESH",
         "touchesToday": 0,
         "isFlipped": false,
@@ -1059,137 +1049,78 @@
       }
     ],
     "bias": {
-      "overall": "RANGE",
-      "strategy": "RANGE_PLAY",
-      "strategyLabel": "Range play between daily bounds",
-      "score": 0,
-      "timeframes": [
-        {
-          "timeframe": "MN",
-          "trend": "NO DATA",
-          "ema50": null,
-          "ema100": null,
-          "ema200": null,
-          "structure": "Insufficient data bars",
-          "weight": 1
-        },
-        {
-          "timeframe": "W1",
-          "trend": "NO DATA",
-          "ema50": null,
-          "ema100": null,
-          "ema200": null,
-          "structure": "Insufficient data bars",
-          "weight": 3
-        },
-        {
-          "timeframe": "D1",
-          "trend": "NO DATA",
-          "ema50": null,
-          "ema100": null,
-          "ema200": null,
-          "structure": "Insufficient data bars",
-          "weight": 3
-        },
-        {
-          "timeframe": "H4",
-          "trend": "NO DATA",
-          "ema50": null,
-          "ema100": null,
-          "ema200": null,
-          "structure": "Insufficient data bars",
-          "weight": 2
-        },
-        {
-          "timeframe": "H1",
-          "trend": "RANGE",
-          "ema50": 4160,
-          "ema100": 4160,
-          "ema200": 4160.08,
-          "structure": "Range-bound structure",
-          "weight": 1
-        }
-      ]
+      "overall": "BEARISH",
+      "strategy": "SELL_RALLY",
+      "strategyLabel": "Sell rallies below PP",
+      "score": -2,
+      "timeframes": []
     },
-    "scenarios": {
-      "main": {
-        "type": "MAIN",
-        "title": "PRIMARY: Range Equilibrium Fades",
-        "bias": "NEUTRAL (Range Fade)",
-        "description": "Trade boundaries between R1 ($4200.00) and S1 ($4165.00) with central mean reversion toward SARRAF ZONE ($4180.00).",
-        "triggerZone": "R1 or S1 Boundaries",
-        "invalidation": "H1 close beyond R1 top or S1 bottom",
-        "targets": [
-          {
-            "label": "Central Target (PP)",
-            "price": 4180
-          },
-          {
-            "label": "Opposing Edge",
-            "price": 4200
-          }
-        ]
-      },
-      "alternate": {
-        "type": "ALTERNATE",
-        "title": "ALTERNATE: Directional Trend Expansion",
-        "bias": "EXPANSION BREAKOUT",
-        "description": "Strong directional impulse closing outside the R1/S1 corridor triggers trend-following continuation to T2/T3 extreme levels.",
-        "triggerZone": "Outside R1-S1 corridor",
-        "invalidation": "False breakout closing back inside PP",
-        "targets": [
-          {
-            "label": "Upper Expansion",
-            "price": 4215
-          },
-          {
-            "label": "Lower Expansion",
-            "price": 4145
-          }
-        ]
-      }
-    },
-    "targets": {
-      "sell": [
+    "reportCard": {
+      "date": "2026-10-15",
+      "evaluatedAt": "2026-10-17T11:32:47.663Z",
+      "zones": [
         {
-          "label": "TP1 (PP / Pivot)",
-          "price": 4180
+          "zoneId": "R3",
+          "name": "R3 Supply",
+          "level": 4261.27,
+          "side": "SELL",
+          "outcome": "IGNORED",
+          "notes": "Price stayed below zone (Day High $4177.56 vs Zone Bottom $4258.27)"
         },
         {
-          "label": "TP2 (S1 Demand)",
-          "price": 4165
+          "zoneId": "R2",
+          "name": "R2 Supply",
+          "level": 4215.95,
+          "side": "SELL",
+          "outcome": "IGNORED",
+          "notes": "Price stayed below zone (Day High $4177.56 vs Zone Bottom $4212.95)"
         },
         {
-          "label": "TP3 (S2 Strong)",
-          "price": 4145
+          "zoneId": "R1",
+          "name": "R1 Supply",
+          "level": 4163.96,
+          "side": "SELL",
+          "outcome": "BROKEN",
+          "notes": "H1 closed above far edge at $4175.55"
         },
         {
-          "label": "TP4 (S3 Extreme)",
-          "price": 4130
+          "zoneId": "PP",
+          "name": "SARRAF ZONE",
+          "level": 4118.64,
+          "side": "NEUTRAL",
+          "outcome": "BROKEN",
+          "notes": "H1 closed outside PP corridor at $4139.81"
+        },
+        {
+          "zoneId": "S1",
+          "name": "S1 Demand",
+          "level": 4066.65,
+          "side": "BUY",
+          "outcome": "IGNORED",
+          "notes": "Price stayed above zone (Day Low $4111.24 vs Zone Top $4069.65)"
+        },
+        {
+          "zoneId": "S2",
+          "name": "S2 Demand",
+          "level": 4021.33,
+          "side": "BUY",
+          "outcome": "IGNORED",
+          "notes": "Price stayed above zone (Day Low $4111.24 vs Zone Top $4024.33)"
+        },
+        {
+          "zoneId": "S3",
+          "name": "S3 Demand",
+          "level": 3969.34,
+          "side": "BUY",
+          "outcome": "IGNORED",
+          "notes": "Price stayed above zone (Day Low $4111.24 vs Zone Top $3972.34)"
         }
       ],
-      "buy": [
-        {
-          "label": "TP1 (PP / Pivot)",
-          "price": 4180
-        },
-        {
-          "label": "TP2 (R1 Supply)",
-          "price": 4200
-        },
-        {
-          "label": "TP3 (R2 Strong)",
-          "price": 4215
-        },
-        {
-          "label": "TP4 (R3 Extreme)",
-          "price": 4235
-        }
-      ]
-    },
-    "invalidation": {
-      "sell": "H1 close above R1 Supply top ($4202.00)",
-      "buy": "H1 close below S1 Demand bottom ($4163.00)"
+      "totalEvaluated": 2,
+      "respectedCount": 0,
+      "brokenCount": 2,
+      "ignoredCount": 5,
+      "accuracyPercent": 0
     }
   }
 ]

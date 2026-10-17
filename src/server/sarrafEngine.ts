@@ -614,7 +614,7 @@ export function runSarrafAnalysis(livePrice?: number, liveSpread?: number): Engi
 
   let bestSignal: SignalPlan | null = null;
   let bestScoreBreakdown: ScoreBreakdown | null = null;
-  let scanReason = 'Scanning active: No setup currently meeting the >= 80 institutional score threshold.';
+  let scanReason = 'Scanning active: No setup currently meeting the >= 80 sarraf score threshold.';
 
   // Dealing range for premium/discount calculation
   const h1High = Math.max(...h1Candles.slice(-20).map((c) => c.high));
@@ -720,7 +720,7 @@ export function runSarrafAnalysis(livePrice?: number, liveSpread?: number): Engi
         status: 'ACTIVE',
       };
 
-      scanReason = `Institutional signal formed with score ${totalScore}/100 at ${zone.type} (${entryPrice}).`;
+      scanReason = `SARRAF signal formed with score ${totalScore}/100 at ${zone.type} (${entryPrice}).`;
       break;
     }
   }
@@ -1016,8 +1016,8 @@ export function runBacktestReplay(withHTFFilter: boolean = true): ReplaySummary 
 
   const isReliable = completed.length >= 25 && m30Candles.length >= 80;
   const reliabilityNote = isReliable
-    ? 'Statistical sample size sufficient for institutional review.'
-    : `Historical sample size (${m30Candles.length} M30 bars / ${completed.length} trades) is too short for long-term statistical certainty. Results reflect recent market conditions only.`;
+    ? 'Statistical recent size sufficient for sarraf review.'
+    : `Historical recent size (${m30Candles.length} M30 bars / ${completed.length} trades) is too short for long-term statistical certainty. Results reflect recent market conditions only.`;
 
   return {
     mode: withHTFFilter ? 'WITH_HTF_FILTER' : 'WITHOUT_HTF_FILTER',

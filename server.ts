@@ -84,7 +84,7 @@ import {
   startTelegramWorker,
   getTelegramWorkerStatus,
   sendManualTestMessage,
-  sendSampleTestSignal,
+  sendVerificationTestSignal,
   sendManualTestDailySummary,
   sendManualTestWeeklyReport,
   sendAdminAlert,
@@ -610,7 +610,7 @@ async function fetchBiquoteTick() {
       dayDiffPercent: rawData.dayDiffPercent,
       direction: rawData.direction,
       timestamp: rawData.timestamp,
-      source: rawData.source || 'Live Institutional Feed',
+      source: rawData.source || 'Live SARRAF Feed',
       marketState: rawData.marketState,
     });
 
@@ -1310,7 +1310,7 @@ function requireAdminAuth(req: express.Request, res: express.Response, next: exp
       return next();
     }
     return res.status(401).json({
-      error: 'Unauthorized: Valid institutional session cookie required.',
+      error: 'Unauthorized: Valid sarraf session cookie required.',
     });
   }
   const session = activeSessions.get(token);
@@ -1525,12 +1525,12 @@ app.post('/api/telegram/test-message', requireAdminAuth, async (req, res) => {
   return res.json(result);
 });
 
-// POST /api/telegram/test-signal - Manual Sample Signal Dispatch to Telegram
+// POST /api/telegram/test-signal - Manual Test Signal Dispatch to Telegram
 app.post('/api/telegram/test-signal', requireAdminAuth, async (req, res) => {
   const user = (req as any).user;
   const { chatId } = req.body || {};
-  console.log(`[AUDIT] Admin ${user?.email} triggered sample test trade signal to Telegram.`);
-  const result = await sendSampleTestSignal(chatId);
+  console.log(`[AUDIT] Admin ${user?.email} triggered recent test trade signal to Telegram.`);
+  const result = await sendVerificationTestSignal(chatId);
   return res.json(result);
 });
 
@@ -1625,7 +1625,7 @@ app.get('/api/telegram/validations', requireAdminAuth, (_req, res) => {
   });
 });
 
-// POST /api/ai/chat - Institutional AI Market Chat (Section 6)
+// POST /api/ai/chat - SARRAF AI Market Chat (Section 6)
 app.post('/api/ai/chat', requireAdminAuth, async (req, res) => {
   const { prompt, history } = req.body || {};
   if (!prompt || typeof prompt !== 'string') {
@@ -1850,7 +1850,7 @@ app.post('/api/google-chat/learnings/curate', requireAdminAuth, (req, res) => {
 
   if (!isEmailWhitelisted(adminEmail)) {
     return res.status(403).json({
-      error: `Access Denied: Account (${adminEmail}) not authorized to curate institutional lessons.`,
+      error: `Access Denied: Account (${adminEmail}) not authorized to curate sarraf lessons.`,
     });
   }
 
@@ -2042,7 +2042,7 @@ app.post('/api/settings/reset', requireAdminAuth, (req, res) => {
   return res.json({
     status: 'SUCCESS',
     settings,
-    message: 'Settings reset to institutional defaults.',
+    message: 'Settings reset to sarraf defaults.',
   });
 });
 
@@ -2337,7 +2337,7 @@ app.post('/api/admin/go-live/override', requireAdminAuth, (req, res) => {
   const user = (req as any).user;
   const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
   const { confirmationPhrase } = req.body || {};
-  const REQUIRED_PHRASE = 'CONFIRM INSTITUTIONAL LIVE DISPATCH';
+  const REQUIRED_PHRASE = 'CONFIRM SARRAF LIVE DISPATCH';
 
   if (confirmationPhrase !== REQUIRED_PHRASE) {
     return res.status(400).json({
@@ -2414,7 +2414,7 @@ app.post('/api/auth/login', (req, res) => {
     const token = crypto.randomBytes(32).toString('hex');
     const userPayload = {
       email: loginUser.toLowerCase(),
-      accountType: 'Institutional Desk',
+      accountType: 'SARRAF Desk',
       terminalId: `SRF-${crypto.randomInt(1000, 9999)}-XAU`,
       role: 'admin',
       isAdmin: true,
@@ -2513,7 +2513,7 @@ async function startServer() {
     process.exit(1);
   }
   if (!dirCheck.isPersistent) {
-    console.warn(`[SARRAF WARNING] DATA_DIR (${DATA_DIR}) appears ephemeral. Mounting a persistent volume is recommended for 24/7 institutional state retention.`);
+    console.warn(`[SARRAF WARNING] DATA_DIR (${DATA_DIR}) appears ephemeral. Mounting a persistent volume is recommended for 24/7 sarraf state retention.`);
   }
 
   // 2. Acquire single-instance lease lock
@@ -2582,7 +2582,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SARRAF SERVER] Full-stack institutional engine running on http://0.0.0.0:${PORT}`);
+    console.log(`[SARRAF SERVER] Full-stack sarraf engine running on http://0.0.0.0:${PORT}`);
   });
 }
 

@@ -81,14 +81,14 @@ export function runPhase4TestSuite(): Phase4TestSuiteReport {
   // -------------------------------------------------------------
   {
     // Simulate outbox with one SENT item and one PENDING item
-    const mockOutbox = [
+    const testOutbox = [
       { eventId: 'EVT-001', signalId: 'SRF-1', type: 'SIGNAL_CREATED', status: 'SENT', telegramMessageId: 101 },
       { eventId: 'EVT-002', signalId: 'SRF-1', type: 'TP1', status: 'PENDING_DELIVERY' },
     ];
 
     // After simulated reboot, process pending only
-    const pending = mockOutbox.filter((o) => o.status === 'PENDING_DELIVERY');
-    const sent = mockOutbox.filter((o) => o.status === 'SENT');
+    const pending = testOutbox.filter((o) => o.status === 'PENDING_DELIVERY');
+    const sent = testOutbox.filter((o) => o.status === 'SENT');
 
     // EVT-001 must not be resent
     const noResendOfSent = sent.length === 1 && sent[0].eventId === 'EVT-001';
@@ -114,8 +114,8 @@ export function runPhase4TestSuite(): Phase4TestSuiteReport {
     let attempts = 0;
     let rateLimitHandled = false;
 
-    // Simulate mock sender returning 429 on first try, then 200 on retry
-    const mockSend = () => {
+    // Simulate test sender returning 429 on first try, then 200 on retry
+    const testSend = () => {
       attempts += 1;
       if (attempts === 1) {
         rateLimitHandled = true;
@@ -124,8 +124,8 @@ export function runPhase4TestSuite(): Phase4TestSuiteReport {
       return { ok: true, messageId: 999 };
     };
 
-    const first = mockSend();
-    const second = mockSend();
+    const first = testSend();
+    const second = testSend();
 
     const passed = first.status === 429 && second.ok === true && attempts === 2 && rateLimitHandled;
 

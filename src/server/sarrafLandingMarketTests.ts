@@ -333,7 +333,7 @@ export function runMarketClosedAndTelegramTestSuite(): MarketTelegramTestReport 
 
     state.state = 'ACTIVE';
     state.currentSignal = {
-      id: 'mock-active-close-test',
+      id: 'test-active-close-test',
       version: 1,
       direction: 'BUY',
       entryTarget: 4150.0,
@@ -367,7 +367,7 @@ export function runMarketClosedAndTelegramTestSuite(): MarketTelegramTestReport 
                   (state.state as any) === 'HALTED_FEED' &&
                   state.currentSignal === null;
 
-    const foundInHistory = state.history.find(s => s.id === 'mock-active-close-test');
+    const foundInHistory = state.history.find(s => s.id === 'test-active-close-test');
     const closedCorrectly = foundInHistory && 
                             foundInHistory.status === 'CLOSED' && 
                             foundInHistory.closeReason === 'MARKET_CLOSE' && 
@@ -403,7 +403,7 @@ export function runMarketClosedAndTelegramTestSuite(): MarketTelegramTestReport 
 
     state.state = 'PENDING';
     state.currentSignal = {
-      id: 'mock-pending-close-test',
+      id: 'test-pending-close-test',
       version: 1,
       direction: 'BUY',
       entryTarget: 4150.0,
@@ -436,7 +436,7 @@ export function runMarketClosedAndTelegramTestSuite(): MarketTelegramTestReport 
                   (state.state as any) === 'HALTED_FEED' &&
                   state.currentSignal === null;
 
-    const foundInHistory = state.history.find(s => s.id === 'mock-pending-close-test');
+    const foundInHistory = state.history.find(s => s.id === 'test-pending-close-test');
     const expiredCorrectly = foundInHistory && 
                              foundInHistory.status === 'CLOSED' && 
                              foundInHistory.closeReason === 'EXPIRED' && 

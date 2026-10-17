@@ -226,7 +226,7 @@ export const GoLiveChecklistTab: React.FC<GoLiveChecklistTabProps> = ({
                 </span>
               </h2>
               <p className="text-[11px] text-neutral-400">
-                11 strict institutional safety gates verify feed freshness, atomic persistence, lease exclusivity, and clock alignment before live broadcasting.
+                11 strict sarraf safety gates verify feed freshness, atomic persistence, lease exclusivity, and clock alignment before live broadcasting.
               </p>
             </div>
           </div>
@@ -451,13 +451,13 @@ export const GoLiveChecklistTab: React.FC<GoLiveChecklistTabProps> = ({
               </div>
               <div>
                 <h4 className="font-bold text-white text-sm">ADMIN GO-LIVE OVERRIDE REQUIRED</h4>
-                <span className="text-[11px] text-neutral-400">Institutional Safety Bypass Gate</span>
+                <span className="text-[11px] text-neutral-400">SARRAF Safety Bypass Gate</span>
               </div>
             </div>
 
             <p className="text-neutral-300 text-xs leading-relaxed">
               One or more checklist gates are not fully green (e.g. minimum 5 DRY RUN signals pending, news warmup, or live token setup). To manually authorize LIVE TELEGRAM DISPATCH, type:
-              <strong className="text-[#FFD97A] block mt-1 select-all">CONFIRM INSTITUTIONAL LIVE DISPATCH</strong>
+              <strong className="text-[#FFD97A] block mt-1 select-all">CONFIRM SARRAF LIVE DISPATCH</strong>
             </p>
 
             {overrideError && (
@@ -486,7 +486,7 @@ export const GoLiveChecklistTab: React.FC<GoLiveChecklistTabProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={overrideInput !== 'CONFIRM INSTITUTIONAL LIVE DISPATCH'}
+                  disabled={overrideInput !== 'CONFIRM SARRAF LIVE DISPATCH'}
                   className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-bold cursor-pointer disabled:opacity-50"
                 >
                   Confirm Override & Go Live
