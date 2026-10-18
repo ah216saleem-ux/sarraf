@@ -1,28 +1,27 @@
 import fs from 'fs';
 import path from 'path';
-import { DATA_DIR, writeJsonAtomic } from './deploymentSafety.ts';
+import os from 'os';
 import {
   readCommandOutbox,
   writeCommandOutbox,
   enqueueCommandOutbox,
   processCommandOutbox,
   CommandOutboxRecord,
+  setCommandOutboxPath,
 } from './commandTelegramService.ts';
-
-const COMMAND_OUTBOX_FILE = path.resolve(DATA_DIR, 'command_outbox.json');
 
 export async function runCommandOutboxRestartTestSuite() {
   console.log('====================================================');
   console.log('RUNNING COMMAND TELEGRAM DISK OUTBOX & RESTART TESTS');
   console.log('====================================================');
 
-  // Backup existing outbox if any
-  let originalOutbox: CommandOutboxRecord[] = [];
-  if (fs.existsSync(COMMAND_OUTBOX_FILE)) {
-    try {
-      originalOutbox = JSON.parse(fs.readFileSync(COMMAND_OUTBOX_FILE, 'utf-8'));
-    } catch {}
-  }
+  // Use isolated temporary outbox in os.tmpdir() so production data/command_outbox.json is NEVER touched
+  const tempOutboxPath = path.resolve(
+    os.tmpdir(),
+    `test_command_outbox_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.json`
+  );
+  setCommandOutboxPath(tempOutboxPath);
+  console.log(`[TEST ISOLATION] Using isolated temp outbox: ${tempOutboxPath}`);
 
   const results: { test: string; passed: boolean; message: string }[] = [];
 
@@ -155,11 +154,14 @@ export async function runCommandOutboxRestartTestSuite() {
     console.log('  -> PASSED: Outbox disk file bounded.');
 
   } finally {
-    // Restore clean test items or original outbox without breaking existing deliveries
-    const cleanOutbox = readCommandOutbox().filter(
-      (r) => !r.idempotencyKey?.startsWith('test_boot_') && !r.idempotencyKey?.startsWith('crash_sim_')
-    );
-    writeCommandOutbox(cleanOutbox.length > 0 ? cleanOutbox : originalOutbox);
+    // Reset path back to production default and delete temporary test file
+    setCommandOutboxPath(null);
+    try {
+      if (fs.existsSync(tempOutboxPath)) {
+        fs.unlinkSync(tempOutboxPath);
+        console.log(`[TEST ISOLATION] Cleaned up temporary test file: ${tempOutboxPath}`);
+      }
+    } catch {}
   }
 
   console.log('\n====================================================');

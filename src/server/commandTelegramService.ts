@@ -209,13 +209,24 @@ async function sendRawTelegramMessage(
   return reqPromise;
 }
 
+let commandOutboxFilePath = COMMAND_OUTBOX_FILE;
+
+export function setCommandOutboxPath(customPath: string | null) {
+  commandOutboxFilePath = customPath || COMMAND_OUTBOX_FILE;
+}
+
+export function getCommandOutboxPath(): string {
+  return commandOutboxFilePath;
+}
+
 /**
  * Reads command outbox atomically from disk
  */
 export function readCommandOutbox(): CommandOutboxRecord[] {
-  if (!fs.existsSync(COMMAND_OUTBOX_FILE)) return [];
+  const targetPath = commandOutboxFilePath;
+  if (!fs.existsSync(targetPath)) return [];
   try {
-    const raw = fs.readFileSync(COMMAND_OUTBOX_FILE, 'utf-8');
+    const raw = fs.readFileSync(targetPath, 'utf-8');
     return JSON.parse(raw) || [];
   } catch {
     return [];
@@ -223,11 +234,11 @@ export function readCommandOutbox(): CommandOutboxRecord[] {
 }
 
 /**
- * Saves command outbox atomically to disk (command_outbox.json)
+ * Saves command outbox atomically to disk (command_outbox.json or custom path)
  */
 export function writeCommandOutbox(items: CommandOutboxRecord[]) {
   try {
-    writeJsonAtomic(COMMAND_OUTBOX_FILE, items);
+    writeJsonAtomic(commandOutboxFilePath, items);
   } catch (err: any) {
     console.error('[SARRAF COMMAND OUTBOX] Failed to write outbox to disk:', err.message);
   }

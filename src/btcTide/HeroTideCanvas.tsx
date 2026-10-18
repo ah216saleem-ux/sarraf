@@ -7,7 +7,11 @@ import {
   ActiveTideSignal,
   AggTrade,
   LiquidationItem,
+  BookTicker,
+  SessionStats,
 } from './types';
+import { DecisionEngineResult } from './signalEngine';
+import { BtcTideTradeRecord } from '../server/btcTideSignalDatabase';
 import {
   subscribeLiveTrades,
   subscribeLiveLiquidations,
@@ -18,10 +22,19 @@ import { Waves, Orbit, Sparkles, ShieldAlert, Clock } from 'lucide-react';
 
 interface HeroTideCanvasProps {
   currentPrice: number | null;
+  priceFlash?: 'up' | 'down' | 'none';
   status: BtcFeedStatus;
   messageAgeMs: number;
   secondBins: SecondBin[];
   activeSignal: ActiveTideSignal | null;
+  activeTrade?: BtcTideTradeRecord | null;
+  decision?: DecisionEngineResult;
+  bookTicker?: BookTicker;
+  session?: SessionStats;
+  isSpotStale?: boolean;
+  spotAgeMs?: number;
+  isBookStale?: boolean;
+  bookAgeMs?: number;
 }
 
 interface TradeParticle {
@@ -91,13 +104,45 @@ function formatUsdShort(val: number): string {
 }
 
 export const HeroTideCanvas: React.FC<HeroTideCanvasProps> = React.memo(
-  ({ currentPrice, status, messageAgeMs, secondBins, activeSignal }) => {
-    const [sceneMode, setSceneMode] = useState<HeroSceneMode>('TUG_OF_WAR');
+  ({
+    currentPrice,
+    priceFlash = 'none',
+    status,
+    messageAgeMs,
+    secondBins,
+    activeSignal,
+    activeTrade = null,
+    decision,
+    bookTicker,
+    session,
+    isSpotStale = false,
+    spotAgeMs = 0,
+    isBookStale = false,
+    bookAgeMs = 0,
+  }) => {
+    // Flow Reactor is the default scene; Tug-of-War Tide is the second scene
+    const [sceneMode, setSceneMode] = useState<HeroSceneMode>('FLOW_REACTOR');
     const [fxLevel, setFxLevel] = useState<HeroFxLevel>('HIGH');
     const [reducedMotion, setReducedMotion] = useState<boolean>(false);
 
     const containerRef = useRef<HTMLDivElement | null>(null);
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+    // Preserve last real frame data so the Hero canvas NEVER goes blank on stale/reconnect
+    const lastRealFrameRef = useRef<{
+      price: number | null;
+      bins: SecondBin[];
+    }>({
+      price: currentPrice,
+      bins: secondBins,
+    });
+
+    if (currentPrice !== null && currentPrice > 0) {
+      lastRealFrameRef.current.price = currentPrice;
+    }
+    if (secondBins.length > 0) {
+      lastRealFrameRef.current.bins = secondBins;
+    }
 
     // Live mutable refs for the requestAnimationFrame loop
     const stateRef = useRef({
@@ -377,9 +422,9 @@ export const HeroTideCanvas: React.FC<HeroTideCanvasProps> = React.memo(
         ctx.scale(dpr, dpr);
 
         const {
-          currentPrice: livePrice,
+          currentPrice: rawLivePrice,
           status: feedStatus,
-          secondBins: bins,
+          secondBins: rawBins,
           activeSignal: sig,
           sceneMode: mode,
           fxLevel: fx,
@@ -414,7 +459,30 @@ export const HeroTideCanvas: React.FC<HeroTideCanvasProps> = React.memo(
           ctx.stroke();
         }
 
-        // If no real data has arrived yet -> No boot animation with fake data
+        // Never blank the canvas: fall back to last real frame if current feed is momentarily empty
+        const livePrice = rawLivePrice ?? lastRealFrameRef.current.price;
+        let bins = rawBins.length > 0 ? rawBins : lastRealFrameRef.current.bins;
+
+        if (bins.length === 0 && livePrice !== null && livePrice > 0) {
+          const secNow = Math.floor(Date.now() / 1000);
+          bins = [
+            {
+              sec: secNow,
+              buyVol: 0,
+              sellVol: 0,
+              buyUsd: 0,
+              sellUsd: 0,
+              count: 0,
+              openPrice: livePrice,
+              highPrice: livePrice,
+              lowPrice: livePrice,
+              lastPrice: livePrice,
+              largePrintMaxUsd: 0,
+              largePrintSide: null,
+            },
+          ];
+        }
+
         if (bins.length === 0 || livePrice === null) {
           ctx.restore();
           rafId = requestAnimationFrame(renderFrame);
@@ -1087,157 +1155,264 @@ export const HeroTideCanvas: React.FC<HeroTideCanvasProps> = React.memo(
     }, []);
 
     const isOffline = status === 'OFFLINE';
-    const isStale = status === 'STALE';
-    const hasTrades = secondBins.length > 0 && currentPrice !== null;
+    const isStale = status === 'STALE' || isSpotStale;
+    const displayPrice = currentPrice ?? lastRealFrameRef.current.price;
+    const displayBins = secondBins.length > 0 ? secondBins : lastRealFrameRef.current.bins;
+    const hasTrades = displayBins.length > 0 && displayPrice !== null;
 
-    const formatPrice = (val: number | null) => {
-      if (val === null || val <= 0) return '--';
+    const formatPrice = (val: number | null | undefined) => {
+      if (val === null || val === undefined || val <= 0) return '--';
       return `$${val.toLocaleString('en-US', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       })}`;
     };
 
+    // One-line verdict: "WAIT" or "LONG 72% - entry/SL/TP1"
+    const verdictInfo = useMemo(() => {
+      if (activeTrade && activeTrade.status !== 'CLOSED') {
+        const conf = Math.round(activeTrade.confidence);
+        const e = activeTrade.entryPrice.toFixed(0);
+        const sl = activeTrade.slPrice.toFixed(0);
+        const tp1 = activeTrade.tp1Price.toFixed(0);
+        return {
+          text: `${activeTrade.side} ${conf}% - ${e}/${sl}/${tp1}`,
+          side: activeTrade.side,
+          isActive: true,
+        };
+      }
+      if (decision?.canFire && decision.favoredSide !== 'NEUTRAL' && displayPrice) {
+        const conf = Math.round(decision.confidence);
+        const e = displayPrice.toFixed(0);
+        return {
+          text: `${decision.favoredSide} ${conf}% - @${e}`,
+          side: decision.favoredSide,
+          isActive: true,
+        };
+      }
+      return {
+        text: 'WAIT',
+        side: 'NEUTRAL' as const,
+        isActive: false,
+      };
+    }, [activeTrade, decision, displayPrice]);
+
+    const effectiveAgeSec = ((spotAgeMs || messageAgeMs || 0) / 1000).toFixed(1);
+
     return (
       <div className="relative w-full bg-[#07080c] border border-[#E8B84A]/25 rounded-xl overflow-hidden shadow-[0_6px_30px_rgba(0,0,0,0.65)]">
-        {/* Top HUD & Controls Bar */}
-        <div className="relative z-10 flex flex-wrap items-center justify-between gap-2 px-3 sm:px-4 py-2.5 bg-black/70 border-b border-white/10 backdrop-blur-md font-mono text-xs">
-          {/* Left HUD: Price, Mood Chip (BUYERS / SELLERS IN CONTROL %), Trades / Min */}
-          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-            {/* HUD Price */}
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] text-neutral-400 uppercase">PRICE:</span>
-              <span
-                className={`text-sm sm:text-base font-extrabold tracking-tight ${
-                  isOffline || isStale ? 'text-neutral-500' : 'text-white'
-                }`}
-              >
-                {formatPrice(currentPrice)}
-              </span>
-            </div>
-
-            {/* Mood Chip: BUYERS / SELLERS IN CONTROL % */}
-            {hudStats.buyPct !== null && hudStats.sellPct !== null ? (
-              hudStats.buyPct >= 50 ? (
-                <div
-                  className={`px-2 py-0.5 rounded border text-[11px] font-bold ${
+        {/* Top Overlay HUD Bar: Live Price, Mood Chip, TPM, One-Line Verdict, Scene & FX Controls */}
+        <div className="relative z-10 px-3 sm:px-4 py-2.5 bg-black/75 border-b border-white/10 backdrop-blur-md font-mono text-xs space-y-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            {/* Left Overlay Cluster: Live Price, Mood Chip, TPM, One-Line Verdict */}
+            <div className="flex flex-wrap items-center gap-2 sm:gap-2.5">
+              {/* Live Price */}
+              <div className="flex items-baseline gap-1.5">
+                <span
+                  className={`text-base sm:text-xl font-extrabold tracking-tight transition-colors ${
                     isOffline || isStale
-                      ? 'bg-neutral-900 border-neutral-700 text-neutral-500'
-                      : 'bg-teal-950/70 border-teal-500/40 text-teal-300'
+                      ? 'text-neutral-500 opacity-60'
+                      : priceFlash === 'up'
+                      ? 'text-teal-300'
+                      : priceFlash === 'down'
+                      ? 'text-rose-300'
+                      : 'text-white'
                   }`}
                 >
-                  BUYERS IN CONTROL {hudStats.buyPct}%
-                </div>
-              ) : (
-                <div
-                  className={`px-2 py-0.5 rounded border text-[11px] font-bold ${
-                    isOffline || isStale
-                      ? 'bg-neutral-900 border-neutral-700 text-neutral-500'
-                      : 'bg-rose-950/70 border-rose-500/40 text-rose-300'
-                  }`}
-                >
-                  SELLERS IN CONTROL {hudStats.sellPct}%
-                </div>
-              )
-            ) : (
-              <div className="px-2 py-0.5 rounded bg-white/5 border border-white/10 text-neutral-400 text-[11px]">
-                CONTROL: --
+                  {formatPrice(displayPrice)}
+                </span>
+                {(isStale || isOffline) && (
+                  <span className="text-[10px] text-amber-400 font-bold">
+                    ({effectiveAgeSec}s)
+                  </span>
+                )}
               </div>
-            )}
 
-            {/* Trades per Minute */}
-            <div className="px-2 py-0.5 rounded bg-white/5 border border-white/10 text-neutral-300 text-[11px]">
-              <span className="text-neutral-400">TPM: </span>
-              <span className="text-[#FFD97A] font-bold">
-                {hasTrades ? hudStats.tradesPerMin.toLocaleString() : '--'}
-              </span>
-            </div>
-          </div>
+              {/* Mood Chip: BUYERS / SELLERS IN CONTROL % */}
+              {hudStats.buyPct !== null && hudStats.sellPct !== null ? (
+                hudStats.buyPct >= 50 ? (
+                  <div
+                    className={`px-2 py-0.5 rounded border text-[10px] sm:text-[11px] font-bold ${
+                      isOffline || isStale
+                        ? 'bg-neutral-900 border-neutral-700 text-neutral-500'
+                        : 'bg-teal-950/70 border-teal-500/40 text-teal-300'
+                    }`}
+                  >
+                    BUYERS IN CONTROL {hudStats.buyPct}%
+                  </div>
+                ) : (
+                  <div
+                    className={`px-2 py-0.5 rounded border text-[10px] sm:text-[11px] font-bold ${
+                      isOffline || isStale
+                        ? 'bg-neutral-900 border-neutral-700 text-neutral-500'
+                        : 'bg-rose-950/70 border-rose-500/40 text-rose-300'
+                    }`}
+                  >
+                    SELLERS IN CONTROL {hudStats.sellPct}%
+                  </div>
+                )
+              ) : (
+                <div className="px-2 py-0.5 rounded bg-white/5 border border-white/10 text-neutral-400 text-[10px] sm:text-[11px]">
+                  CONTROL: --
+                </div>
+              )}
 
-          {/* Right Controls: Scene Toggle & FX Levels */}
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Scene Toggle: Tug-of-War Tide (default) / Flow Reactor */}
-            <div className="flex items-center p-0.5 rounded-lg bg-black/80 border border-white/10">
-              <button
-                onClick={() => setSceneMode('TUG_OF_WAR')}
-                className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-mono transition-all cursor-pointer ${
-                  sceneMode === 'TUG_OF_WAR'
-                    ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
-                    : 'text-neutral-400 hover:text-white'
+              {/* TPM */}
+              <div className="text-[11px] text-neutral-300">
+                <span className="text-neutral-500">TPM </span>
+                <span className={isOffline || isStale ? 'text-neutral-500' : 'text-[#FFD97A] font-bold'}>
+                  {hasTrades ? hudStats.tradesPerMin.toLocaleString() : '--'}
+                </span>
+              </div>
+
+              {/* One-Line Verdict ("WAIT" or "LONG 72% - entry/SL/TP1") */}
+              <div
+                className={`px-2 py-0.5 rounded border text-[10px] sm:text-[11px] font-bold tracking-wide ${
+                  !verdictInfo.isActive
+                    ? 'bg-white/5 border-white/10 text-neutral-300'
+                    : verdictInfo.side === 'LONG'
+                    ? 'bg-teal-950/80 border-teal-400/50 text-teal-300'
+                    : 'bg-rose-950/80 border-rose-400/50 text-rose-300'
                 }`}
+                title={decision?.waitReason || undefined}
               >
-                <Waves className="w-3 h-3" />
-                <span>Tug-of-War Tide</span>
-              </button>
-              <button
-                onClick={() => setSceneMode('FLOW_REACTOR')}
-                className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-mono transition-all cursor-pointer ${
-                  sceneMode === 'FLOW_REACTOR'
-                    ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
-                    : 'text-neutral-400 hover:text-white'
-                }`}
-              >
-                <Orbit className="w-3 h-3" />
-                <span>Flow Reactor</span>
-              </button>
+                {verdictInfo.text}
+              </div>
             </div>
 
-            {/* FX Levels: HIGH / LITE / OFF */}
-            <div className="flex items-center p-0.5 rounded-lg bg-black/80 border border-white/10">
-              <span className="px-1.5 text-[10px] text-neutral-500 flex items-center gap-0.5">
-                <Sparkles className="w-2.5 h-2.5 text-[#FFD97A]" /> FX
-              </span>
-              {(['HIGH', 'LITE', 'OFF'] as HeroFxLevel[]).map((lvl) => (
+            {/* Right Controls: Scene Toggle (Flow Reactor default, Tug-of-War 2nd) & FX Levels */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex items-center p-0.5 rounded-lg bg-black/80 border border-white/10">
                 <button
-                  key={lvl}
-                  onClick={() => setFxLevel(lvl)}
-                  className={`px-2 py-0.5 rounded text-[10px] font-mono transition-all cursor-pointer ${
-                    fxLevel === lvl
-                      ? 'bg-white/15 text-[#FFD97A] font-bold border border-[#E8B84A]/40'
+                  type="button"
+                  onClick={() => setSceneMode('FLOW_REACTOR')}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-md text-[10px] sm:text-[11px] font-mono transition-all cursor-pointer ${
+                    sceneMode === 'FLOW_REACTOR'
+                      ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
                       : 'text-neutral-400 hover:text-white'
                   }`}
                 >
-                  {lvl}
+                  <Orbit className="w-3 h-3" />
+                  <span>Flow Reactor</span>
                 </button>
-              ))}
+                <button
+                  type="button"
+                  onClick={() => setSceneMode('TUG_OF_WAR')}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-md text-[10px] sm:text-[11px] font-mono transition-all cursor-pointer ${
+                    sceneMode === 'TUG_OF_WAR'
+                      ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
+                      : 'text-neutral-400 hover:text-white'
+                  }`}
+                >
+                  <Waves className="w-3 h-3" />
+                  <span>Tug-of-War Tide</span>
+                </button>
+              </div>
+
+              {/* FX Levels: HIGH / LITE / OFF */}
+              <div className="hidden sm:flex items-center p-0.5 rounded-lg bg-black/80 border border-white/10">
+                <span className="px-1.5 text-[10px] text-neutral-500 flex items-center gap-0.5">
+                  <Sparkles className="w-2.5 h-2.5 text-[#FFD97A]" /> FX
+                </span>
+                {(['HIGH', 'LITE', 'OFF'] as HeroFxLevel[]).map((lvl) => (
+                  <button
+                    key={lvl}
+                    type="button"
+                    onClick={() => setFxLevel(lvl)}
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-mono transition-all cursor-pointer ${
+                      fxLevel === lvl
+                        ? 'bg-white/15 text-[#FFD97A] font-bold border border-[#E8B84A]/40'
+                        : 'text-neutral-400 hover:text-white'
+                    }`}
+                  >
+                    {lvl}
+                  </button>
+                ))}
+              </div>
             </div>
+          </div>
+
+          {/* Single Compact Stat Row Under Price (Replaces Duplicate Stat Cards) */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 border-t border-white/5 text-[10px] sm:text-[11px] text-neutral-400">
+            <span className={isBookStale || isOffline ? 'opacity-60' : ''}>
+              BID{' '}
+              <strong className={isBookStale || isOffline ? 'text-neutral-500' : 'text-teal-400'}>
+                {formatPrice(bookTicker?.bid)}
+              </strong>
+            </span>
+            <span aria-hidden="true" className="text-neutral-600">·</span>
+            <span className={isBookStale || isOffline ? 'opacity-60' : ''}>
+              ASK{' '}
+              <strong className={isBookStale || isOffline ? 'text-neutral-500' : 'text-rose-400'}>
+                {formatPrice(bookTicker?.ask)}
+              </strong>
+            </span>
+            <span aria-hidden="true" className="text-neutral-600">·</span>
+            <span className={isBookStale || isOffline ? 'opacity-60' : ''}>
+              SPREAD{' '}
+              <strong className={isBookStale || isOffline ? 'text-neutral-500' : 'text-neutral-200'}>
+                {bookTicker?.spread !== null && bookTicker?.spread !== undefined
+                  ? `$${bookTicker.spread.toFixed(2)}`
+                  : '--'}
+              </strong>
+              {bookTicker?.spreadBps !== null && bookTicker?.spreadBps !== undefined && (
+                <span className="text-neutral-500"> ({bookTicker.spreadBps.toFixed(2)} bps)</span>
+              )}
+              {isBookStale && (
+                <span className="text-amber-400 ml-1">
+                  [{(bookAgeMs / 1000).toFixed(1)}s]
+                </span>
+              )}
+            </span>
+            <span aria-hidden="true" className="text-neutral-600">·</span>
+            <span className={isStale || isOffline ? 'opacity-60' : ''}>
+              SESSION{' '}
+              <strong className={isStale || isOffline ? 'text-neutral-500' : 'text-teal-400'}>
+                {formatPrice(session?.sessionHigh)}
+              </strong>
+              <span className="text-neutral-500"> / </span>
+              <strong className={isStale || isOffline ? 'text-neutral-500' : 'text-rose-400'}>
+                {formatPrice(session?.sessionLow)}
+              </strong>
+            </span>
+            <span aria-hidden="true" className="text-neutral-600">·</span>
+            <span className={isStale || isOffline ? 'opacity-60' : ''}>
+              TICKS{' '}
+              <strong className={isStale || isOffline ? 'text-neutral-500' : 'text-[#FFD97A]'}>
+                {(session?.ticksSeen ?? 0).toLocaleString()}
+              </strong>
+              <span className="text-neutral-500"> ({displayBins.length}s)</span>
+            </span>
           </div>
         </div>
 
-        {/* Hero Canvas Stage */}
-        <div ref={containerRef} className="relative w-full h-[270px] sm:h-[320px]">
+        {/* Hero Canvas Stage: 260px on mobile, 340px on desktop */}
+        <div ref={containerRef} className="relative w-full h-[260px] sm:h-[340px]">
           <canvas
             ref={canvasRef}
             className={`block w-full h-full transition-opacity duration-300 ${
-              isOffline ? 'opacity-25' : isStale ? 'opacity-50' : 'opacity-100'
+              isOffline || isStale ? 'opacity-45' : 'opacity-100'
             }`}
           />
 
-          {/* Waiting for First Real Trade (No Fake Boot Animation) */}
+          {/* Waiting for First Real Trade (Only before first real frame arrives) */}
           {!hasTrades && !isOffline && (
             <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none font-mono text-xs text-neutral-400">
               <span>collecting live data...</span>
             </div>
           )}
 
-          {/* FEED OFFLINE Dimmed Overlay */}
-          {isOffline && (
-            <div className="absolute inset-0 bg-black/70 backdrop-blur-[2px] flex flex-col items-center justify-center font-mono">
-              <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-rose-950/80 border border-rose-500/50 text-rose-300 font-bold text-sm tracking-wider shadow-[0_0_24px_rgba(244,63,94,0.3)]">
-                <ShieldAlert className="w-4 h-4 text-rose-400" />
-                <span>FEED OFFLINE</span>
-              </div>
-              <span className="text-[11px] text-neutral-400 mt-1.5">
-                Signals paused · Reconnecting to live exchange stream...
+          {/* Stale / Offline Dimmed Badge Overlay (Keeps last real frame visible underneath!) */}
+          {(isStale || isOffline) && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 px-3 py-1 rounded-md bg-amber-950/90 border border-amber-500/50 text-amber-200 font-mono text-[11px] font-bold flex items-center gap-1.5 pointer-events-none shadow-lg">
+              {isOffline ? (
+                <ShieldAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+              ) : (
+                <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              )}
+              <span>
+                {isOffline ? 'FEED OFFLINE' : 'FEED STALE'} ({effectiveAgeSec}s) · LAST REAL FRAME HELD
               </span>
-            </div>
-          )}
-
-          {/* STALE Feed Warning Banner */}
-          {isStale && (
-            <div className="absolute top-3 left-1/2 -translate-x-1/2 px-3 py-1 rounded-md bg-amber-950/85 border border-amber-500/50 text-amber-300 font-mono text-xs font-bold flex items-center gap-1.5 pointer-events-none">
-              <Clock className="w-3.5 h-3.5 text-amber-400" />
-              <span>FEED STALE ({(messageAgeMs / 1000).toFixed(1)}s) · SIGNALS PAUSED</span>
             </div>
           )}
         </div>

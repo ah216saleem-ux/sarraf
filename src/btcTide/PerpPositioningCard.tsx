@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { PerpPositioning, BtcFeedStatus } from './types';
-import { ShieldAlert, Zap, Clock, TrendingUp, TrendingDown, Flame } from 'lucide-react';
+import { Zap, Clock, TrendingUp, TrendingDown, Flame, Database } from 'lucide-react';
 
 interface PerpPositioningCardProps {
   perp: PerpPositioning;
   status: BtcFeedStatus;
+  isPerpsStale?: boolean;
+  perpsAgeMs?: number;
 }
 
 function formatCountdown(targetMs: number | null): string {
@@ -17,7 +19,7 @@ function formatCountdown(targetMs: number | null): string {
 }
 
 function formatUsdCompact(val: number | null): string {
-  if (val === null) return '--';
+  if (val === null || !Number.isFinite(val)) return '--';
   const abs = Math.abs(val);
   if (abs >= 1e9) return `$${(val / 1e9).toFixed(2)}B`;
   if (abs >= 1e6) return `$${(val / 1e6).toFixed(2)}M`;
@@ -26,8 +28,8 @@ function formatUsdCompact(val: number | null): string {
 }
 
 export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.memo(
-  ({ perp, status }) => {
-    const isStaleOrOffline = status === 'STALE' || status === 'OFFLINE';
+  ({ perp, status, isPerpsStale = false, perpsAgeMs = 0 }) => {
+    const isStaleOrOffline = status === 'STALE' || status === 'OFFLINE' || isPerpsStale;
     const [countdown, setCountdown] = useState<string>('--:--:--');
 
     useEffect(() => {
@@ -46,20 +48,28 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
       openInterest,
       oiChange1h,
       oiChange1hPct,
+      oiHistoryStatus = 'building 0m/60m',
       basis,
       basisBps,
       longShortRatio,
       longAccountPct,
       shortAccountPct,
-      liquidations5m,
+      liquidations5m = [],
+      recentLiquidations = [],
       totalLiq5mUsd,
       longLiq5mUsd,
       shortLiq5mUsd,
+      sources,
     } = perp;
 
     const isBasisPositive = basis !== null && basis >= 0;
     const isFundingPositive = fundingRate !== null && fundingRate >= 0;
     const isOiChangePositive = oiChange1h !== null && oiChange1h >= 0;
+
+    // Show the last 10 events across our ingested streams (recentLiquidations or liquidations5m)
+    const last10Events = (
+      recentLiquidations.length > 0 ? recentLiquidations : liquidations5m
+    ).slice(0, 10);
 
     return (
       <div className="bg-[#08080a] border border-[#E8B84A]/20 rounded-xl p-4 backdrop-blur-md flex flex-col justify-between shadow-[0_4px_24px_rgba(0,0,0,0.5)]">
@@ -69,136 +79,219 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
             <div className="flex items-center gap-2">
               <Zap className="w-4 h-4 text-[#FFD97A]" />
               <span className="font-mono text-xs font-bold uppercase tracking-wider text-white">
-                BINANCE PERP POSITIONING &amp; DERIVATIVES
+                PERP POSITIONING &amp; DERIVATIVES
               </span>
+              {isPerpsStale && (
+                <span className="px-1.5 py-0.5 rounded bg-amber-950/70 border border-amber-500/50 text-amber-300 text-[10px] font-bold font-mono animate-pulse">
+                  STALE ({(perpsAgeMs / 1000).toFixed(1)}s)
+                </span>
+              )}
             </div>
             <div className="font-mono text-[11px] text-neutral-400 flex items-center gap-2">
               <span>MARK:</span>
-              <span className="text-white font-bold">
+              <span
+                className={`font-bold ${
+                  isStaleOrOffline || markPrice === null ? 'text-neutral-500' : 'text-white'
+                }`}
+              >
                 {markPrice !== null ? `$${markPrice.toFixed(2)}` : '--'}
               </span>
+              {sources?.markPrice && (
+                <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-[9px] text-neutral-300 uppercase">
+                  {sources.markPrice}
+                </span>
+              )}
             </div>
           </div>
 
           {/* Grid of Key Perp Metrics */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mt-3 font-mono text-xs">
-            {/* 1. Funding Rate & Countdown */}
-            <div className="bg-black/40 border border-white/5 rounded-lg p-2.5">
-              <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between">
-                <span>FUNDING RATE</span>
-                <Clock className="w-3 h-3 text-[#FFD97A]" />
+          <div
+            className={`grid grid-cols-2 sm:grid-cols-4 gap-2.5 mt-3 font-mono text-xs ${
+              isStaleOrOffline ? 'opacity-60' : ''
+            }`}
+          >
+            {/* 1. Funding Rate & Next Funding Countdown */}
+            <div className="bg-black/40 border border-white/5 rounded-lg p-2.5 flex flex-col justify-between">
+              <div>
+                <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between gap-1">
+                  <span>FUNDING</span>
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[85px]">
+                    {sources?.funding || 'OKX SWAP'}
+                  </span>
+                </div>
+                <div
+                  className={`text-sm sm:text-base font-bold mt-1 ${
+                    isStaleOrOffline || fundingRate === null
+                      ? 'text-neutral-500'
+                      : isFundingPositive
+                      ? 'text-teal-400'
+                      : 'text-rose-400'
+                  }`}
+                >
+                  {fundingRate !== null
+                    ? `${isFundingPositive ? '+' : ''}${(fundingRate * 100).toFixed(4)}%`
+                    : '--'}
+                </div>
               </div>
-              <div
-                className={`text-sm sm:text-base font-bold mt-0.5 ${
-                  isStaleOrOffline || fundingRate === null
-                    ? 'text-neutral-500'
-                    : isFundingPositive
-                    ? 'text-teal-400'
-                    : 'text-rose-400'
-                }`}
-              >
-                {fundingRate !== null
-                  ? `${isFundingPositive ? '+' : ''}${(fundingRate * 100).toFixed(4)}%`
-                  : '--'}
-              </div>
-              <div className="text-[10px] text-neutral-400 mt-0.5 flex items-center gap-1">
+              <div className="text-[10px] text-neutral-400 mt-1 flex items-center gap-1">
+                <Clock className="w-3 h-3 text-[#FFD97A] shrink-0" />
                 <span>NEXT:</span>
-                <span className="text-[#FFD97A] font-semibold">{countdown}</span>
+                <span
+                  className={`font-semibold ${
+                    isStaleOrOffline ? 'text-neutral-500' : 'text-[#FFD97A]'
+                  }`}
+                >
+                  {countdown}
+                </span>
               </div>
             </div>
 
-            {/* 2. Open Interest & 1h Change */}
-            <div className="bg-black/40 border border-white/5 rounded-lg p-2.5">
-              <div className="text-[10px] text-neutral-400 uppercase">OPEN INTEREST</div>
-              <div className="text-sm sm:text-base font-bold text-white mt-0.5">
-                {openInterest !== null
-                  ? `${openInterest.toLocaleString('en-US', { maximumFractionDigits: 0 })} ₿`
-                  : '--'}
+            {/* 2. Open Interest & SQLite 1h Change */}
+            <div className="bg-black/40 border border-white/5 rounded-lg p-2.5 flex flex-col justify-between">
+              <div>
+                <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between gap-1">
+                  <span>OPEN INTEREST</span>
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[85px]">
+                    {sources?.openInterest || 'OKX SWAP'}
+                  </span>
+                </div>
+                <div
+                  className={`text-sm sm:text-base font-bold mt-1 ${
+                    isStaleOrOffline || openInterest === null ? 'text-neutral-500' : 'text-white'
+                  }`}
+                >
+                  {openInterest !== null
+                    ? `${openInterest.toLocaleString('en-US', { maximumFractionDigits: 0 })} ₿`
+                    : '--'}
+                </div>
               </div>
-              <div
-                className={`text-[10px] mt-0.5 font-semibold flex items-center gap-0.5 ${
-                  isStaleOrOffline || oiChange1h === null
-                    ? 'text-neutral-500'
-                    : isOiChangePositive
-                    ? 'text-teal-400'
-                    : 'text-rose-400'
-                }`}
-              >
-                {isOiChangePositive ? (
-                  <TrendingUp className="w-3 h-3" />
+              <div className="text-[10px] mt-1 font-semibold flex items-center gap-1">
+                {oiChange1h !== null ? (
+                  <span
+                    className={`flex items-center gap-0.5 ${
+                      isStaleOrOffline
+                        ? 'text-neutral-500'
+                        : isOiChangePositive
+                        ? 'text-teal-400'
+                        : 'text-rose-400'
+                    }`}
+                  >
+                    {isOiChangePositive ? (
+                      <TrendingUp className="w-3 h-3" />
+                    ) : (
+                      <TrendingDown className="w-3 h-3" />
+                    )}
+                    <span>
+                      {isOiChangePositive ? '+' : ''}
+                      {oiChange1h.toFixed(1)}₿ (
+                      {oiChange1hPct !== null
+                        ? `${oiChange1hPct > 0 ? '+' : ''}${oiChange1hPct.toFixed(2)}%`
+                        : '1h'}
+                      )
+                    </span>
+                  </span>
                 ) : (
-                  <TrendingDown className="w-3 h-3" />
+                  <span className="text-amber-300/90 flex items-center gap-1 text-[10px]">
+                    <Database className="w-3 h-3 text-[#FFD97A] shrink-0" />
+                    <span>{oiHistoryStatus || 'building 0m/60m'}</span>
+                  </span>
                 )}
-                <span>
-                  {oiChange1h !== null
-                    ? `${isOiChangePositive ? '+' : ''}${oiChange1h.toFixed(1)} ₿ (1h)`
-                    : '-- (1h)'}
-                </span>
               </div>
             </div>
 
             {/* 3. Perp vs Spot Basis */}
-            <div className="bg-black/40 border border-white/5 rounded-lg p-2.5">
-              <div className="text-[10px] text-neutral-400 uppercase">PERP VS SPOT BASIS</div>
-              <div
-                className={`text-sm sm:text-base font-bold mt-0.5 ${
-                  isStaleOrOffline || basis === null
-                    ? 'text-neutral-500'
-                    : isBasisPositive
-                    ? 'text-teal-400'
-                    : 'text-rose-400'
-                }`}
-              >
-                {basis !== null ? `${isBasisPositive ? '+' : ''}$${basis.toFixed(2)}` : '--'}
+            <div className="bg-black/40 border border-white/5 rounded-lg p-2.5 flex flex-col justify-between">
+              <div>
+                <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between gap-1">
+                  <span>BASIS</span>
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[85px]">
+                    {sources?.basis || 'OKX SWAP'}
+                  </span>
+                </div>
+                <div
+                  className={`text-sm sm:text-base font-bold mt-1 ${
+                    isStaleOrOffline || basis === null
+                      ? 'text-neutral-500'
+                      : isBasisPositive
+                      ? 'text-teal-400'
+                      : 'text-rose-400'
+                  }`}
+                >
+                  {basis !== null ? `${isBasisPositive ? '+' : ''}$${basis.toFixed(2)}` : '--'}
+                </div>
               </div>
-              <div className="text-[10px] text-neutral-400 mt-0.5">
-                {basisBps !== null ? `${basisBps > 0 ? '+' : ''}${basisBps.toFixed(1)} bps` : '--'}
+              <div className="text-[10px] text-neutral-400 mt-1">
+                {basisBps !== null
+                  ? `${basisBps > 0 ? '+' : ''}${basisBps.toFixed(1)} bps vs spot`
+                  : '--'}
               </div>
             </div>
 
             {/* 4. Global Long/Short Ratio */}
-            <div className="bg-black/40 border border-white/5 rounded-lg p-2.5">
-              <div className="text-[10px] text-neutral-400 uppercase">LONG / SHORT RATIO</div>
-              <div className="text-sm sm:text-base font-bold text-[#FFD97A] mt-0.5">
-                {longShortRatio !== null ? `${longShortRatio.toFixed(2)}x` : '--'}
+            <div className="bg-black/40 border border-white/5 rounded-lg p-2.5 flex flex-col justify-between">
+              <div>
+                <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between gap-1">
+                  <span>L/S RATIO</span>
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[85px]">
+                    {sources?.longShort || 'OKX'}
+                  </span>
+                </div>
+                <div
+                  className={`text-sm sm:text-base font-bold mt-1 ${
+                    isStaleOrOffline || longShortRatio === null
+                      ? 'text-neutral-500'
+                      : 'text-[#FFD97A]'
+                  }`}
+                >
+                  {longShortRatio !== null ? `${longShortRatio.toFixed(2)}x` : '--'}
+                </div>
               </div>
-              <div className="text-[10px] mt-0.5 flex items-center justify-between">
-                <span className="text-teal-400">
+              <div className="text-[10px] mt-1 flex items-center justify-between">
+                <span className={isStaleOrOffline ? 'text-neutral-500' : 'text-teal-400'}>
                   {longAccountPct !== null ? `${longAccountPct}% L` : '--'}
                 </span>
-                <span className="text-rose-400">
+                <span className={isStaleOrOffline ? 'text-neutral-500' : 'text-rose-400'}>
                   {shortAccountPct !== null ? `${shortAccountPct}% S` : '--'}
                 </span>
               </div>
             </div>
           </div>
 
-          {/* Liquidations in Last 5 Minutes from forceOrder */}
-          <div className="mt-3.5 pt-3 border-t border-white/5">
+          {/* Liquidations: 5m Total + Last 10 Events */}
+          <div
+            className={`mt-3.5 pt-3 border-t border-white/5 ${
+              isStaleOrOffline ? 'opacity-60' : ''
+            }`}
+          >
             <div className="flex flex-wrap items-center justify-between gap-2 mb-2 font-mono text-xs">
               <div className="flex items-center gap-1.5 text-neutral-300">
                 <Flame className="w-3.5 h-3.5 text-rose-400" />
                 <span className="font-bold text-white uppercase text-[11px]">
-                  5-MIN LIQUIDATIONS (LIVE FORCE ORDER STREAM)
+                  LIQUIDATIONS (5M TOTAL &amp; LAST 10 EVENTS)
                 </span>
+                {sources?.liquidations && (
+                  <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-[9px] text-neutral-300 uppercase">
+                    {sources.liquidations}
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-3 text-[11px]">
                 <span className="text-white font-bold">
-                  TOTAL: {formatUsdCompact(totalLiq5mUsd)}
+                  5M TOTAL: {formatUsdCompact(totalLiq5mUsd)}
                 </span>
                 <span className="text-rose-400">LONG: {formatUsdCompact(longLiq5mUsd)}</span>
                 <span className="text-teal-400">SHORT: {formatUsdCompact(shortLiq5mUsd)}</span>
               </div>
             </div>
 
-            {/* Recent Liquidations Scrollable List */}
-            <div className="max-h-24 overflow-y-auto divide-y divide-white/[0.04] font-mono text-[11px] pr-1">
-              {liquidations5m.length === 0 ? (
+            {/* Last 10 Liquidations List */}
+            <div className="max-h-28 overflow-y-auto divide-y divide-white/[0.04] font-mono text-[11px] pr-1">
+              {last10Events.length === 0 ? (
                 <div className="py-2 text-center text-neutral-500 text-xs">
-                  Zero force liquidations in the last 5 minutes · WebSocket listening...
+                  Zero liquidations recorded yet · Listening on Binance / OKX / Bybit...
                 </div>
               ) : (
-                liquidations5m.slice(0, 15).map((l) => {
+                last10Events.map((l) => {
                   const isLongLiq = l.side === 'SELL';
                   return (
                     <div
@@ -210,7 +303,7 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
                           {new Date(l.time).toTimeString().split(' ')[0]}
                         </span>
                         <span
-                          className={`font-bold text-[10px] px-1 py-0.2 rounded ${
+                          className={`font-bold text-[9px] px-1 py-0.2 rounded ${
                             isLongLiq
                               ? 'bg-rose-950/60 text-rose-300 border border-rose-500/40'
                               : 'bg-teal-950/60 text-teal-300 border border-teal-500/40'
@@ -218,11 +311,14 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
                         >
                           {isLongLiq ? 'LONG REKT' : 'SHORT REKT'}
                         </span>
+                        {l.source && (
+                          <span className="text-[9px] text-neutral-500 hidden sm:inline">
+                            [{l.source}]
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="text-white font-semibold">
-                          ${l.price.toFixed(2)}
-                        </span>
+                        <span className="text-white font-semibold">${l.price.toFixed(2)}</span>
                         <span
                           className={`font-bold ${
                             isLongLiq ? 'text-rose-400' : 'text-teal-400'

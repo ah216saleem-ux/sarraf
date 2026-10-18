@@ -127,8 +127,9 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
   }
 
   const totalClosed = closedTrades.length;
-  const winRate = Number(((winsCount / totalClosed) * 100).toFixed(1));
-  const avgR = Number((sumR / totalClosed).toFixed(2));
+  // Win rate and average R show "--" (null) until at least 10 real closed trades exist
+  const winRate = totalClosed >= 10 ? Number(((winsCount / totalClosed) * 100).toFixed(1)) : null;
+  const avgR = totalClosed >= 10 ? Number((sumR / totalClosed).toFixed(2)) : null;
 
   return {
     totalClosed,

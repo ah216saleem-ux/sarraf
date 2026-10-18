@@ -6,27 +6,55 @@ import { BtcTideTradeRecord, BtcTideStats } from './btcTideSignalDatabase.ts';
 
 const SQLITE_DB_PATH = path.resolve(DATA_DIR, 'btc_tide.db');
 
+let currentSqliteDbPath = SQLITE_DB_PATH;
 let dbInstance: Database | null = null;
 let isDbInitialized = false;
+
+export function setBtcTideSqlitePath(customPath: string | null) {
+  if (dbInstance) {
+    try {
+      dbInstance.close();
+    } catch {}
+    dbInstance = null;
+    isDbInitialized = false;
+  }
+  currentSqliteDbPath = customPath || SQLITE_DB_PATH;
+}
+
+export function getBtcTideSqlitePath(): string {
+  return currentSqliteDbPath;
+}
+
+export function closeBtcTideSqlite(): void {
+  if (dbInstance) {
+    try {
+      persistSqliteToDisk();
+      dbInstance.close();
+    } catch {}
+    dbInstance = null;
+    isDbInitialized = false;
+  }
+}
 
 export async function initBtcTideSqlite(): Promise<Database> {
   if (dbInstance && isDbInitialized) return dbInstance;
 
   const SQL = await initSqlJs();
   let db: Database;
+  const targetPath = currentSqliteDbPath;
 
-  if (fs.existsSync(SQLITE_DB_PATH)) {
+  if (fs.existsSync(targetPath)) {
     try {
-      const fileBuffer = fs.readFileSync(SQLITE_DB_PATH);
+      const fileBuffer = fs.readFileSync(targetPath);
       db = new SQL.Database(fileBuffer);
-      console.log(`[BTC TIDE SQLITE] Loaded existing SQLite database from ${SQLITE_DB_PATH} (${fileBuffer.length} bytes)`);
+      console.log(`[BTC TIDE SQLITE] Loaded existing SQLite database from ${targetPath} (${fileBuffer.length} bytes)`);
     } catch (err: any) {
       console.error('[BTC TIDE SQLITE] Error reading existing db file, creating fresh:', err.message);
       db = new SQL.Database();
     }
   } else {
     db = new SQL.Database();
-    console.log(`[BTC TIDE SQLITE] Initialized new SQLite database at ${SQLITE_DB_PATH}`);
+    console.log(`[BTC TIDE SQLITE] Initialized new SQLite database at ${targetPath}`);
   }
 
   // Schema creation
@@ -64,12 +92,58 @@ export async function initBtcTideSqlite(): Promise<Database> {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS btc_tide_oi_history (
+      timestamp INTEGER PRIMARY KEY,
+      open_interest REAL NOT NULL,
+      source TEXT NOT NULL
+    );
   `);
 
   dbInstance = db;
   isDbInitialized = true;
+
+  // Enforce production DB hygiene: no row older than today unless it was a real closed trade
+  if (targetPath === SQLITE_DB_PATH) {
+    enforceSqliteTodayHygiene();
+  }
+
   persistSqliteToDisk();
   return db;
+}
+
+export function enforceSqliteTodayHygiene(): void {
+  if (!dbInstance) return;
+  try {
+    const now = new Date();
+    const startOfTodayUtcMs = Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      0,
+      0,
+      0,
+      0
+    );
+
+    // 1. Remove any synthetic/test rows or non-closed rows older than today
+    dbInstance.run(
+      `DELETE FROM btc_tide_signals
+       WHERE id LIKE 'mock_%'
+          OR id LIKE 'test_%'
+          OR trigger_reason LIKE '%Mock%'
+          OR (entry_time < ? AND (status != 'CLOSED' OR outcome IS NULL));`,
+      [startOfTodayUtcMs]
+    );
+
+    // 2. Remove any OI history rows older than today
+    dbInstance.run(
+      `DELETE FROM btc_tide_oi_history WHERE timestamp < ?;`,
+      [startOfTodayUtcMs]
+    );
+  } catch (err: any) {
+    console.error('[BTC TIDE SQLITE] Hygiene check error:', err.message);
+  }
 }
 
 export function persistSqliteToDisk(): void {
@@ -77,10 +151,11 @@ export function persistSqliteToDisk(): void {
   try {
     const binaryArray = dbInstance.export();
     const buffer = Buffer.from(binaryArray);
+    const targetPath = currentSqliteDbPath;
     // Atomic write to avoid partial writes
-    const tempPath = `${SQLITE_DB_PATH}.tmp_${Date.now()}`;
+    const tempPath = `${targetPath}.tmp_${Date.now()}`;
     fs.writeFileSync(tempPath, buffer);
-    fs.renameSync(tempPath, SQLITE_DB_PATH);
+    fs.renameSync(tempPath, targetPath);
   } catch (err: any) {
     console.error('[BTC TIDE SQLITE] Failed to persist SQLite db to disk:', err.message);
   }
@@ -199,8 +274,9 @@ export function computeSqliteStats(): BtcTideStats {
       const totalClosed = Number(row[0] || 0);
       const winsCount = Number(row[1] || 0);
       const lossesCount = Number(row[2] || 0);
-      const avgR = totalClosed > 0 && row[3] !== null ? Number(Number(row[3]).toFixed(2)) : null;
-      const winRate = totalClosed > 0 ? Number(((winsCount / totalClosed) * 100).toFixed(1)) : null;
+      // Win rate and average R show "--" (null) until at least 10 real closed trades exist
+      const avgR = totalClosed >= 10 && row[3] !== null ? Number(Number(row[3]).toFixed(2)) : null;
+      const winRate = totalClosed >= 10 ? Number(((winsCount / totalClosed) * 100).toFixed(1)) : null;
 
       return {
         totalClosed,
@@ -233,8 +309,37 @@ export function computeSqliteStats(): BtcTideStats {
   };
 }
 
-export function saveTradeToSqlite(trade: BtcTideTradeRecord): void {
-  if (!dbInstance) return;
+export function validateSignalPriceSafety(
+  entryPrice: number,
+  livePrice: number | null
+): { valid: boolean; deviationPct: number; reason?: string } {
+  if (livePrice === null || !Number.isFinite(livePrice) || livePrice <= 0) {
+    return { valid: false, deviationPct: 100, reason: 'No valid live price available for safety check' };
+  }
+  const deviation = Math.abs(entryPrice - livePrice) / livePrice;
+  const deviationPct = Number((deviation * 100).toFixed(2));
+  if (deviation > 0.02) {
+    return {
+      valid: false,
+      deviationPct,
+      reason: `Entry price $${entryPrice.toFixed(2)} deviates ${deviationPct}% from live price $${livePrice.toFixed(2)} (> 2% tolerance)`,
+    };
+  }
+  return { valid: true, deviationPct };
+}
+
+export function saveTradeToSqlite(trade: BtcTideTradeRecord, livePrice?: number | null): boolean {
+  if (!dbInstance) return false;
+
+  // SAFETY CHECK: Reject saving or closing any signal whose entry price deviates > 2% from the live price
+  if (typeof livePrice === 'number' && Number.isFinite(livePrice) && livePrice > 0) {
+    const safety = validateSignalPriceSafety(trade.entryPrice, livePrice);
+    if (!safety.valid) {
+      console.warn(`[BTC TIDE SAFETY] REJECTED signal operation on ${trade.id}: ${safety.reason}`);
+      return false;
+    }
+  }
+
   try {
     const stmt = `
       INSERT OR REPLACE INTO btc_tide_signals (
@@ -280,8 +385,10 @@ export function saveTradeToSqlite(trade: BtcTideTradeRecord): void {
     `, [String(trade.entryTime)]);
 
     persistSqliteToDisk();
+    return true;
   } catch (err: any) {
     console.error('[BTC TIDE SQLITE] Error saving trade to SQLite:', err.message);
+    return false;
   }
 }
 
@@ -295,3 +402,103 @@ export function getLastSignalTimeFromSqlite(): number | null {
   } catch {}
   return null;
 }
+
+export interface OiHistoryResult {
+  oiChange1h: number | null;
+  oiChange1hPct: number | null;
+  oiHistoryMinutes: number;
+  oiHistoryStatus: string;
+}
+
+let lastOiPersistTime = 0;
+
+export function recordAndComputeOiHistory(
+  openInterest: number,
+  source: string,
+  nowMs = Date.now()
+): OiHistoryResult {
+  if (!dbInstance || !Number.isFinite(openInterest) || openInterest <= 0) {
+    return {
+      oiChange1h: null,
+      oiChange1hPct: null,
+      oiHistoryMinutes: 0,
+      oiHistoryStatus: 'building 0m/60m',
+    };
+  }
+
+  try {
+    dbInstance.run(
+      `INSERT OR REPLACE INTO btc_tide_oi_history (timestamp, open_interest, source) VALUES (?, ?, ?);`,
+      [nowMs, openInterest, source]
+    );
+
+    // Prune samples older than 6 hours
+    const cutoff = nowMs - 6 * 3600 * 1000;
+    dbInstance.run(`DELETE FROM btc_tide_oi_history WHERE timestamp < ?;`, [cutoff]);
+
+    // Persist to disk every 60s to keep disk writes gentle
+    if (nowMs - lastOiPersistTime >= 60000) {
+      lastOiPersistTime = nowMs;
+      persistSqliteToDisk();
+    }
+
+    // Check oldest timestamp for this source
+    const oldestRes = dbInstance.exec(
+      `SELECT MIN(timestamp) FROM btc_tide_oi_history WHERE source = ?;`,
+      [source]
+    );
+    const oldestTs =
+      oldestRes.length > 0 && oldestRes[0].values.length > 0 && oldestRes[0].values[0][0] !== null
+        ? Number(oldestRes[0].values[0][0])
+        : nowMs;
+
+    const elapsedMs = Math.max(0, nowMs - oldestTs);
+    const minutesCollected = Math.floor(elapsedMs / 60000);
+
+    if (elapsedMs < 3600 * 1000) {
+      return {
+        oiChange1h: null,
+        oiChange1hPct: null,
+        oiHistoryMinutes: minutesCollected,
+        oiHistoryStatus: `building ${minutesCollected}m/60m`,
+      };
+    }
+
+    // We have >= 60m of history: find the sample closest to (nowMs - 3600_000)
+    const targetTs = nowMs - 3600 * 1000;
+    const sampleRes = dbInstance.exec(
+      `SELECT open_interest FROM btc_tide_oi_history WHERE source = ? ORDER BY ABS(timestamp - ?) ASC LIMIT 1;`,
+      [source, targetTs]
+    );
+
+    if (sampleRes.length > 0 && sampleRes[0].values.length > 0) {
+      const oi1hAgo = Number(sampleRes[0].values[0][0]);
+      if (oi1hAgo > 0) {
+        const oiChange1h = Number((openInterest - oi1hAgo).toFixed(2));
+        const oiChange1hPct = Number((((openInterest - oi1hAgo) / oi1hAgo) * 100).toFixed(2));
+        return {
+          oiChange1h,
+          oiChange1hPct,
+          oiHistoryMinutes: Math.min(360, minutesCollected),
+          oiHistoryStatus: 'READY',
+        };
+      }
+    }
+
+    return {
+      oiChange1h: null,
+      oiChange1hPct: null,
+      oiHistoryMinutes: minutesCollected,
+      oiHistoryStatus: `building ${Math.min(59, minutesCollected)}m/60m`,
+    };
+  } catch (err: any) {
+    console.error('[BTC TIDE SQLITE] OI history error:', err.message);
+    return {
+      oiChange1h: null,
+      oiChange1hPct: null,
+      oiHistoryMinutes: 0,
+      oiHistoryStatus: 'building 0m/60m',
+    };
+  }
+}
+

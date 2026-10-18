@@ -184,7 +184,9 @@ import {
   initBtcTideBackend,
   shutdownBtcTideBackend,
   getBackendSnapshot,
+  getBackendHealthReport,
   registerSseClient,
+  simulateBinanceSpotDisconnectForQa,
 } from './src/server/btcTideBackendEngine.ts';
 import {
   initBtcTideSqlite,
@@ -1439,38 +1441,10 @@ app.get('/api/btc-tide/live-stream', (req, res) => {
   });
 });
 
-// 2. Health Endpoint
+// 2. Health Endpoint - Full Upstream Telemetry & Server Region
 app.get('/api/btc-tide/health', (_req, res) => {
-  const snap = getBackendSnapshot();
-  const stats = computeSqliteStats();
-  const uptimeSeconds = Math.floor(process.uptime());
-  const mem = process.memoryUsage();
-
-  res.json({
-    status: snap.status === 'LIVE' ? 'HEALTHY' : snap.status === 'STALE' ? 'DEGRADED' : 'DOWN',
-    activeSource: snap.activeSource,
-    feedStatus: snap.status,
-    messageAgeMs: snap.messageAgeMs,
-    currentPrice: snap.currentPrice,
-    ticksSeen: snap.session.ticksSeen,
-    decisionScore: snap.decision.totalScore,
-    activeTrade: snap.activeTrade
-      ? {
-          id: snap.activeTrade.id,
-          side: snap.activeTrade.side,
-          entryPrice: snap.activeTrade.entryPrice,
-          currentR: snap.activeTrade.currentR,
-          status: snap.activeTrade.status,
-        }
-      : null,
-    sqliteStats: stats,
-    uptimeSeconds,
-    memoryMb: {
-      rss: Math.round(mem.rss / 1024 / 1024),
-      heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
-    },
-    timestamp: Date.now(),
-  });
+  const report = getBackendHealthReport();
+  return res.json(report);
 });
 
 // 3. State Snapshot Endpoint
@@ -1493,6 +1467,22 @@ app.get('/api/btc-tide/signals', btcTideRateLimiter, (_req, res) => {
   });
 });
 
+// 5. QA Failover Verification Hook (Kills primary Binance WS and verifies non-blanking failover)
+app.post('/api/btc-tide/qa-failover', btcTideRateLimiter, (_req, res) => {
+  const result = simulateBinanceSpotDisconnectForQa(8000);
+  return res.json({
+    success: true,
+    ...result,
+    snapshot: {
+      activeSource: getBackendSnapshot().activeSource,
+      currentPrice: getBackendSnapshot().currentPrice,
+      secondBinsCount: getBackendSnapshot().secondBins.length,
+      recentTradesCount: getBackendSnapshot().recentTrades.length,
+      depthBidsCount: getBackendSnapshot().depth.bids.length,
+    },
+  });
+});
+
 // -------------------------------------------------------------
 // BTC TIDE - VENUES TABLE PROXY (OKX, Gate.io, Bybit, MEXC, Bitget, KuCoin, Hyperliquid, Binance)
 // -------------------------------------------------------------
@@ -1506,168 +1496,25 @@ interface VenueTicker {
   status: 'ONLINE' | 'OFFLINE';
 }
 
-let venuesCache: { timestamp: number; data: any } | null = null;
+app.get('/api/venues', (_req, res) => {
+  const snap = getBackendSnapshot();
+  const vData = snap.venues;
+  const validCount = vData.venues.filter((v) => v.status === 'ONLINE').length;
 
-app.get('/api/venues', async (_req, res) => {
-  const now = Date.now();
-  if (venuesCache && now - venuesCache.timestamp < 2000) {
-    return res.json({ success: true, ...venuesCache.data, cached: true });
-  }
-
-  const fetchWithTimeout = async (url: string, options: any = {}, timeoutMs = 2600) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const resp = await fetch(url, {
-        ...options,
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', ...(options.headers || {}) },
-      });
-      clearTimeout(timeout);
-      if (!resp.ok) return null;
-      return await resp.json();
-    } catch {
-      clearTimeout(timeout);
-      return null;
-    }
-  };
-
-  const [binanceData, okxData, gateData, bybitData, mexcData, bitgetData, kucoinData, hlData] =
-    await Promise.all([
-      fetchWithTimeout('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT'),
-      fetchWithTimeout('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT'),
-      fetchWithTimeout('https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDT'),
-      fetchWithTimeout('https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT'),
-      fetchWithTimeout('https://api.mexc.com/api/v3/ticker/24hr?symbol=BTCUSDT'),
-      fetchWithTimeout('https://api.bitget.com/api/v2/spot/market/tickers?symbol=BTCUSDT'),
-      fetchWithTimeout('https://api.kucoin.com/api/v1/market/stats?symbol=BTC-USDT'),
-      fetchWithTimeout('https://api.hyperliquid.xyz/info', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'allMids' }),
-      }),
-    ]);
-
-  const rawVenues: Array<{ venue: string; price: number | null; volume24h: number | null }> = [
-    {
-      venue: 'Binance',
-      price: binanceData ? parseFloat(binanceData.lastPrice) : null,
-      volume24h: binanceData ? parseFloat(binanceData.volume) : null,
-    },
-    {
-      venue: 'OKX',
-      price: okxData?.data?.[0]?.last ? parseFloat(okxData.data[0].last) : null,
-      volume24h: okxData?.data?.[0]?.vol24h ? parseFloat(okxData.data[0].vol24h) : null,
-    },
-    {
-      venue: 'Gate.io',
-      price: gateData?.[0]?.last ? parseFloat(gateData[0].last) : null,
-      volume24h: gateData?.[0]?.base_volume ? parseFloat(gateData[0].base_volume) : null,
-    },
-    {
-      venue: 'Bybit',
-      price: bybitData?.result?.list?.[0]?.lastPrice ? parseFloat(bybitData.result.list[0].lastPrice) : null,
-      volume24h: bybitData?.result?.list?.[0]?.volume24h ? parseFloat(bybitData.result.list[0].volume24h) : null,
-    },
-    {
-      venue: 'MEXC',
-      price: mexcData ? parseFloat(mexcData.lastPrice) : null,
-      volume24h: mexcData ? parseFloat(mexcData.volume) : null,
-    },
-    {
-      venue: 'Bitget',
-      price: bitgetData?.data?.[0]?.lastPr ? parseFloat(bitgetData.data[0].lastPr) : null,
-      volume24h: bitgetData?.data?.[0]?.baseVolume ? parseFloat(bitgetData.data[0].baseVolume) : null,
-    },
-    {
-      venue: 'KuCoin',
-      price: kucoinData?.data?.last ? parseFloat(kucoinData.data.last) : null,
-      volume24h: kucoinData?.data?.vol ? parseFloat(kucoinData.data.vol) : null,
-    },
-    {
-      venue: 'Hyperliquid',
-      price: hlData?.['BTC'] ? parseFloat(hlData['BTC']) : null,
-      volume24h: null, // Hyperliquid allMids does not return 24h spot volume
-    },
-  ];
-
-  // Calculate valid prices and median
-  const validPrices: number[] = [];
-  let totalVol = 0;
-
-  for (const v of rawVenues) {
-    if (v.price !== null && Number.isFinite(v.price) && v.price > 0) {
-      validPrices.push(v.price);
-    }
-    if (v.volume24h !== null && Number.isFinite(v.volume24h) && v.volume24h > 0) {
-      totalVol += v.volume24h;
-    }
-  }
-
-  let medianPrice: number | null = null;
-  if (validPrices.length > 0) {
-    const sorted = [...validPrices].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    medianPrice = sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  }
-
-  // Calculate highest & lowest venue
-  let highestVenue: { venue: string; price: number } | null = null;
-  let lowestVenue: { venue: string; price: number } | null = null;
-
-  for (const v of rawVenues) {
-    if (v.price !== null && Number.isFinite(v.price) && v.price > 0) {
-      if (!highestVenue || v.price > highestVenue.price) {
-        highestVenue = { venue: v.venue, price: v.price };
-      }
-      if (!lowestVenue || v.price < lowestVenue.price) {
-        lowestVenue = { venue: v.venue, price: v.price };
-      }
-    }
-  }
-
-  const spread = highestVenue && lowestVenue ? Number((highestVenue.price - lowestVenue.price).toFixed(2)) : null;
-
-  // Build final venues list with volShare and diffVsMedian
-  const venues: VenueTicker[] = rawVenues.map((v) => {
-    const price = v.price !== null && Number.isFinite(v.price) && v.price > 0 ? Number(v.price.toFixed(2)) : null;
-    const volume24h = v.volume24h !== null && Number.isFinite(v.volume24h) && v.volume24h > 0 ? Number(v.volume24h.toFixed(2)) : null;
-    const volSharePct = volume24h !== null && totalVol > 0 ? Number(((volume24h / totalVol) * 100).toFixed(1)) : null;
-
-    let diffVsMedian: number | null = null;
-    let diffVsMedianBps: number | null = null;
-    if (price !== null && medianPrice !== null && medianPrice > 0) {
-      diffVsMedian = Number((price - medianPrice).toFixed(2));
-      diffVsMedianBps = Number(((diffVsMedian / medianPrice) * 10000).toFixed(1));
-    }
-
-    return {
-      venue: v.venue,
-      price,
-      volume24h,
-      volSharePct,
-      diffVsMedian,
-      diffVsMedianBps,
-      status: price !== null ? 'ONLINE' : 'OFFLINE',
-    };
-  });
-
-  const responseData = {
-    venues,
+  return res.json({
+    success: true,
+    venues: vData.venues,
     summary: {
-      medianPrice: medianPrice !== null ? Number(medianPrice.toFixed(2)) : null,
-      spread,
-      highestVenue: highestVenue ? highestVenue.venue : null,
-      lowestVenue: lowestVenue ? lowestVenue.venue : null,
-      totalVolumeBtc: Number(totalVol.toFixed(2)),
-      validCount: validPrices.length,
-      totalCount: rawVenues.length,
+      medianPrice: vData.medianPrice,
+      spread: vData.spread,
+      highestVenue: vData.highestVenue,
+      lowestVenue: vData.lowestVenue,
+      totalVolumeBtc: vData.totalVolumeBtc,
+      validCount,
+      totalCount: vData.venues.length,
     },
-    timestamp: now,
-  };
-
-  venuesCache = { timestamp: now, data: responseData };
-  return res.json({ success: true, ...responseData });
+    timestamp: vData.updatedAt || Date.now(),
+  });
 });
 
 // -------------------------------------------------------------

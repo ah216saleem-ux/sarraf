@@ -54,7 +54,7 @@ const initialStats: BtcTideStats = {
 };
 
 let currentState: BtcTideStoreState = {
-  activeSource: 'BINANCE',
+  activeSource: 'Binance',
   status: 'CONNECTING',
   statusText: 'Connecting to 24/7 backend feed stream...',
   lastMessageTime: null,
@@ -62,6 +62,25 @@ let currentState: BtcTideStoreState = {
   reconnectAttempts: 0,
   currentPrice: null,
   priceFlash: 'none',
+  feedAges: {
+    spot: 999999,
+    book: 999999,
+    perps: 999999,
+    venues: 999999,
+  },
+  feedSources: {
+    spot: 'Binance',
+    book: 'Binance Orderbook',
+    perps: 'Binance Futures (1s Mark/ForceOrder)',
+    venues: 'Cross-Venue (8 Exchanges)',
+  },
+  feedStale: {
+    spot: true,
+    book: true,
+    perps: true,
+    venues: true,
+  },
+  geoBlockedNotice: null,
   bookTicker: {
     bid: null,
     ask: null,
@@ -148,12 +167,16 @@ export function subscribeLiveLiquidations(cb: LiqListener): () => void {
 }
 
 let sseEventSource: EventSource | null = null;
-let venuesPollTimer: NodeJS.Timeout | null = null;
-let watchdogTimer: NodeJS.Timeout | null = null;
 let isStoreStarted = false;
 let lastSeenTradeId: string | null = null;
 let lastSeenLiqId: string | null = null;
 let notifyTimer: NodeJS.Timeout | null = null;
+let feedAgeTickerTimer: NodeJS.Timeout | null = null;
+
+let lastSpotUpdate = 0;
+let lastBookUpdate = 0;
+let lastPerpsUpdate = 0;
+let lastVenuesUpdate = 0;
 
 function emitNow() {
   if (notifyTimer) {
@@ -172,7 +195,7 @@ function scheduleEmit() {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Backend SSE Stream Connection
+// 1. Backend SSE Stream Connection (Single Source of Truth)
 // ---------------------------------------------------------------------------
 function connectBackendSse() {
   if (typeof window === 'undefined') return;
@@ -191,8 +214,6 @@ function connectBackendSse() {
     es.onopen = () => {
       currentState = {
         ...currentState,
-        status: 'LIVE',
-        statusText: `LIVE (${currentState.activeSource})`,
         reconnectAttempts: 0,
       };
       scheduleEmit();
@@ -202,6 +223,12 @@ function connectBackendSse() {
       try {
         const data = JSON.parse(event.data);
         if (!data) return;
+
+        const now = Date.now();
+        if (data.currentPrice) lastSpotUpdate = now;
+        if (data.bookTicker?.bid) lastBookUpdate = now;
+        if (data.perp?.markPrice) lastPerpsUpdate = now;
+        if (data.venues?.updatedAt) lastVenuesUpdate = now;
 
         // Trade particle notifications for HeroTideCanvas
         if (Array.isArray(data.recentTrades) && data.recentTrades.length > 0) {
@@ -240,16 +267,21 @@ function connectBackendSse() {
 
         currentState = {
           ...currentState,
-          activeSource: data.activeSource || 'BINANCE',
+          activeSource: data.activeSource || 'Binance',
           status: data.status || 'LIVE',
           statusText: data.statusText || 'LIVE',
           currentPrice: data.currentPrice,
           priceFlash: data.priceFlash || 'none',
           lastMessageTime: data.lastMessageTime,
           messageAgeMs: data.messageAgeMs || 0,
+          feedAges: data.feedAges || currentState.feedAges,
+          feedSources: data.feedSources || currentState.feedSources,
+          feedStale: data.feedStale || currentState.feedStale,
+          geoBlockedNotice: data.geoBlockedNotice || null,
           bookTicker: data.bookTicker || currentState.bookTicker,
           depth: data.depth || currentState.depth,
           perp: data.perp || currentState.perp,
+          venues: data.venues || currentState.venues,
           session: data.session || currentState.session,
           secondBins: data.secondBins || [],
           recentTrades: data.recentTrades || [],
@@ -269,7 +301,7 @@ function connectBackendSse() {
       currentState = {
         ...currentState,
         status: 'OFFLINE',
-        statusText: 'Reconnecting to 24/7 backend feed...',
+        statusText: 'Connecting to 24/7 backend stream...',
       };
       scheduleEmit();
     };
@@ -277,7 +309,7 @@ function connectBackendSse() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Initial State Fetch & Venues Polling
+// 2. Initial State Snapshot Fetch
 // ---------------------------------------------------------------------------
 async function fetchInitialBackendState() {
   try {
@@ -285,6 +317,12 @@ async function fetchInitialBackendState() {
     if (!res.ok) return;
     const json = await res.json();
     if (json.success) {
+      const now = Date.now();
+      if (json.currentPrice) lastSpotUpdate = now;
+      if (json.bookTicker?.bid) lastBookUpdate = now;
+      if (json.perp?.markPrice) lastPerpsUpdate = now;
+      if (json.venues?.updatedAt) lastVenuesUpdate = now;
+
       let activeSignal: ActiveTideSignal | null = null;
       if (json.activeTrade && json.status === 'LIVE') {
         activeSignal = {
@@ -299,16 +337,21 @@ async function fetchInitialBackendState() {
 
       currentState = {
         ...currentState,
-        activeSource: json.activeSource || 'BINANCE',
+        activeSource: json.activeSource || 'Binance',
         status: json.status || 'LIVE',
         statusText: json.statusText || 'LIVE',
         currentPrice: json.currentPrice,
         priceFlash: json.priceFlash || 'none',
         lastMessageTime: json.lastMessageTime,
         messageAgeMs: json.messageAgeMs || 0,
+        feedAges: json.feedAges || currentState.feedAges,
+        feedSources: json.feedSources || currentState.feedSources,
+        feedStale: json.feedStale || currentState.feedStale,
+        geoBlockedNotice: json.geoBlockedNotice || null,
         bookTicker: json.bookTicker || currentState.bookTicker,
         depth: json.depth || currentState.depth,
         perp: json.perp || currentState.perp,
+        venues: json.venues || currentState.venues,
         session: json.session || currentState.session,
         secondBins: json.secondBins || [],
         recentTrades: json.recentTrades || [],
@@ -324,27 +367,37 @@ async function fetchInitialBackendState() {
   } catch {}
 }
 
-async function pollVenuesData() {
-  try {
-    const res = await fetch('/api/venues');
-    if (!res.ok) return;
-    const json = await res.json();
-    if (json.success && Array.isArray(json.venues)) {
-      currentState = {
-        ...currentState,
-        venues: {
-          venues: json.venues,
-          medianPrice: json.summary?.medianPrice ?? null,
-          spread: json.summary?.spread ?? null,
-          highestVenue: json.summary?.highestVenue ?? null,
-          lowestVenue: json.summary?.lowestVenue ?? null,
-          totalVolumeBtc: json.summary?.totalVolumeBtc ?? 0,
-          updatedAt: Date.now(),
-        },
-      };
-      scheduleEmit();
-    }
-  } catch {}
+// ---------------------------------------------------------------------------
+// 3. Smooth Elapsed Age Ticker (Runs locally every 500ms to increment age)
+// ---------------------------------------------------------------------------
+function startFeedAgeTicker() {
+  if (feedAgeTickerTimer) clearInterval(feedAgeTickerTimer);
+  feedAgeTickerTimer = setInterval(() => {
+    if (!lastSpotUpdate && !lastBookUpdate && !lastPerpsUpdate && !lastVenuesUpdate) return;
+    const now = Date.now();
+    const spotAge = lastSpotUpdate ? now - lastSpotUpdate : currentState.feedAges.spot;
+    const bookAge = lastBookUpdate ? now - lastBookUpdate : currentState.feedAges.book;
+    const perpsAge = lastPerpsUpdate ? now - lastPerpsUpdate : currentState.feedAges.perps;
+    const venuesAge = lastVenuesUpdate ? now - lastVenuesUpdate : currentState.feedAges.venues;
+
+    // Staleness threshold per feed: trades 5s, book 3s, perps 20s, venues 10s
+    currentState = {
+      ...currentState,
+      feedAges: {
+        spot: spotAge,
+        book: bookAge,
+        perps: perpsAge,
+        venues: venuesAge,
+      },
+      feedStale: {
+        spot: spotAge > 5000,
+        book: bookAge > 3000,
+        perps: perpsAge > 20000,
+        venues: venuesAge > 10000,
+      },
+    };
+    scheduleEmit();
+  }, 500);
 }
 
 function ensureStoreStarted() {
@@ -354,42 +407,17 @@ function ensureStoreStarted() {
   // 1. Initial snapshot fetch
   fetchInitialBackendState();
 
-  // 2. Connect to SSE
+  // 2. Connect to single-source-of-truth SSE
   connectBackendSse();
 
-  // 3. Poll venues every 3 seconds
-  pollVenuesData();
-  if (venuesPollTimer) clearInterval(venuesPollTimer);
-  venuesPollTimer = setInterval(pollVenuesData, 3000);
-
-  // 4. Watchdog every 1s for browser staleness
-  if (watchdogTimer) clearInterval(watchdogTimer);
-  watchdogTimer = setInterval(() => {
-    if (!currentState.lastMessageTime) return;
-    const ageMs = Date.now() - currentState.lastMessageTime;
-    if (ageMs > 15000 && currentState.status !== 'OFFLINE') {
-      currentState = {
-        ...currentState,
-        status: 'OFFLINE',
-        messageAgeMs: ageMs,
-      };
-      scheduleEmit();
-    } else if (ageMs > 5000 && currentState.status !== 'STALE' && currentState.status !== 'OFFLINE') {
-      currentState = {
-        ...currentState,
-        status: 'STALE',
-        messageAgeMs: ageMs,
-      };
-      scheduleEmit();
-    }
-  }, 1000);
+  // 3. Start local elapsed age ticker
+  startFeedAgeTicker();
 
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
         fetchInitialBackendState();
         connectBackendSse();
-        pollVenuesData();
       }
     });
   }
@@ -418,7 +446,6 @@ export function useBtcTideStore() {
   const reconnect = useCallback(() => {
     fetchInitialBackendState();
     connectBackendSse();
-    pollVenuesData();
   }, []);
 
   return {
@@ -453,18 +480,26 @@ export function computeWindowFlowStats(
       sellFlowPct: null,
       secondsCollected: 0,
       windowSeconds,
+      isFullWindow: false,
     };
   }
 
+  const earliestSec = secondBins[0].sec;
   const latestSec = secondBins[secondBins.length - 1].sec;
   const startSec = latestSec - windowSeconds + 1;
+
+  // Elapsed continuous seconds collected toward the window
+  const secondsCollected = Math.min(
+    windowSeconds,
+    Math.max(1, latestSec - earliestSec + 1)
+  );
+  const isFullWindow = secondsCollected >= windowSeconds;
 
   let buyVolBtc = 0;
   let sellVolBtc = 0;
   let buyVolUsd = 0;
   let sellVolUsd = 0;
   let tradeCount = 0;
-  let secondsCollected = 0;
 
   for (let i = 0; i < secondBins.length; i++) {
     const bin = secondBins[i];
@@ -474,7 +509,6 @@ export function computeWindowFlowStats(
       buyVolUsd += bin.buyUsd;
       sellVolUsd += bin.sellUsd;
       tradeCount += bin.count;
-      secondsCollected += 1;
     }
   }
 
@@ -483,10 +517,32 @@ export function computeWindowFlowStats(
   const deltaBtc = buyVolBtc - sellVolBtc;
   const deltaUsd = buyVolUsd - sellVolUsd;
 
+  // Smooth flow % with a 3-second rolling average over [latestSec - 2, latestSec - 1, latestSec]
   let buyFlowPct: number | null = null;
   let sellFlowPct: number | null = null;
-  if (totalVolBtc > 0) {
-    buyFlowPct = Number(((buyVolBtc / totalVolBtc) * 100).toFixed(1));
+
+  const pctSamples: number[] = [];
+  for (let offset = 0; offset < 3; offset++) {
+    const endS = latestSec - offset;
+    const startS = endS - windowSeconds + 1;
+    let bSum = 0;
+    let sSum = 0;
+    for (let i = 0; i < secondBins.length; i++) {
+      const bin = secondBins[i];
+      if (bin.sec >= startS && bin.sec <= endS) {
+        bSum += bin.buyVol;
+        sSum += bin.sellVol;
+      }
+    }
+    const tot = bSum + sSum;
+    if (tot > 0) {
+      pctSamples.push((bSum / tot) * 100);
+    }
+  }
+
+  if (pctSamples.length > 0) {
+    const avgBuyPct = pctSamples.reduce((a, b) => a + b, 0) / pctSamples.length;
+    buyFlowPct = Number(avgBuyPct.toFixed(1));
     sellFlowPct = Number((100 - buyFlowPct).toFixed(1));
   }
 
@@ -504,6 +560,7 @@ export function computeWindowFlowStats(
     sellFlowPct,
     secondsCollected,
     windowSeconds,
+    isFullWindow,
   };
 }
 
@@ -557,6 +614,16 @@ export function buildContinuousSecondSeries(
   return result;
 }
 
+export function computePercentile(values: number[], percentile: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.floor(sorted.length * percentile))
+  );
+  return sorted[idx];
+}
+
 export function detectWaveformEvents(series: SecondBin[]): {
   events: WaveformEventLabel[];
   rollingNet6s: number[];
@@ -589,11 +656,16 @@ export function detectWaveformEvents(series: SecondBin[]): {
     windowTrs.push(high6 - low6);
   }
 
-  const meanVol6s = windowVols.reduce((a, b) => a + b, 0) / windowVols.length;
   const rawAtr6s = windowTrs.reduce((a, b) => a + b, 0) / windowTrs.length;
-  const atr6s = Math.max(rawAtr6s, 0.5);
+  const atr6s = Math.max(rawAtr6s, 0.25);
 
-  const heavyVolThreshold = Math.max(meanVol6s * 1.5, 0.02);
+  // Relative threshold: volume above the rolling 90th percentile of 6s windows
+  const nonZeroWindowVols = windowVols.filter((v) => v > 0);
+  const p90Vol6s = computePercentile(
+    nonZeroWindowVols.length > 0 ? nonZeroWindowVols : windowVols,
+    0.9
+  );
+
   const candidates: Array<WaveformEventLabel & { totalVol6: number; idx: number }> = [];
 
   for (let i = 5; i < n; i++) {
@@ -605,13 +677,13 @@ export function detectWaveformEvents(series: SecondBin[]): {
       sell6 += series[j].sellVol;
     }
     const total6 = buy6 + sell6;
-    if (total6 < heavyVolThreshold) continue;
+    if (total6 <= 0 || total6 < p90Vol6s) continue;
 
     const buyShare = buy6 / total6;
     const sellShare = sell6 / total6;
-    if (buyShare < 0.7 && sellShare < 0.7) continue;
+    if (buyShare < 0.68 && sellShare < 0.68) continue;
 
-    const side: 'BUY' | 'SELL' = buyShare >= 0.7 ? 'BUY' : 'SELL';
+    const side: 'BUY' | 'SELL' = buyShare >= 0.68 ? 'BUY' : 'SELL';
     const flowSign = side === 'BUY' ? 1 : -1;
     const priceStart = series[windowStart].openPrice;
     const priceEnd = series[i].lastPrice;
@@ -620,7 +692,7 @@ export function detectWaveformEvents(series: SecondBin[]): {
     const sameWayMove = priceChange * flowSign;
     const againstMove = -sameWayMove;
 
-    if (sameWayMove >= 0.5 * atr6s) {
+    if (sameWayMove >= 0.45 * atr6s) {
       candidates.push({
         sec: series[i].sec,
         type: 'DRIVE',
@@ -632,7 +704,7 @@ export function detectWaveformEvents(series: SecondBin[]): {
         totalVol6: total6,
         idx: i,
       });
-    } else if (againstMove < 0.5 * atr6s) {
+    } else if (againstMove < 0.45 * atr6s) {
       candidates.push({
         sec: series[i].sec,
         type: 'ABSORB',
@@ -647,28 +719,42 @@ export function detectWaveformEvents(series: SecondBin[]): {
     }
   }
 
-  const filtered: WaveformEventLabel[] = [];
-  let i = 0;
-  while (i < candidates.length) {
-    let best = candidates[i];
-    let j = i + 1;
-    while (j < candidates.length && candidates[j].sec - best.sec <= 5) {
-      if (candidates[j].totalVol6 > best.totalVol6) best = candidates[j];
-      j++;
+  // Merge neighbouring same-direction events and enforce >= 10s apart
+  const merged: Array<WaveformEventLabel & { totalVol6: number }> = [];
+  for (const c of candidates) {
+    if (merged.length === 0) {
+      merged.push(c);
+      continue;
     }
-    filtered.push({
-      sec: best.sec,
-      type: best.type,
-      side: best.side,
-      price: best.price,
-      netVolBtc: best.netVolBtc,
-      priceChange: best.priceChange,
-      atr6s: best.atr6s,
-    });
-    i = j;
+    const prev = merged[merged.length - 1];
+    const gapSec = c.sec - prev.sec;
+
+    // Merge if within 10s OR if neighbouring same-direction within 18s
+    if (gapSec < 10 || (c.side === prev.side && c.type === prev.type && gapSec <= 18)) {
+      if (c.totalVol6 > prev.totalVol6) {
+        merged[merged.length - 1] = c;
+      }
+    } else {
+      merged.push(c);
+    }
   }
 
-  return { events: filtered, rollingNet6s, atr6s };
+  // Show at most 3 labels at a time (keep top 3 by 6s volume, then sort chronologically)
+  const top3 = [...merged]
+    .sort((a, b) => b.totalVol6 - a.totalVol6)
+    .slice(0, 3)
+    .sort((a, b) => a.sec - b.sec)
+    .map(({ sec, type, side, price, netVolBtc, priceChange, atr6s: a }) => ({
+      sec,
+      type,
+      side,
+      price,
+      netVolBtc,
+      priceChange,
+      atr6s: a,
+    }));
+
+  return { events: top3, rollingNet6s, atr6s };
 }
 
 export function computeTenSecDeltaBars(secondBins: SecondBin[]): TenSecDeltaBar[] {
@@ -705,19 +791,35 @@ export function computeTenSecDeltaBars(secondBins: SecondBin[]): TenSecDeltaBar[
     }
   }
 
+  let carryPrice = secondBins[0].lastPrice;
   const result: TenSecDeltaBar[] = [];
   for (let b = startBucket; b <= latestBucket; b += 10) {
     const item = bucketMap.get(b);
+    const isPartial = b === latestBucket;
     if (item) {
+      carryPrice = item.lastPrice;
       result.push({
         ...item,
         buyVol: Number(item.buyVol.toFixed(4)),
         sellVol: Number(item.sellVol.toFixed(4)),
         deltaBtc: Number(item.deltaBtc.toFixed(4)),
         deltaUsd: Number(item.deltaUsd.toFixed(2)),
+        isPartial,
+      });
+    } else {
+      result.push({
+        bucketSec: b,
+        buyVol: 0,
+        sellVol: 0,
+        deltaBtc: 0,
+        deltaUsd: 0,
+        count: 0,
+        lastPrice: carryPrice,
+        isPartial,
       });
     }
   }
 
   return result;
 }
+

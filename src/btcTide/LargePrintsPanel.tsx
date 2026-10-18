@@ -5,6 +5,8 @@ import { Flame } from 'lucide-react';
 interface LargePrintsPanelProps {
   largePrints: AggTrade[];
   status: BtcFeedStatus;
+  isSpotStale?: boolean;
+  spotAgeMs?: number;
 }
 
 function formatUtcTimeSec(ts: number): string {
@@ -21,8 +23,10 @@ function formatUsdSize(val: number): string {
 }
 
 export const LargePrintsPanel: React.FC<LargePrintsPanelProps> = React.memo(
-  ({ largePrints, status }) => {
-    const isStaleOrOffline = status === 'STALE' || status === 'OFFLINE';
+  ({ largePrints, status, isSpotStale = false, spotAgeMs = 0 }) => {
+    const isStaleOrOffline = isSpotStale || status === 'STALE' || status === 'OFFLINE';
+    const ageLabel =
+      spotAgeMs > 0 && spotAgeMs < 999999 ? `${(spotAgeMs / 1000).toFixed(1)}s` : '--';
 
     return (
       <div className="bg-[#08080a] border border-[#E8B84A]/20 rounded-xl p-4 backdrop-blur-md flex flex-col shadow-[0_4px_24px_rgba(0,0,0,0.5)]">
@@ -33,8 +37,17 @@ export const LargePrintsPanel: React.FC<LargePrintsPanelProps> = React.memo(
             <span className="font-mono text-xs font-bold uppercase tracking-wider text-white">
               LARGE PRINTS (&gt;= $50K)
             </span>
+            {isStaleOrOffline && (
+              <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-500/40 text-rose-300">
+                STALE · {ageLabel}
+              </span>
+            )}
           </div>
-          <span className="font-mono text-[11px] text-neutral-400">
+          <span
+            className={`font-mono text-[11px] ${
+              isStaleOrOffline ? 'text-neutral-500' : 'text-neutral-400'
+            }`}
+          >
             {largePrints.length} SEEN
           </span>
         </div>
@@ -53,7 +66,7 @@ export const LargePrintsPanel: React.FC<LargePrintsPanelProps> = React.memo(
             <div className="h-full flex flex-col items-center justify-center text-neutral-500 text-xs text-center px-4">
               <span>Waiting for live prints &gt;= $50,000...</span>
               <span className="text-[10px] text-neutral-600 mt-1">
-                Populates strictly from real Binance aggTrade executions
+                Populates strictly from real exchange executions
               </span>
             </div>
           ) : (
@@ -85,10 +98,14 @@ export const LargePrintsPanel: React.FC<LargePrintsPanelProps> = React.memo(
                   <span className={`col-span-4 text-right font-bold truncate ${sideColor}`}>
                     {formatUsdSize(p.usdValue)}{' '}
                     <span className="text-[10px] font-normal text-neutral-400">
-                      ({p.qty.toFixed(3)}₿)
+                      ({p.qty.toFixed(3)} BTC)
                     </span>
                   </span>
-                  <span className="col-span-3 text-right font-semibold text-white truncate">
+                  <span
+                    className={`col-span-3 text-right font-semibold truncate ${
+                      isStaleOrOffline ? 'text-neutral-500' : 'text-white'
+                    }`}
+                  >
                     ${p.price.toFixed(2)}
                   </span>
                 </div>

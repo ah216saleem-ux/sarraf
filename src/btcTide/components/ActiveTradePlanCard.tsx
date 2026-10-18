@@ -18,6 +18,8 @@ interface ActiveTradePlanCardProps {
   trade: BtcTideTradeRecord | null;
   currentPrice: number | null;
   status: BtcFeedStatus;
+  isSpotStale?: boolean;
+  spotAgeMs?: number;
 }
 
 function formatPrice(val: number | null): string {
@@ -36,8 +38,10 @@ function formatCountdown(targetMs: number): string {
 }
 
 export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.memo(
-  ({ trade, currentPrice, status }) => {
-    const isStaleOrOffline = status === 'STALE' || status === 'OFFLINE';
+  ({ trade, currentPrice, status, isSpotStale = false, spotAgeMs = 0 }) => {
+    const isStaleOrOffline = isSpotStale || status === 'STALE' || status === 'OFFLINE';
+    const ageLabel =
+      spotAgeMs > 0 && spotAgeMs < 999999 ? `${(spotAgeMs / 1000).toFixed(1)}s` : '--';
     const [expiryCountdown, setExpiryCountdown] = useState<string>('--:--');
 
     useEffect(() => {
@@ -59,6 +63,11 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
               <span className="font-mono text-xs font-bold uppercase tracking-wider text-white">
                 LIVE TRADE PLAN &amp; OUTCOME TRACKER
               </span>
+              {isStaleOrOffline && (
+                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-500/40 text-rose-300">
+                  STALE · {ageLabel}
+                </span>
+              )}
             </div>
             <span className="font-mono text-[10px] text-neutral-400 px-2 py-0.5 rounded bg-white/5 border border-white/10">
               ONE TRADE AT A TIME
@@ -101,7 +110,7 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             </div>
 
             <div>
-              <div className="flex items-center gap-2 font-mono">
+              <div className="flex flex-wrap items-center gap-2 font-mono">
                 <span
                   className={`px-2 py-0.5 rounded text-xs font-black uppercase ${
                     isLong
@@ -116,6 +125,12 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
                   <span className="flex items-center gap-1 text-[10px] font-bold text-[#FFD97A] px-2 py-0.5 rounded bg-[#FFD97A]/10 border border-[#FFD97A]/30">
                     <Lock className="w-3 h-3" />
                     <span>BREAKEVEN ACTIVE</span>
+                  </span>
+                )}
+
+                {isStaleOrOffline && (
+                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-500/40 text-rose-300">
+                    STALE · {ageLabel}
                   </span>
                 )}
 
@@ -135,10 +150,16 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
           <div className="flex items-center gap-3 font-mono text-xs">
             {/* Live P&L in R */}
             <div className="text-right">
-              <div className="text-[10px] text-neutral-400 uppercase">LIVE P&amp;L IN R</div>
+              <div className="text-[10px] text-neutral-400 uppercase">
+                LIVE P&amp;L IN R {isStaleOrOffline ? `(${ageLabel})` : ''}
+              </div>
               <div
                 className={`text-xl font-black ${
-                  isProfitable ? 'text-teal-400 drop-shadow-[0_0_8px_rgba(20,184,166,0.5)]' : 'text-rose-400'
+                  isStaleOrOffline
+                    ? 'text-neutral-500'
+                    : isProfitable
+                    ? 'text-teal-400 drop-shadow-[0_0_8px_rgba(20,184,166,0.5)]'
+                    : 'text-rose-400'
                 }`}
               >
                 {isProfitable ? '+' : ''}
@@ -169,14 +190,16 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             }`}
           >
             <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between">
-              <span>{trade.beMoved ? 'BE STOP (100%)' : 'STOP LOSS'}</span>
+              <span>{trade.beMoved ? 'BE STOP (100%)' : 'STOP LOSS (1.5× ATR)'}</span>
               {trade.beMoved && <Lock className="w-3 h-3 text-amber-400" />}
             </div>
             <div className="text-sm font-bold text-rose-300 mt-1">
               {formatPrice(trade.slPrice)}
             </div>
             <div className="text-[10px] text-neutral-400 mt-0.5">
-              1R = ${trade.oneR.toFixed(2)}
+              {trade.beMoved
+                ? 'Moved to Entry'
+                : `-$${Math.abs(trade.entryPrice - trade.initialSlPrice).toFixed(0)} Loss`}
             </div>
           </div>
 
@@ -186,10 +209,12 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             <div className="text-sm font-bold text-white mt-1">
               {formatPrice(trade.entryPrice)}
             </div>
-            <div className="text-[10px] text-neutral-400 mt-0.5">REAL TAKER FILL</div>
+            <div className="text-[10px] text-neutral-400 mt-0.5">
+              1H ATR = ${trade.oneR.toFixed(0)}
+            </div>
           </div>
 
-          {/* TP1 (+1R, 50% scale out) */}
+          {/* TP1 (1x ATR) */}
           <div
             className={`border rounded-lg p-2.5 ${
               trade.tp1Hit
@@ -198,18 +223,18 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             }`}
           >
             <div className="text-[10px] text-teal-400 uppercase flex items-center justify-between">
-              <span>TP1 (+1.0R · 50%)</span>
+              <span>TP1 (1× ATR)</span>
               {trade.tp1Hit && <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />}
             </div>
             <div className="text-sm font-bold text-teal-300 mt-1">
               {formatPrice(trade.tp1Price)}
             </div>
             <div className="text-[10px] text-neutral-400 mt-0.5">
-              {trade.tp1Hit ? 'SECURED +0.50R' : 'Scale 50% & Move BE'}
+              +${Math.abs(trade.tp1Price - trade.entryPrice).toFixed(0)} Profit
             </div>
           </div>
 
-          {/* TP2 (+2R, 25% scale out) */}
+          {/* TP2 (2x ATR) */}
           <div
             className={`border rounded-lg p-2.5 ${
               trade.tp2Hit
@@ -218,18 +243,18 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             }`}
           >
             <div className="text-[10px] text-teal-400 uppercase flex items-center justify-between">
-              <span>TP2 (+2.0R · 25%)</span>
+              <span>TP2 (2× ATR)</span>
               {trade.tp2Hit && <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />}
             </div>
             <div className="text-sm font-bold text-teal-300 mt-1">
               {formatPrice(trade.tp2Price)}
             </div>
             <div className="text-[10px] text-neutral-400 mt-0.5">
-              {trade.tp2Hit ? 'SECURED +0.50R' : 'Scale 25%'}
+              +${Math.abs(trade.tp2Price - trade.entryPrice).toFixed(0)} Profit
             </div>
           </div>
 
-          {/* TP3 (+3R, 25% scale out / runner) */}
+          {/* TP3 (3x ATR) */}
           <div
             className={`border rounded-lg p-2.5 ${
               trade.tp3Hit
@@ -238,14 +263,14 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             }`}
           >
             <div className="text-[10px] text-teal-400 uppercase flex items-center justify-between">
-              <span>TP3 (+3.0R · 25%)</span>
+              <span>TP3 (3× ATR)</span>
               {trade.tp3Hit && <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />}
             </div>
             <div className="text-sm font-bold text-teal-300 mt-1">
               {formatPrice(trade.tp3Price)}
             </div>
             <div className="text-[10px] text-neutral-400 mt-0.5">
-              {trade.tp3Hit ? 'RUNNER SECURED' : 'Final 25% Close'}
+              +${Math.abs(trade.tp3Price - trade.entryPrice).toFixed(0)} Profit
             </div>
           </div>
         </div>
@@ -253,11 +278,11 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
         {/* Live R Progress Track Bar */}
         <div className="bg-black/40 border border-white/5 rounded-lg p-3 font-mono text-xs">
           <div className="flex items-center justify-between text-[11px] mb-1.5">
-            <span className="text-rose-400 font-semibold">SL (-1.0R)</span>
-            <span className="text-neutral-400">ENTRY (0.0R)</span>
-            <span className="text-teal-400 font-semibold">TP1 (+1.0R)</span>
-            <span className="text-teal-300 font-semibold">TP2 (+2.0R)</span>
-            <span className="text-[#FFD97A] font-bold">TP3 (+3.0R)</span>
+            <span className="text-rose-400 font-semibold">SL (-1.5× ATR)</span>
+            <span className="text-neutral-400">ENTRY</span>
+            <span className="text-teal-400 font-semibold">TP1 (1× ATR)</span>
+            <span className="text-teal-300 font-semibold">TP2 (2× ATR)</span>
+            <span className="text-[#FFD97A] font-bold">TP3 (3× ATR)</span>
           </div>
 
           <div className="relative h-2.5 bg-neutral-900 rounded-full overflow-hidden border border-white/10">

@@ -1,11 +1,13 @@
 import React from 'react';
 import { BtcFeedStatus, WindowFlowStats, WindowOption } from './types';
-import { Activity, ArrowUpRight, ArrowDownRight } from 'lucide-react';
+import { Activity, ArrowUpRight, ArrowDownRight, Clock } from 'lucide-react';
 
 interface FlowVolumePanelProps {
   stats: WindowFlowStats;
   selectedWindow: WindowOption;
   status: BtcFeedStatus;
+  isSpotStale?: boolean;
+  spotAgeMs?: number;
 }
 
 function formatUsdCompact(val: number): string {
@@ -17,9 +19,13 @@ function formatUsdCompact(val: number): string {
 }
 
 export const FlowVolumePanel: React.FC<FlowVolumePanelProps> = React.memo(
-  ({ stats, selectedWindow, status }) => {
-    const isStaleOrOffline = status === 'STALE' || status === 'OFFLINE';
+  ({ stats, selectedWindow, status, isSpotStale = false, spotAgeMs = 0 }) => {
+    const isStaleOrOffline = isSpotStale || status === 'STALE' || status === 'OFFLINE';
+    const ageLabel =
+      spotAgeMs > 0 && spotAgeMs < 999999 ? `${(spotAgeMs / 1000).toFixed(1)}s` : '--';
     const hasTrades = stats.tradeCount > 0 && stats.totalVolBtc > 0;
+    const isWarming = !stats.isFullWindow || stats.secondsCollected < stats.windowSeconds;
+    const isPctGreyed = isStaleOrOffline || isWarming || !hasTrades;
 
     const buyPct = stats.buyFlowPct !== null ? stats.buyFlowPct : 50;
     const sellPct = stats.sellFlowPct !== null ? stats.sellFlowPct : 50;
@@ -32,32 +38,52 @@ export const FlowVolumePanel: React.FC<FlowVolumePanelProps> = React.memo(
           <div className="flex items-center gap-2">
             <Activity className="w-4 h-4 text-[#FFD97A]" />
             <span className="font-mono text-xs font-bold uppercase tracking-wider text-white">
-              FLOW &amp; VOLUME ({selectedWindow} WINDOW)
+              FLOW &amp; VOLUME ({selectedWindow} WINDOW · 3S SMOOTHED)
             </span>
+            {isStaleOrOffline && (
+              <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-500/40 text-rose-300">
+                STALE · {ageLabel}
+              </span>
+            )}
           </div>
-          <div className="font-mono text-[11px] text-neutral-400">
-            {hasTrades
-              ? `${stats.secondsCollected}s / ${stats.windowSeconds}s live window`
-              : 'Collecting live trades...'}
+          <div className="flex items-center gap-2 font-mono text-[11px]">
+            {isWarming ? (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-950/40 border border-amber-500/30 text-amber-300 font-semibold">
+                <Clock className="w-3 h-3 text-amber-400" />
+                warming {stats.secondsCollected}/{stats.windowSeconds} s
+              </span>
+            ) : (
+              <span className="text-teal-400 font-semibold">
+                full {stats.windowSeconds}/{stats.windowSeconds} s window
+              </span>
+            )}
           </div>
         </div>
 
-        {/* Big BUY FLOW % and SELL FLOW % Boxes */}
+        {/* Big BUY FLOW % and SELL FLOW % Boxes (Full window only; greyed out while warming) */}
         <div className="grid grid-cols-2 gap-3 mt-3.5">
           <div
             className={`rounded-xl p-3.5 border transition-colors ${
-              isStaleOrOffline
-                ? 'bg-neutral-900/40 border-neutral-800 text-neutral-500'
+              isPctGreyed
+                ? 'bg-neutral-900/45 border-neutral-800 text-neutral-500'
                 : 'bg-teal-950/25 border-teal-500/35'
             }`}
           >
-            <div className="font-mono text-[10px] font-bold uppercase tracking-wider text-teal-400/90 flex items-center justify-between">
-              <span>BUY FLOW %</span>
-              <ArrowUpRight className="w-3.5 h-3.5 text-teal-400" />
+            <div className="font-mono text-[10px] font-bold uppercase tracking-wider flex items-center justify-between">
+              <span className={isPctGreyed ? 'text-neutral-500' : 'text-teal-400/90'}>
+                BUY FLOW %
+              </span>
+              {isWarming ? (
+                <span className="text-[9px] text-neutral-500 lowercase font-normal">
+                  warming {stats.secondsCollected}/{stats.windowSeconds} s
+                </span>
+              ) : (
+                <ArrowUpRight className="w-3.5 h-3.5 text-teal-400" />
+              )}
             </div>
             <div
               className={`font-mono text-2xl sm:text-3xl font-extrabold tracking-tight mt-1 ${
-                isStaleOrOffline ? 'text-neutral-500' : 'text-teal-400'
+                isPctGreyed ? 'text-neutral-500' : 'text-teal-400'
               }`}
             >
               {hasTrades && stats.buyFlowPct !== null
@@ -73,18 +99,26 @@ export const FlowVolumePanel: React.FC<FlowVolumePanelProps> = React.memo(
 
           <div
             className={`rounded-xl p-3.5 border transition-colors ${
-              isStaleOrOffline
-                ? 'bg-neutral-900/40 border-neutral-800 text-neutral-500'
+              isPctGreyed
+                ? 'bg-neutral-900/45 border-neutral-800 text-neutral-500'
                 : 'bg-rose-950/25 border-rose-500/35'
             }`}
           >
-            <div className="font-mono text-[10px] font-bold uppercase tracking-wider text-rose-400/90 flex items-center justify-between">
-              <span>SELL FLOW %</span>
-              <ArrowDownRight className="w-3.5 h-3.5 text-rose-400" />
+            <div className="font-mono text-[10px] font-bold uppercase tracking-wider flex items-center justify-between">
+              <span className={isPctGreyed ? 'text-neutral-500' : 'text-rose-400/90'}>
+                SELL FLOW %
+              </span>
+              {isWarming ? (
+                <span className="text-[9px] text-neutral-500 lowercase font-normal">
+                  warming {stats.secondsCollected}/{stats.windowSeconds} s
+                </span>
+              ) : (
+                <ArrowDownRight className="w-3.5 h-3.5 text-rose-400" />
+              )}
             </div>
             <div
               className={`font-mono text-2xl sm:text-3xl font-extrabold tracking-tight mt-1 ${
-                isStaleOrOffline ? 'text-neutral-500' : 'text-rose-400'
+                isPctGreyed ? 'text-neutral-500' : 'text-rose-400'
               }`}
             >
               {hasTrades && stats.sellFlowPct !== null
@@ -103,16 +137,16 @@ export const FlowVolumePanel: React.FC<FlowVolumePanelProps> = React.memo(
         <div className="mt-3.5">
           <div className="h-3 bg-neutral-900 rounded-full overflow-hidden flex border border-white/10 p-0.5">
             <div
-              className={`h-full rounded-l-full transition-all duration-200 ${
-                isStaleOrOffline || !hasTrades
+              className={`h-full rounded-l-full transition-all duration-300 ${
+                isPctGreyed
                   ? 'bg-neutral-700'
                   : 'bg-gradient-to-r from-teal-600 to-teal-400'
               }`}
               style={{ width: `${hasTrades ? Math.max(3, Math.min(97, buyPct)) : 50}%` }}
             />
             <div
-              className={`h-full rounded-r-full transition-all duration-200 ${
-                isStaleOrOffline || !hasTrades
+              className={`h-full rounded-r-full transition-all duration-300 ${
+                isPctGreyed
                   ? 'bg-neutral-800'
                   : 'bg-gradient-to-l from-rose-600 to-rose-400'
               }`}

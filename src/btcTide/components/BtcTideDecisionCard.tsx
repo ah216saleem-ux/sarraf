@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { DecisionEngineResult } from '../signalEngine';
 import { BtcFeedStatus } from '../types';
 import {
@@ -9,18 +9,23 @@ import {
   Compass,
   Zap,
   TrendingUp,
-  TrendingDown,
   Layers,
   Flame,
   Scale,
   CheckCircle2,
   XCircle,
+  ChevronDown,
+  ChevronUp,
+  Sliders,
 } from 'lucide-react';
 
 interface BtcTideDecisionCardProps {
   decision: DecisionEngineResult;
   status: BtcFeedStatus;
   currentPrice: number | null;
+  defaultCollapsed?: boolean;
+  isSpotStale?: boolean;
+  spotAgeMs?: number;
 }
 
 const componentIcons: Record<string, React.ReactNode> = {
@@ -35,11 +40,19 @@ const componentIcons: Record<string, React.ReactNode> = {
 };
 
 export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.memo(
-  ({ decision, status, currentPrice }) => {
-    const isStaleOrOffline = status === 'STALE' || status === 'OFFLINE';
+  ({
+    decision,
+    status,
+    defaultCollapsed = true,
+    isSpotStale = false,
+    spotAgeMs = 0,
+  }) => {
+    const [isBreakdownOpen, setIsBreakdownOpen] = useState(!defaultCollapsed);
+    const isStaleOrOffline = isSpotStale || status === 'STALE' || status === 'OFFLINE';
 
     const {
       isSilent,
+      isSpotDotGreen = status === 'LIVE' && spotAgeMs < 3000,
       secondsCollected,
       silenceRemainingSec,
       totalScore,
@@ -49,6 +62,8 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
       lead,
       favoredSide,
       components,
+      excludedComponents = [],
+      renormalisedFactor = 1,
       absorbDriveScore,
       absorbDriveAgrees,
       canFire,
@@ -58,66 +73,105 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
 
     const isLongFavored = totalScore > 0;
     const isShortFavored = totalScore < 0;
+    const isWarmupSilent = secondsCollected < 180;
+    const ageLabel =
+      spotAgeMs > 0 && spotAgeMs < 999999
+        ? `${(spotAgeMs / 1000).toFixed(1)}s`
+        : '--';
 
     return (
-      <div className="bg-[#08080a] border border-[#E8B84A]/20 rounded-xl p-4 sm:p-5 backdrop-blur-md shadow-[0_4px_24px_rgba(0,0,0,0.5)] space-y-4">
-        {/* Header & Overall Decision Gauge */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-white/5">
+      <div className="bg-[#08080a] border border-[#E8B84A]/20 rounded-xl p-3.5 sm:p-5 backdrop-blur-md shadow-[0_4px_24px_rgba(0,0,0,0.5)] space-y-3.5">
+        {/* Header & Overall Decision Status */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5 pb-3 border-b border-white/5">
           <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-lg bg-[#E8B84A]/10 border border-[#E8B84A]/30 flex items-center justify-center text-[#FFD97A]">
+            <div className="w-7 h-7 rounded-lg bg-[#E8B84A]/10 border border-[#E8B84A]/30 flex items-center justify-center text-[#FFD97A] shrink-0">
               <Brain className="w-4 h-4" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="font-mono text-xs font-bold uppercase tracking-wider text-white">
-                  8-COMPONENT LIVE DECISION ENGINE
+                  8-COMPONENT DECISION ENGINE
                 </span>
-                <span className="font-mono text-[10px] px-2 py-0.2 rounded bg-white/5 border border-white/10 text-[#FFD97A]">
-                  1-SEC REAL TICKS
+                <span className="font-mono text-[10px] text-[#FFD97A]">
+                  · Backend Only
                 </span>
+                {isStaleOrOffline && (
+                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-500/40 text-rose-300">
+                    STALE · {ageLabel}
+                  </span>
+                )}
               </div>
-              <div className="font-mono text-[11px] text-neutral-400">
-                Weighted composite scoring from -100 (Max Bearish) to +100 (Max Bullish)
+              <div className="font-mono text-[10px] text-neutral-400">
+                Silent first 3m &amp; when SPOT dot not green (&lt;3s) · Score -100 to +100
               </div>
             </div>
           </div>
 
-          {/* Engine Lifecycle Badge */}
-          {isSilent ? (
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-yellow-950/70 border border-yellow-500/40 text-yellow-300 font-mono text-xs font-semibold">
-              <Clock className="w-3.5 h-3.5 text-yellow-400 animate-spin" />
+          {/* Engine Lifecycle Status */}
+          {isWarmupSilent ? (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-yellow-950/70 border border-yellow-500/40 text-yellow-300 font-mono text-[11px] font-semibold">
+              <Clock className="w-3.5 h-3.5 text-yellow-400 animate-spin shrink-0" />
               <span>
-                SILENT (3-MIN WARMUP: {secondsCollected}/180s · {silenceRemainingSec}s left)
+                SILENT WARMUP: {secondsCollected}/180s ({silenceRemainingSec}s left)
               </span>
             </div>
-          ) : isStaleOrOffline ? (
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-950/70 border border-rose-500/40 text-rose-300 font-mono text-xs font-semibold">
-              <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
-              <span>ENGINE PAUSED ({status})</span>
+          ) : !isSpotDotGreen || isStaleOrOffline ? (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-950/70 border border-amber-500/40 text-amber-300 font-mono text-[11px] font-semibold">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>SPOT DOT NOT GREEN ({ageLabel}) · SILENT</span>
             </div>
           ) : canFire ? (
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 font-mono text-xs font-bold animate-pulse shadow-[0_0_15px_rgba(16,185,129,0.3)]">
-              <Zap className="w-3.5 h-3.5 text-emerald-400" />
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 font-mono text-[11px] font-bold animate-pulse">
+              <Zap className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
               <span>FIRING QUALIFIED: {favoredSide}</span>
             </div>
           ) : (
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-black/60 border border-white/10 text-neutral-300 font-mono text-xs">
-              <ShieldCheck className="w-3.5 h-3.5 text-[#FFD97A]" />
-              <span className="truncate max-w-[280px] sm:max-w-none">{waitReason}</span>
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black/60 border border-white/10 text-neutral-300 font-mono text-[11px] max-w-full">
+              <ShieldCheck className="w-3.5 h-3.5 text-[#FFD97A] shrink-0" />
+              <span className="truncate">{waitReason}</span>
             </div>
           )}
         </div>
 
-        {/* Primary Scores & Confidence Gauges */}
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 font-mono">
-          {/* Total Net Score (-100 to +100) */}
-          <div className="bg-black/50 border border-white/5 rounded-lg p-3">
+        {/* Excluded PERPS Components & Re-Normalised Weights Notice (Always visible when any component is excluded) */}
+        {excludedComponents.length > 0 && (
+          <div className="rounded-lg bg-amber-950/25 border border-amber-500/30 px-3 py-2 font-mono text-[11px] flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1.5 text-amber-200">
+              <Sliders className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="font-bold uppercase text-amber-300">
+                Excluded Unavailable PERPS ({excludedComponents.length}):
+              </span>
+              {excludedComponents.map((exc) => (
+                <span
+                  key={exc.id}
+                  className="px-1.5 py-0.5 rounded bg-black/60 border border-amber-500/30 text-amber-200 text-[10px]"
+                >
+                  {exc.name} (wt {exc.baseWeight}→0: {exc.reason})
+                </span>
+              ))}
+            </div>
+            <span className="text-[10px] text-[#FFD97A] font-semibold">
+              Active weights re-normalised ×{renormalisedFactor.toFixed(2)} (Sum = 100)
+            </span>
+          </div>
+        )}
+
+        {/* Summary Metrics Row */}
+        <div
+          className={`grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono transition-opacity ${
+            isStaleOrOffline ? 'opacity-60' : ''
+          }`}
+        >
+          {/* Net Score */}
+          <div className="bg-black/50 border border-white/5 rounded-lg p-2.5">
             <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between">
-              <span>NET COMPOSITE SCORE</span>
-              <span className="text-neutral-500">SCALE: &plusmn;100</span>
+              <span>NET SCORE</span>
+              <span className="text-neutral-500">
+                {isStaleOrOffline ? `age ${ageLabel}` : '±100'}
+              </span>
             </div>
             <div
-              className={`text-2xl font-black mt-1 flex items-baseline gap-1.5 ${
+              className={`text-xl font-black mt-0.5 flex items-baseline gap-1.5 ${
                 isSilent || isStaleOrOffline
                   ? 'text-neutral-500'
                   : isLongFavored
@@ -129,13 +183,12 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
             >
               <span>{isSilent ? '--' : `${totalScore > 0 ? '+' : ''}${totalScore}`}</span>
               {!isSilent && (
-                <span className="text-xs font-bold uppercase text-neutral-400">
-                  {isLongFavored ? 'BULL' : isShortFavored ? 'BEAR' : 'NEUTRAL'}
+                <span className="text-[10px] font-bold uppercase text-neutral-400">
+                  {isLongFavored ? 'BULL' : isShortFavored ? 'BEAR' : 'FLAT'}
                 </span>
               )}
             </div>
-            {/* Split Bar */}
-            <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden flex mt-2 border border-white/5">
+            <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden flex mt-1.5 border border-white/5">
               <div
                 className="h-full bg-teal-500 transition-all duration-300"
                 style={{ width: `${Math.max(0, Math.min(100, (bullishScore / 100) * 100))}%` }}
@@ -147,207 +200,273 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
             </div>
           </div>
 
-          {/* Confidence (0 to 100, min 68 required) */}
-          <div className="bg-black/50 border border-white/5 rounded-lg p-3">
+          {/* Confidence */}
+          <div className="bg-black/50 border border-white/5 rounded-lg p-2.5">
             <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between">
               <span>CONFIDENCE</span>
-              <span className={confidence >= 68 ? 'text-teal-400' : 'text-neutral-500'}>
-                REQ &ge; 68
+              <span className={confidence >= 68 && !isStaleOrOffline ? 'text-teal-400' : 'text-neutral-500'}>
+                {isStaleOrOffline ? `age ${ageLabel}` : '≥68%'}
               </span>
             </div>
-            <div className="text-2xl font-black text-white mt-1 flex items-baseline gap-1.5">
+            <div
+              className={`text-xl font-black mt-0.5 flex items-baseline gap-1.5 ${
+                isSilent || isStaleOrOffline ? 'text-neutral-500' : 'text-white'
+              }`}
+            >
               <span>{isSilent ? '--' : `${confidence.toFixed(0)}%`}</span>
-              <span className="text-xs font-normal text-neutral-400">
+              <span className="text-[10px] font-normal text-neutral-400">
                 {favoredSide !== 'NEUTRAL' ? favoredSide : ''}
               </span>
             </div>
-            <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden mt-2 border border-white/5">
+            <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden mt-1.5 border border-white/5">
               <div
                 className={`h-full transition-all duration-300 ${
-                  confidence >= 68 ? 'bg-[#FFD97A]' : 'bg-neutral-600'
+                  confidence >= 68 && !isStaleOrOffline ? 'bg-[#FFD97A]' : 'bg-neutral-600'
                 }`}
                 style={{ width: `${Math.min(100, confidence)}%` }}
               />
             </div>
           </div>
 
-          {/* Lead Over Opposite Side (min 22 required) */}
-          <div className="bg-black/50 border border-white/5 rounded-lg p-3">
+          {/* Lead */}
+          <div className="bg-black/50 border border-white/5 rounded-lg p-2.5">
             <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between">
-              <span>LEAD OVER OPPOSITE</span>
-              <span className={lead >= 22 ? 'text-teal-400' : 'text-neutral-500'}>
-                REQ &ge; 22
+              <span>SIDE LEAD</span>
+              <span className={lead >= 22 && !isStaleOrOffline ? 'text-teal-400' : 'text-neutral-500'}>
+                {isStaleOrOffline ? `age ${ageLabel}` : '≥22%'}
               </span>
             </div>
-            <div className="text-2xl font-black text-white mt-1 flex items-baseline gap-1.5">
+            <div
+              className={`text-xl font-black mt-0.5 flex items-baseline gap-1.5 ${
+                isSilent || isStaleOrOffline ? 'text-neutral-500' : 'text-white'
+              }`}
+            >
               <span>{isSilent ? '--' : `+${lead.toFixed(0)}%`}</span>
-              <span className="text-xs font-normal text-neutral-400">MARGIN</span>
+              <span className="text-[10px] font-normal text-neutral-400">MARGIN</span>
             </div>
-            <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden mt-2 border border-white/5">
+            <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden mt-1.5 border border-white/5">
               <div
                 className={`h-full transition-all duration-300 ${
-                  lead >= 22 ? 'bg-teal-400' : 'bg-neutral-600'
+                  lead >= 22 && !isStaleOrOffline ? 'bg-teal-400' : 'bg-neutral-600'
                 }`}
                 style={{ width: `${Math.min(100, (lead / 50) * 100)}%` }}
               />
             </div>
           </div>
 
-          {/* 30-Min Cooldown & 15-Min Expiry */}
-          <div className="bg-black/50 border border-white/5 rounded-lg p-3">
+          {/* Cooldown */}
+          <div className="bg-black/50 border border-white/5 rounded-lg p-2.5">
             <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between">
-              <span>COOLDOWN &amp; EXPIRY</span>
+              <span>COOLDOWN</span>
               <Clock className="w-3 h-3 text-[#FFD97A]" />
             </div>
-            <div className="text-sm font-bold text-white mt-1.5">
+            <div className="text-xs sm:text-sm font-bold text-white mt-1.5">
               {cooldownRemainingSec > 0 ? (
                 <span className="text-amber-400">
-                  {Math.floor(cooldownRemainingSec / 60)}m {cooldownRemainingSec % 60}s Cooldown
+                  {Math.floor(cooldownRemainingSec / 60)}m {cooldownRemainingSec % 60}s
                 </span>
               ) : (
-                <span className="text-teal-400">Cooldown Clear (Ready)</span>
+                <span className={isStaleOrOffline ? 'text-neutral-500' : 'text-teal-400'}>
+                  Ready (Clear)
+                </span>
               )}
             </div>
-            <div className="text-[11px] text-neutral-400 mt-1">
-              Expiry: 15 min · Cooldown: 30 min
+            <div className="text-[10px] text-neutral-400 mt-1">
+              1H ATR Setup · 1.5h Cooldown
             </div>
           </div>
         </div>
 
-        {/* Firing Gate Conditions Checklist */}
-        <div className="bg-black/30 border border-white/5 rounded-lg p-3 font-mono text-xs">
-          <div className="text-[10px] text-neutral-400 uppercase tracking-wider mb-2 font-bold">
-            SIGNAL FIRING GATES (ALL 5 REQUIRED)
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-5 gap-2 text-[11px]">
-            {/* Gate 1: Warmup */}
-            <div className="flex items-center gap-1.5">
-              {!isSilent ? (
-                <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-              ) : (
-                <XCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              )}
-              <span className={!isSilent ? 'text-neutral-200' : 'text-neutral-400'}>
-                3m Live Data ({secondsCollected}/180s)
+        {/* Collapsible Toggle for 8-Component Breakdown & Firing Gates */}
+        <div className="pt-1">
+          <button
+            type="button"
+            onClick={() => setIsBreakdownOpen((prev) => !prev)}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.07] border border-white/10 font-mono text-xs text-neutral-200 transition-colors cursor-pointer"
+          >
+            <span className="font-bold uppercase tracking-wider text-[11px] flex flex-wrap items-center gap-2">
+              <span>8-Component Breakdown &amp; Firing Gates</span>
+              <span className="text-[10px] font-normal text-neutral-400">
+                ({components.filter((c) => !c.excluded).length}/8 included
+                {excludedComponents.length > 0
+                  ? ` · ${excludedComponents.length} excluded & re-normalised`
+                  : ''}
+                )
               </span>
-            </div>
-
-            {/* Gate 2: Confidence >= 68 */}
-            <div className="flex items-center gap-1.5">
-              {confidence >= 68 ? (
-                <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+            </span>
+            <span className="flex items-center gap-1 text-[11px] text-[#FFD97A] font-semibold shrink-0">
+              <span>{isBreakdownOpen ? 'Hide' : 'Expand'}</span>
+              {isBreakdownOpen ? (
+                <ChevronUp className="w-4 h-4" />
               ) : (
-                <XCircle className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
+                <ChevronDown className="w-4 h-4" />
               )}
-              <span className={confidence >= 68 ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
-                Confidence &ge; 68 ({confidence.toFixed(0)}%)
-              </span>
-            </div>
+            </span>
+          </button>
 
-            {/* Gate 3: Lead >= 22 */}
-            <div className="flex items-center gap-1.5">
-              {lead >= 22 ? (
-                <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-              ) : (
-                <XCircle className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
-              )}
-              <span className={lead >= 22 ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
-                Lead &ge; 22 (+{lead.toFixed(0)}%)
-              </span>
-            </div>
-
-            {/* Gate 4: Absorb/Drive Agrees */}
-            <div className="flex items-center gap-1.5">
-              {absorbDriveAgrees ? (
-                <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-              ) : (
-                <XCircle className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
-              )}
-              <span className={absorbDriveAgrees ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
-                Absorb/Drive Agrees ({absorbDriveScore > 0 ? '+BUY' : absorbDriveScore < 0 ? '-SELL' : '0'})
-              </span>
-            </div>
-
-            {/* Gate 5: Cooldown Clear */}
-            <div className="flex items-center gap-1.5">
-              {cooldownRemainingSec === 0 ? (
-                <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-              ) : (
-                <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              )}
-              <span className={cooldownRemainingSec === 0 ? 'text-neutral-200' : 'text-amber-400'}>
-                30m Cooldown {cooldownRemainingSec === 0 ? 'Clear' : `(${cooldownRemainingSec}s)`}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* 8 Components Detailed Contributions Grid */}
-        <div>
-          <div className="text-[10px] font-mono text-neutral-400 uppercase tracking-wider mb-2 font-bold flex items-center justify-between">
-            <span>8 WEIGHTED COMPONENTS &amp; REAL CONTRIBUTIONS</span>
-            <span>TOTAL WEIGHT: 100 PTS</span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 font-mono text-xs">
-            {components.map((comp) => {
-              const isBull = comp.score > 0;
-              const isBear = comp.score < 0;
-              const absScore = Math.abs(comp.score);
-              const pct = (absScore / comp.weight) * 100;
-
-              return (
-                <div
-                  key={comp.id}
-                  className="bg-black/40 border border-white/5 rounded-lg p-2.5 hover:border-white/10 transition-colors flex flex-col justify-between space-y-2"
-                >
-                  <div>
-                    <div className="flex items-center justify-between text-[11px]">
-                      <div className="flex items-center gap-1.5 font-bold text-white">
-                        {componentIcons[comp.id]}
-                        <span>{comp.name}</span>
-                      </div>
-                      <span className="text-[10px] text-neutral-500 font-semibold">
-                        WT: {comp.weight}
-                      </span>
-                    </div>
-
-                    <div className="flex items-baseline justify-between mt-1">
-                      <span className="text-[11px] text-neutral-300 truncate max-w-[150px]">
-                        {comp.rawMetric}
-                      </span>
-                      <span
-                        className={`text-sm font-black ${
-                          isBull
-                            ? 'text-teal-400'
-                            : isBear
-                            ? 'text-rose-400'
-                            : 'text-neutral-500'
-                        }`}
-                      >
-                        {isBull ? `+${comp.score}` : comp.score}
-                      </span>
-                    </div>
+          {isBreakdownOpen && (
+            <div className="mt-3 space-y-3 animate-fadeIn">
+              {/* Firing Gate Conditions Checklist */}
+              <div className="bg-black/30 border border-white/5 rounded-lg p-3 font-mono text-xs">
+                <div className="text-[10px] text-neutral-400 uppercase tracking-wider mb-2 font-bold">
+                  SIGNAL FIRING GATES (ALL REQUIRED)
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-[11px]">
+                  <div className="flex items-center gap-1.5">
+                    {isSpotDotGreen ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    )}
+                    <span className={isSpotDotGreen ? 'text-neutral-200' : 'text-amber-300'}>
+                      SPOT Green (&lt;3s)
+                    </span>
                   </div>
 
-                  {/* Progress bar showing magnitude toward weight */}
-                  <div>
-                    <div className="h-1 bg-neutral-900 rounded-full overflow-hidden flex">
-                      <div
-                        className={`h-full transition-all duration-300 ${
-                          isBull ? 'bg-teal-500' : isBear ? 'bg-rose-500' : 'bg-neutral-700'
-                        }`}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                    <div className="text-[9px] text-neutral-500 mt-1 truncate">
-                      {comp.explanation}
-                    </div>
+                  <div className="flex items-center gap-1.5">
+                    {!isWarmupSilent ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    )}
+                    <span className={!isWarmupSilent ? 'text-neutral-200' : 'text-neutral-400'}>
+                      3m Data ({secondsCollected}/180s)
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    {confidence >= 68 && !isSilent ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
+                    )}
+                    <span className={confidence >= 68 && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
+                      Conf &ge; 68 ({confidence.toFixed(0)}%)
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    {lead >= 22 && !isSilent ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
+                    )}
+                    <span className={lead >= 22 && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
+                      Lead &ge; 22 (+{lead.toFixed(0)}%)
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    {absorbDriveAgrees && !isSilent ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
+                    )}
+                    <span className={absorbDriveAgrees && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
+                      Absorb/Drive ({absorbDriveScore > 0 ? '+BUY' : absorbDriveScore < 0 ? '-SELL' : '0'})
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    {cooldownRemainingSec === 0 ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    ) : (
+                      <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    )}
+                    <span className={cooldownRemainingSec === 0 ? 'text-neutral-200' : 'text-amber-400'}>
+                      Cooldown {cooldownRemainingSec === 0 ? 'Clear' : `(${cooldownRemainingSec}s)`}
+                    </span>
                   </div>
                 </div>
-              );
-            })}
-          </div>
+              </div>
+
+              {/* 8 Components Detailed Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 font-mono text-xs">
+                {components.map((comp) => {
+                  const isExcluded = Boolean(comp.excluded);
+                  const isBull = !isExcluded && comp.score > 0;
+                  const isBear = !isExcluded && comp.score < 0;
+                  const absScore = Math.abs(comp.score);
+                  const pct =
+                    !isExcluded && comp.weight > 0
+                      ? Math.min(100, (absScore / comp.weight) * 100)
+                      : 0;
+                  const baseWt = comp.baseWeight ?? comp.weight;
+                  const isRenorm = !isExcluded && Math.abs(comp.weight - baseWt) >= 0.1;
+
+                  return (
+                    <div
+                      key={comp.id}
+                      className={`rounded-lg p-2.5 border transition-colors flex flex-col justify-between space-y-2 ${
+                        isExcluded
+                          ? 'bg-neutral-950/60 border-neutral-800/80 opacity-60'
+                          : 'bg-black/40 border-white/5 hover:border-white/10'
+                      }`}
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-1 text-[11px]">
+                          <div className="flex items-center gap-1.5 font-bold text-white truncate">
+                            {componentIcons[comp.id]}
+                            <span className={isExcluded ? 'text-neutral-500 line-through' : ' truncate'}>
+                              {comp.name}
+                            </span>
+                          </div>
+                          {isExcluded ? (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-950/60 border border-amber-500/30 text-amber-300 font-bold shrink-0">
+                              EXCLUDED ({baseWt}→0)
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-neutral-400 font-semibold shrink-0">
+                              WT: {isRenorm ? `${baseWt}→${comp.weight}` : comp.weight}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-baseline justify-between mt-1">
+                          <span className="text-[11px] text-neutral-300 truncate max-w-[165px]">
+                            {comp.rawMetric}
+                          </span>
+                          <span
+                            className={`text-sm font-black ${
+                              isExcluded || isStaleOrOffline
+                                ? 'text-neutral-500'
+                                : isBull
+                                ? 'text-teal-400'
+                                : isBear
+                                ? 'text-rose-400'
+                                : 'text-neutral-500'
+                            }`}
+                          >
+                            {isExcluded ? 'EXCL' : isBull ? `+${comp.score}` : comp.score}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="h-1 bg-neutral-900 rounded-full overflow-hidden flex">
+                          <div
+                            className={`h-full transition-all duration-300 ${
+                              isExcluded || isStaleOrOffline
+                                ? 'bg-neutral-700'
+                                : isBull
+                                ? 'bg-teal-500'
+                                : isBear
+                                ? 'bg-rose-500'
+                                : 'bg-neutral-700'
+                            }`}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        <div className="text-[9px] text-neutral-500 mt-1 truncate">
+                          {isExcluded ? comp.excludeReason || 'Unavailable — excluded' : comp.explanation}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
