@@ -10,6 +10,7 @@ import {
   BtcFeedStatus,
   DepthLevel,
   LiquidationItem,
+  ReconcileResult,
 } from '../btcTide/types.ts';
 import {
   evaluateDecisionEngine,
@@ -89,11 +90,15 @@ export interface UpstreamHealthItem {
   id: string;
   name: string;
   type: 'WEBSOCKET' | 'REST';
+  category: 'TRADES' | 'BOOK' | 'PERPS' | 'VENUES';
+  thresholdMs: number;
   endpoint: string;
   status: 'ONLINE' | 'ERROR' | 'DISCONNECTED' | 'CONNECTING';
+  wsClosed?: boolean;
   lastHttpStatusOrWsCloseCode: number | null;
   lastSuccessTime: number | null;
   lastSuccessIso: string | null;
+  lastMessageAgeMs: number | null;
   lastErrorTime: number | null;
   lastErrorText: string | null;
   latencyMs: number | null;
@@ -144,6 +149,7 @@ export interface BtcTideBackendState {
     perps: boolean;
     venues: boolean;
   };
+  reconcile: ReconcileResult;
   geoBlockedNotice: string | null;
   bookTicker: {
     bid: number | null;
@@ -245,13 +251,15 @@ let perpSources: PerpFieldSources = {
   funding: 'Binance FAPI',
   basis: 'Binance FAPI',
   openInterest: 'Binance FAPI',
-  longShort: 'Binance FAPI',
+  longShort: 'Binance FAPI (Accounts)',
   liquidations: 'OKX SWAP',
 };
 
 let perp: PerpPositioning = {
   markPrice: null,
   fundingRate: null,
+  fundingRateNative: null,
+  fundingIntervalHours: 8,
   nextFundingTime: null,
   openInterest: null,
   oiChange1h: null,
@@ -263,6 +271,7 @@ let perp: PerpPositioning = {
   longShortRatio: null,
   longAccountPct: null,
   shortAccountPct: null,
+  longShortMeasure: 'Accounts',
   liquidations5m: [],
   recentLiquidations: [],
   totalLiq5mUsd: 0,
@@ -271,6 +280,23 @@ let perp: PerpPositioning = {
   sources: perpSources,
   status: 'CONNECTING',
   updatedAt: 0,
+};
+
+let lastReconcileResult: ReconcileResult = {
+  timestamp: 0,
+  isoTime: '--',
+  spotExchange: 'Binance',
+  wsSpotPrice: null,
+  restSpotPrice: null,
+  spotDiffPct: null,
+  spotMismatch: false,
+  bookExchange: 'Binance depth20',
+  wsBookMid: null,
+  restBookMid: null,
+  bookDiffPct: null,
+  bookMismatch: false,
+  status: 'PENDING',
+  detail: 'Awaiting first 30s reconciliation check',
 };
 
 let venues: VenuesTableData = {
@@ -330,13 +356,17 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
     'binance_spot_ws',
     {
       id: 'binance_spot_ws',
-      name: 'Binance Spot WS (aggTrade + depth20@100ms)',
+      name: 'Binance Spot WS (aggTrade)',
       type: 'WEBSOCKET',
+      category: 'TRADES',
+      thresholdMs: 5000,
       endpoint: 'wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/btcusdt@depth20@100ms',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
+      wsClosed: false,
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -346,13 +376,37 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
     'binance_vision_ws',
     {
       id: 'binance_vision_ws',
-      name: 'Binance Vision WS (Mirror aggTrade + depth20@100ms)',
+      name: 'Binance Vision WS (Mirror aggTrade)',
       type: 'WEBSOCKET',
+      category: 'TRADES',
+      thresholdMs: 5000,
       endpoint: 'wss://data-stream.binance.vision/stream?streams=btcusdt@aggTrade/btcusdt@depth20@100ms',
-      status: 'ONLINE',
+      status: 'DISCONNECTED',
+      wsClosed: false,
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
+      lastErrorTime: null,
+      lastErrorText: null,
+      latencyMs: null,
+    },
+  ],
+  [
+    'binance_depth20_ws',
+    {
+      id: 'binance_depth20_ws',
+      name: 'Binance Book Snapshot WS (btcusdt@depth20@100ms)',
+      type: 'WEBSOCKET',
+      category: 'BOOK',
+      thresholdMs: 3000,
+      endpoint: 'wss://data-stream.binance.vision/ws/btcusdt@depth20@100ms',
+      status: 'DISCONNECTED',
+      wsClosed: false,
+      lastHttpStatusOrWsCloseCode: null,
+      lastSuccessTime: null,
+      lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -364,11 +418,15 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
       id: 'bybit_ws',
       name: 'Bybit v5 Spot WS (Trades Fallback 1)',
       type: 'WEBSOCKET',
+      category: 'TRADES',
+      thresholdMs: 5000,
       endpoint: 'wss://stream.bybit.com/v5/public/spot',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
+      wsClosed: false,
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -380,11 +438,15 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
       id: 'okx_ws',
       name: 'OKX Spot WS (Trades Fallback 2)',
       type: 'WEBSOCKET',
+      category: 'TRADES',
+      thresholdMs: 5000,
       endpoint: 'wss://ws.okx.com:8443/ws/v5/public',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
+      wsClosed: false,
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -396,11 +458,15 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
       id: 'binance_futures_ws',
       name: 'Binance Futures WS (markPrice@1s / forceOrder)',
       type: 'WEBSOCKET',
+      category: 'PERPS',
+      thresholdMs: 20000,
       endpoint: 'wss://fstream.binance.com/stream?streams=btcusdt@markPrice@1s/forceOrder',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
+      wsClosed: false,
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -412,11 +478,15 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
       id: 'bybit_linear_ws',
       name: 'Bybit Linear WS (allLiquidation.BTCUSDT)',
       type: 'WEBSOCKET',
+      category: 'PERPS',
+      thresholdMs: 20000,
       endpoint: 'wss://stream.bybit.com/v5/public/linear',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
+      wsClosed: false,
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -428,11 +498,14 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
       id: 'binance_fapi_rest',
       name: 'Binance FAPI REST (Mark / Funding / OI / L-S)',
       type: 'REST',
+      category: 'PERPS',
+      thresholdMs: 20000,
       endpoint: 'https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -444,11 +517,14 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
       id: 'okx_rest',
       name: 'OKX Perp & Spot REST (Mark / Funding / OI / L-S / Liq)',
       type: 'REST',
+      category: 'PERPS',
+      thresholdMs: 20000,
       endpoint: 'https://www.okx.com/api/v5/public/mark-price?instType=SWAP&instId=BTC-USDT-SWAP',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -460,11 +536,14 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
       id: 'bybit_rest',
       name: 'Bybit Spot & Linear REST',
       type: 'REST',
+      category: 'PERPS',
+      thresholdMs: 20000,
       endpoint: 'https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -476,11 +555,14 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
       id: 'hyperliquid',
       name: 'Hyperliquid metaAndAssetCtxs REST',
       type: 'REST',
+      category: 'PERPS',
+      thresholdMs: 20000,
       endpoint: 'https://api.hyperliquid.xyz/info',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -492,11 +574,14 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
       id: 'coinbase_rest',
       name: 'Coinbase Exchange BTC-USD REST',
       type: 'REST',
+      category: 'VENUES',
+      thresholdMs: 10000,
       endpoint: 'https://api.exchange.coinbase.com/products/BTC-USD/stats',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -508,11 +593,14 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
       id: 'deribit',
       name: 'Deribit Index REST',
       type: 'REST',
+      category: 'PERPS',
+      thresholdMs: 20000,
       endpoint: 'https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -524,11 +612,14 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
       id: 'venue_tickers',
       name: 'Venue Tickers (9 Exchanges Aggregator)',
       type: 'REST',
+      category: 'VENUES',
+      thresholdMs: 10000,
       endpoint: 'https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDT',
-      status: 'CONNECTING',
+      status: 'DISCONNECTED',
       lastHttpStatusOrWsCloseCode: null,
       lastSuccessTime: null,
       lastSuccessIso: null,
+      lastMessageAgeMs: null,
       lastErrorTime: null,
       lastErrorText: null,
       latencyMs: null,
@@ -536,14 +627,21 @@ const upstreamsMap = new Map<string, UpstreamHealthItem>([
   ],
 ]);
 
-export function recordUpstreamSuccess(id: string, code = 200, latencyMs: number | null = null) {
+export function recordUpstreamSuccess(id: string, code: number | null = 200, latencyMs: number | null = null) {
   const item = upstreamsMap.get(id);
   if (!item) return;
   const now = Date.now();
   item.status = 'ONLINE';
-  item.lastHttpStatusOrWsCloseCode = code;
+  if (item.type === 'WEBSOCKET') {
+    // WebSocket active message receipt: never set WS close code 1000 as ONLINE
+    item.wsClosed = false;
+    item.lastHttpStatusOrWsCloseCode = null;
+  } else {
+    item.lastHttpStatusOrWsCloseCode = code ?? 200;
+  }
   item.lastSuccessTime = now;
   item.lastSuccessIso = new Date(now).toISOString();
+  item.lastMessageAgeMs = 0;
   item.lastErrorText = null;
   if (latencyMs !== null) item.latencyMs = latencyMs;
 }
@@ -567,6 +665,8 @@ export function recordUpstreamError(id: string, code: number | null, errorText: 
 export function recordUpstreamClose(id: string, closeCode: number, reason: string) {
   const item = upstreamsMap.get(id);
   if (!item) return;
+  // Rule 1: A WS close code 1000 (or any close code) means closed (DISCONNECTED), NEVER ONLINE
+  item.wsClosed = true;
   item.status = 'DISCONNECTED';
   item.lastHttpStatusOrWsCloseCode = closeCode;
   item.lastErrorTime = Date.now();
@@ -838,6 +938,7 @@ function replaceOrderBookFromDepth20Snapshot(
 ) {
   const now = Date.now();
   if (sourceId === 'binance_primary' || sourceId === 'binance_vision') {
+    recordUpstreamSuccess('binance_depth20_ws', null);
     const sState = sourceStates.get(sourceId);
     if (sState) {
       sState.lastMessageTime = now;
@@ -1033,7 +1134,6 @@ function connectBinanceWs(sourceId: 'binance_primary' | 'binance_vision') {
 
     ws.on('open', () => {
       console.log(`[BTC TIDE BACKEND] Connected to ${conf.name}`);
-      sState.healthySince = Date.now();
     });
 
     ws.on('message', (raw) => {
@@ -1041,7 +1141,7 @@ function connectBinanceWs(sourceId: 'binance_primary' | 'binance_vision') {
         const payload = JSON.parse(raw.toString());
         const stream = payload.stream;
         const data = payload.data;
-        recordUpstreamSuccess(upstreamKey, 1000);
+        recordUpstreamSuccess(upstreamKey, null);
 
         if (stream === 'btcusdt@aggTrade') {
           const tradeTime = Number(data.T || data.E || Date.now());
@@ -1068,6 +1168,9 @@ function connectBinanceWs(sourceId: 'binance_primary' | 'binance_vision') {
     ws.on('close', (code, reason) => {
       const reasonStr = reason?.toString() || `${conf.name} closed`;
       recordUpstreamClose(upstreamKey, code, reasonStr);
+      if (sourceId === 'binance_vision') {
+        recordUpstreamClose('binance_depth20_ws', code, reasonStr);
+      }
       sState.healthySince = null;
       if (!sState.reconnectTimer) {
         sState.reconnectTimer = setTimeout(() => {
@@ -1098,7 +1201,6 @@ function connectBybitWs() {
 
     ws.on('open', () => {
       console.log('[BTC TIDE BACKEND] Connected to Bybit v5 Spot WS');
-      sState.healthySince = Date.now();
       ws.send(
         JSON.stringify({
           op: 'subscribe',
@@ -1113,7 +1215,7 @@ function connectBybitWs() {
         const topic = payload.topic;
         const data = payload.data;
         if (topic === 'publicTrade.BTCUSDT' && Array.isArray(data)) {
-          recordUpstreamSuccess('bybit_ws', 1000);
+          recordUpstreamSuccess('bybit_ws', null);
           for (const t of data) {
             const price = parseFloat(t.p);
             const qty = parseFloat(t.v);
@@ -1164,7 +1266,6 @@ function connectOkxWs() {
 
     ws.on('open', () => {
       console.log('[BTC TIDE BACKEND] Connected to OKX Spot WS');
-      sState.healthySince = Date.now();
       ws.send(
         JSON.stringify({
           op: 'subscribe',
@@ -1179,7 +1280,7 @@ function connectOkxWs() {
         const channel = payload.arg?.channel;
         const data = payload.data;
         if (channel === 'trades' && Array.isArray(data)) {
-          recordUpstreamSuccess('okx_ws', 1000);
+          recordUpstreamSuccess('okx_ws', null);
           for (const t of data) {
             const price = parseFloat(t.px);
             const qty = parseFloat(t.sz);
@@ -1302,7 +1403,7 @@ function connectBinanceFutures() {
         const stream = payload.stream;
         const data = payload.data;
         receivedFrame = true;
-        recordUpstreamSuccess('binance_futures_ws', 1000);
+        recordUpstreamSuccess('binance_futures_ws', null);
 
         if (stream === 'btcusdt@markPrice@1s') {
           const markPrice = parseFloat(data.p);
@@ -1326,6 +1427,8 @@ function connectBinanceFutures() {
             ...perp,
             markPrice,
             fundingRate,
+            fundingRateNative: fundingRate,
+            fundingIntervalHours: 8,
             nextFundingTime,
             basis,
             basisBps,
@@ -1381,7 +1484,6 @@ function connectBybitLinearWs() {
 
     ws.on('open', () => {
       console.log('[BTC TIDE BACKEND] Connected to Bybit Linear WS (allLiquidation.BTCUSDT)');
-      recordUpstreamSuccess('bybit_linear_ws', 1000);
       ws.send(
         JSON.stringify({
           op: 'subscribe',
@@ -1394,7 +1496,7 @@ function connectBybitLinearWs() {
       try {
         const payload = JSON.parse(raw.toString());
         if (payload.topic === 'allLiquidation.BTCUSDT' && payload.data) {
-          recordUpstreamSuccess('bybit_linear_ws', 1000);
+          recordUpstreamSuccess('bybit_linear_ws', null);
           const items = Array.isArray(payload.data) ? payload.data : [payload.data];
           for (const it of items) {
             const liqTime = Number(it.T || it.updatedTime || Date.now());
@@ -1445,8 +1547,16 @@ function switchActiveSource(newSourceId: SpotSourceId, reason: string) {
   scheduleBroadcast();
 }
 
-function evaluateFailoverHysteresis() {
+export function evaluateFailoverHysteresis() {
   const now = Date.now();
+  for (const s of SPOT_SOURCES) {
+    const st = sourceStates.get(s.id)!;
+    const silence = st.lastTradeTime ? now - st.lastTradeTime : 999999;
+    if (silence >= 8000 || st.isGeoBlocked) {
+      st.healthySince = null;
+    }
+  }
+
   const currentConfig = SPOT_SOURCES.find((s) => s.id === activeSourceId)!;
   const currentState = sourceStates.get(activeSourceId)!;
 
@@ -1527,19 +1637,22 @@ export async function pollPerpsMarkFundingAndLiqs(): Promise<void> {
   if (bnPrem.ok && bnPrem.data && parseFloat(bnPrem.data.markPrice) > 0) {
     recordUpstreamSuccess('binance_fapi_rest', bnPrem.status!, bnPrem.latency);
     const markPrice = parseFloat(bnPrem.data.markPrice);
-    const fundingRate = parseFloat(bnPrem.data.lastFundingRate);
+    const fundingRateNative = parseFloat(bnPrem.data.lastFundingRate);
+    const fundingRate = fundingRateNative; // 8h native = 8h-equivalent
     const nextFundingTime = Number(bnPrem.data.nextFundingTime);
     const basis = spotRef ? Number((markPrice - spotRef).toFixed(2)) : null;
     const basisBps = spotRef && basis !== null ? Number(((basis / spotRef) * 10000).toFixed(2)) : null;
 
     perpSources.markPrice = 'Binance FAPI';
-    perpSources.funding = 'Binance FAPI';
+    perpSources.funding = 'Binance FAPI (8h)';
     perpSources.basis = 'Binance FAPI';
 
     perp = {
       ...perp,
       markPrice,
       fundingRate,
+      fundingRateNative,
+      fundingIntervalHours: 8,
       nextFundingTime,
       basis,
       basisBps,
@@ -1554,7 +1667,7 @@ export async function pollPerpsMarkFundingAndLiqs(): Promise<void> {
     recordUpstreamError('binance_fapi_rest', bnPrem.status, bnPrem.error || 'Binance FAPI premiumIndex failed');
   }
 
-  // 2. Fallback: OKX BTC-USDT-SWAP
+  // 2. Fallback: OKX BTC-USDT-SWAP (8h native funding interval)
   if (!markResolved) {
     const [okxMark, okxFund] = await Promise.all([
       fetchJsonWithStatus('https://www.okx.com/api/v5/public/mark-price?instType=SWAP&instId=BTC-USDT-SWAP'),
@@ -1568,19 +1681,22 @@ export async function pollPerpsMarkFundingAndLiqs(): Promise<void> {
     ) {
       recordUpstreamSuccess('okx_rest', 200, okxMark.latency);
       const markPrice = parseFloat(okxMark.data.data[0].markPx);
-      const fundingRate = parseFloat(okxFund.data.data[0].fundingRate);
+      const fundingRateNative = parseFloat(okxFund.data.data[0].fundingRate);
+      const fundingRate = fundingRateNative; // 8h native = 8h-equivalent
       const nextFundingTime = Number(okxFund.data.data[0].fundingTime);
       const basis = spotRef ? Number((markPrice - spotRef).toFixed(2)) : null;
       const basisBps = spotRef && basis !== null ? Number(((basis / spotRef) * 10000).toFixed(2)) : null;
 
       perpSources.markPrice = 'OKX SWAP';
-      perpSources.funding = 'OKX SWAP';
+      perpSources.funding = 'OKX SWAP (8h)';
       perpSources.basis = 'OKX SWAP';
 
       perp = {
         ...perp,
         markPrice,
         fundingRate,
+        fundingRateNative,
+        fundingIntervalHours: 8,
         nextFundingTime,
         basis,
         basisBps,
@@ -1594,7 +1710,7 @@ export async function pollPerpsMarkFundingAndLiqs(): Promise<void> {
     }
   }
 
-  // 3. Fallback: Bybit Linear
+  // 3. Fallback: Bybit Linear (8h native funding interval)
   if (!markResolved) {
     const bybitLin = await fetchJsonWithStatus(
       'https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT'
@@ -1603,19 +1719,23 @@ export async function pollPerpsMarkFundingAndLiqs(): Promise<void> {
     if (bybitLin.ok && item && parseFloat(item.markPrice) > 0) {
       recordUpstreamSuccess('bybit_rest', 200, bybitLin.latency);
       const markPrice = parseFloat(item.markPrice);
-      const fundingRate = parseFloat(item.fundingRate);
+      const intervalH = Number(item.fundingIntervalHour) || 8;
+      const fundingRateNative = parseFloat(item.fundingRate);
+      const fundingRate = Number((fundingRateNative * (8 / intervalH)).toFixed(8));
       const nextFundingTime = Number(item.nextFundingTime);
       const basis = spotRef ? Number((markPrice - spotRef).toFixed(2)) : null;
       const basisBps = spotRef && basis !== null ? Number(((basis / spotRef) * 10000).toFixed(2)) : null;
 
       perpSources.markPrice = 'Bybit Linear';
-      perpSources.funding = 'Bybit Linear';
+      perpSources.funding = `Bybit Linear (${intervalH}h)`;
       perpSources.basis = 'Bybit Linear';
 
       perp = {
         ...perp,
         markPrice,
         fundingRate,
+        fundingRateNative,
+        fundingIntervalHours: intervalH,
         nextFundingTime,
         basis,
         basisBps,
@@ -1629,7 +1749,7 @@ export async function pollPerpsMarkFundingAndLiqs(): Promise<void> {
     }
   }
 
-  // 4. Fallback: Hyperliquid
+  // 4. Fallback: Hyperliquid (1h native funding interval -> multiply by 8 for 8h-equivalent)
   if (!markResolved) {
     const hl = await fetchJsonWithStatus('https://api.hyperliquid.xyz/info', {
       method: 'POST',
@@ -1642,19 +1762,22 @@ export async function pollPerpsMarkFundingAndLiqs(): Promise<void> {
       const ctx = btcIdx >= 0 ? hl.data[1]?.[btcIdx] : null;
       if (ctx && parseFloat(ctx.markPx) > 0) {
         const markPrice = parseFloat(ctx.markPx);
-        const fundingRate = parseFloat(ctx.funding);
-        const nextFundingTime = Math.ceil(now / 3600000) * 3600000;
+        const fundingRateNative = parseFloat(ctx.funding); // Hyperliquid 1h native rate
+        const fundingRate = Number((fundingRateNative * 8).toFixed(8)); // 8h-equivalent
+        const nextFundingTime = (Math.floor(now / 3600000) + 1) * 3600000;
         const basis = spotRef ? Number((markPrice - spotRef).toFixed(2)) : null;
         const basisBps = spotRef && basis !== null ? Number(((basis / spotRef) * 10000).toFixed(2)) : null;
 
         perpSources.markPrice = 'Hyperliquid';
-        perpSources.funding = 'Hyperliquid';
+        perpSources.funding = 'Hyperliquid (1h)';
         perpSources.basis = 'Hyperliquid';
 
         perp = {
           ...perp,
           markPrice,
           fundingRate,
+          fundingRateNative,
+          fundingIntervalHours: 1,
           nextFundingTime,
           basis,
           basisBps,
@@ -1723,8 +1846,8 @@ export async function pollPerpsMarkFundingAndLiqs(): Promise<void> {
 export async function pollPerpsOiAndLongShort(): Promise<void> {
   const now = Date.now();
 
-  // --- 1. Open Interest (poll every 10s, store in SQLite, compute 1h change) ---
-  // Chain: Binance FAPI -> OKX BTC-USDT-SWAP -> Bybit Linear -> Hyperliquid
+  // --- 1. Open Interest in BTC (poll every 10s, store in SQLite with source, compute 1h change ONLY from same source) ---
+  // Chain: Binance FAPI -> OKX BTC-USDT-SWAP (contracts x 0.01 BTC ctVal) -> Bybit Linear -> Hyperliquid
   let oiBtc: number | null = null;
   let oiSource = 'Binance FAPI';
 
@@ -1737,8 +1860,19 @@ export async function pollPerpsOiAndLongShort(): Promise<void> {
     const okxOi = await fetchJsonWithStatus(
       'https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP'
     );
-    if (okxOi.ok && okxOi.data?.data?.[0]?.oiCcy && parseFloat(okxOi.data.data[0].oiCcy) > 0) {
-      oiBtc = parseFloat(okxOi.data.data[0].oiCcy);
+    const okxRow = okxOi.data?.data?.[0];
+    // Convert OKX contracts x contract value (1 contract = 0.01 BTC on BTC-USDT-SWAP)
+    const okxContracts = okxRow?.oi ? parseFloat(okxRow.oi) : NaN;
+    const okxCtValBtc = 0.01;
+    const okxConvertedBtc =
+      Number.isFinite(okxContracts) && okxContracts > 0
+        ? okxContracts * okxCtValBtc
+        : okxRow?.oiCcy
+        ? parseFloat(okxRow.oiCcy)
+        : NaN;
+
+    if (okxOi.ok && Number.isFinite(okxConvertedBtc) && okxConvertedBtc > 0) {
+      oiBtc = okxConvertedBtc;
       oiSource = 'OKX SWAP';
       recordUpstreamSuccess('okx_rest', 200, okxOi.latency);
     } else {
@@ -1788,7 +1922,7 @@ export async function pollPerpsOiAndLongShort(): Promise<void> {
     fieldReasons.set('PERPS:open_interest', 'Failed to fetch OI from Binance, OKX, Bybit, and Hyperliquid');
   }
 
-  // --- 2. Long/Short Ratio ---
+  // --- 2. Long/Short Ratio (Always label source AND what it measures: Accounts vs Positions) ---
   // Chain: Binance globalLongShortAccountRatio -> OKX long-short-account-ratio -> Bybit account-ratio
   let lsResolved = false;
 
@@ -1800,12 +1934,13 @@ export async function pollPerpsOiAndLongShort(): Promise<void> {
     const ratio = parseFloat(item.longShortRatio);
     const longPct = Number((parseFloat(item.longAccount) * 100).toFixed(1));
     const shortPct = Number((parseFloat(item.shortAccount) * 100).toFixed(1));
-    perpSources.longShort = 'Binance FAPI';
+    perpSources.longShort = 'Binance FAPI (Accounts)';
     perp = {
       ...perp,
       longShortRatio: Number(ratio.toFixed(2)),
       longAccountPct: longPct,
       shortAccountPct: shortPct,
+      longShortMeasure: 'Accounts',
       sources: { ...perpSources },
       updatedAt: now,
     };
@@ -1822,12 +1957,13 @@ export async function pollPerpsOiAndLongShort(): Promise<void> {
       const ratio = parseFloat(first[1]);
       const longPct = Number(((ratio / (1 + ratio)) * 100).toFixed(1));
       const shortPct = Number((100 - longPct).toFixed(1));
-      perpSources.longShort = 'OKX';
+      perpSources.longShort = 'OKX SWAP (Accounts)';
       perp = {
         ...perp,
         longShortRatio: Number(ratio.toFixed(2)),
         longAccountPct: longPct,
         shortAccountPct: shortPct,
+        longShortMeasure: 'Accounts',
         sources: { ...perpSources },
         updatedAt: now,
       };
@@ -1847,12 +1983,13 @@ export async function pollPerpsOiAndLongShort(): Promise<void> {
       const ratio = sellR > 0 ? Number((buyR / sellR).toFixed(2)) : 1.0;
       const longPct = Number((buyR * 100).toFixed(1));
       const shortPct = Number((sellR * 100).toFixed(1));
-      perpSources.longShort = 'Bybit';
+      perpSources.longShort = 'Bybit Linear (Accounts)';
       perp = {
         ...perp,
         longShortRatio: ratio,
         longAccountPct: longPct,
         shortAccountPct: shortPct,
+        longShortMeasure: 'Accounts',
         sources: { ...perpSources },
         updatedAt: now,
       };
@@ -2222,7 +2359,7 @@ async function pollBtc1hAtr() {
 
   for (const ep of endpoints) {
     try {
-      const res = await fetchWithTimeout(ep.url, 4000);
+      const res = await fetchJsonWithStatus(ep.url, {}, 4000);
       if (res.ok && res.data) {
         const candles = ep.extract(res.data);
         const atr = parseKlinesAtr(candles);
@@ -2233,6 +2370,128 @@ async function pollBtc1hAtr() {
       }
     } catch {}
   }
+}
+
+let reconcileTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Rule 6: Every 30s the backend compares its last trade price with the REST spot ticker
+ * of the same exchange and compares our book mid with the exchange REST book.
+ * If the difference is above 0.1%, turn the SPOT/BOOK dot red and log it.
+ */
+export async function runBackendReconciliation(): Promise<ReconcileResult> {
+  const now = Date.now();
+  const wsSpotPrice = currentPrice;
+  const wsBookMid = depth.midPrice;
+
+  let restSpotPrice: number | null = null;
+  let spotExchange = activeSourceLabel;
+
+  try {
+    if (activeSourceId === 'bybit') {
+      spotExchange = 'Bybit';
+      const r = await fetchJsonWithStatus(
+        'https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT',
+        {},
+        3000
+      );
+      const p = parseFloat(r.data?.result?.list?.[0]?.lastPrice);
+      if (r.ok && Number.isFinite(p) && p > 0) restSpotPrice = p;
+    } else if (activeSourceId === 'okx') {
+      spotExchange = 'OKX';
+      const r = await fetchJsonWithStatus(
+        'https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT',
+        {},
+        3000
+      );
+      const p = parseFloat(r.data?.data?.[0]?.last);
+      if (r.ok && Number.isFinite(p) && p > 0) restSpotPrice = p;
+    } else {
+      spotExchange = activeSourceLabel;
+      const rPrimary = await fetchJsonWithStatus(
+        'https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT',
+        {},
+        3000
+      );
+      const p = parseFloat(rPrimary.data?.price);
+      if (rPrimary.ok && Number.isFinite(p) && p > 0) {
+        restSpotPrice = p;
+      } else {
+        const rFallback = await fetchJsonWithStatus(
+          'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
+          {},
+          3000
+        );
+        const p2 = parseFloat(rFallback.data?.price);
+        if (rFallback.ok && Number.isFinite(p2) && p2 > 0) restSpotPrice = p2;
+      }
+    }
+  } catch {}
+
+  let restBookMid: number | null = null;
+  const bookExchange = activeBookSourceLabel;
+  try {
+    const bRes = await fetchJsonWithStatus(
+      'https://data-api.binance.vision/api/v3/ticker/bookTicker?symbol=BTCUSDT',
+      {},
+      3000
+    );
+    const bid = parseFloat(bRes.data?.bidPrice);
+    const ask = parseFloat(bRes.data?.askPrice);
+    if (bRes.ok && Number.isFinite(bid) && bid > 0 && Number.isFinite(ask) && ask > 0) {
+      restBookMid = Number(((bid + ask) / 2).toFixed(2));
+    }
+  } catch {}
+
+  let spotDiffPct: number | null = null;
+  let spotMismatch = false;
+  if (wsSpotPrice !== null && restSpotPrice !== null && restSpotPrice > 0) {
+    spotDiffPct = Number(((Math.abs(wsSpotPrice - restSpotPrice) / restSpotPrice) * 100).toFixed(4));
+    spotMismatch = spotDiffPct > 0.1;
+  }
+
+  let bookDiffPct: number | null = null;
+  let bookMismatch = false;
+  if (wsBookMid !== null && restBookMid !== null && restBookMid > 0) {
+    bookDiffPct = Number(((Math.abs(wsBookMid - restBookMid) / restBookMid) * 100).toFixed(4));
+    bookMismatch = bookDiffPct > 0.1;
+  }
+
+  const hasBoth = spotDiffPct !== null && bookDiffPct !== null;
+  const isFail = spotMismatch || bookMismatch;
+  const status: 'PASS' | 'FAIL' | 'PENDING' = isFail ? 'FAIL' : hasBoth ? 'PASS' : 'PENDING';
+
+  const detail = isFail
+    ? `RECONCILE MISMATCH (>0.1%): Spot diff=${spotDiffPct ?? '--'}% (${spotExchange}), Book diff=${bookDiffPct ?? '--'}%`
+    : hasBoth
+    ? `OK (<=0.1%): Spot diff=${spotDiffPct}% (${spotExchange}), Book diff=${bookDiffPct}%`
+    : 'Awaiting live WS + REST prices for reconciliation';
+
+  lastReconcileResult = {
+    timestamp: now,
+    isoTime: new Date(now).toISOString(),
+    spotExchange,
+    wsSpotPrice: wsSpotPrice !== null ? Number(wsSpotPrice.toFixed(2)) : null,
+    restSpotPrice: restSpotPrice !== null ? Number(restSpotPrice.toFixed(2)) : null,
+    spotDiffPct,
+    spotMismatch,
+    bookExchange,
+    wsBookMid: wsBookMid !== null ? Number(wsBookMid.toFixed(2)) : null,
+    restBookMid: restBookMid !== null ? Number(restBookMid.toFixed(2)) : null,
+    bookDiffPct,
+    bookMismatch,
+    status,
+    detail,
+  };
+
+  if (isFail) {
+    console.error(`[BTC TIDE RECONCILE FAIL] ${detail}`);
+  } else if (hasBoth) {
+    console.log(`[BTC TIDE RECONCILE PASS] ${detail}`);
+  }
+
+  scheduleBroadcast();
+  return lastReconcileResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -2251,7 +2510,8 @@ function runBackendSignalEngineStep() {
     feedStatus,
     lastSignalTime,
     Boolean(currentActiveTrade),
-    tradeAge
+    tradeAge,
+    lastReconcileResult.spotMismatch
   );
 
   if (currentActiveTrade && currentPrice !== null) {
@@ -2338,55 +2598,6 @@ function startBackendWatchdog() {
   }, 1000);
 }
 
-/**
- * QA helper: Kills the primary Binance connection, advances its silence timer past 8s,
- * triggers failover hysteresis without blanking UI state, and restores primary reconnection after durationMs.
- */
-export function simulateBinanceSpotDisconnectForQa(durationMs = 10000): {
-  beforeSource: string;
-  afterSource: string;
-  pricePreserved: number | null;
-  binsPreservedCount: number;
-  tradesPreservedCount: number;
-  depthPreservedCount: number;
-} {
-  const beforeSource = activeSourceLabel;
-  const pState = sourceStates.get('binance_primary')!;
-
-  if (pState.reconnectTimer) {
-    clearTimeout(pState.reconnectTimer);
-    pState.reconnectTimer = null;
-  }
-
-  // Hold reconnect timer for durationMs so binance_primary stays disconnected during QA test
-  pState.reconnectTimer = setTimeout(() => {
-    pState.reconnectTimer = null;
-    connectBinanceWs('binance_primary');
-  }, durationMs);
-
-  if (pState.ws) {
-    try {
-      pState.ws.close(4000, 'QA simulated Binance primary kill');
-    } catch {}
-    pState.ws = null;
-  }
-
-  pState.healthySince = null;
-  pState.lastTradeTime = Date.now() - 9000; // >= 8s silence threshold
-
-  evaluateFailoverHysteresis();
-  runBackendSignalEngineStep();
-
-  return {
-    beforeSource,
-    afterSource: activeSourceLabel,
-    pricePreserved: currentPrice,
-    binsPreservedCount: binsMap.size,
-    tradesPreservedCount: recentTradesList.length,
-    depthPreservedCount: depth.bids.length + depth.asks.length,
-  };
-}
-
 // ---------------------------------------------------------------------------
 // 8. Public Snapshots & Health
 // ---------------------------------------------------------------------------
@@ -2399,8 +2610,8 @@ export function getBackendSnapshot(): BtcTideBackendState {
   const venuesAge = lastVenuesTime ? now - lastVenuesTime : 999999;
 
   // Staleness thresholds: trades 5s, book 3s, perps 20s, venues 10s
-  const isSpotStale = tradeAge > 5000;
-  const isBookStale = bookAge > 3000;
+  const isSpotStale = tradeAge > 5000 || lastReconcileResult.spotMismatch;
+  const isBookStale = bookAge > 3000 || lastReconcileResult.bookMismatch;
   const isPerpsStale = perpsAge > 20000;
   const isVenuesStale = venuesAge > 10000;
 
@@ -2439,6 +2650,7 @@ export function getBackendSnapshot(): BtcTideBackendState {
       perps: isPerpsStale,
       venues: isVenuesStale,
     },
+    reconcile: lastReconcileResult,
     geoBlockedNotice,
     bookTicker,
     depth,
@@ -2464,15 +2676,61 @@ export function getServerRegionInfo(): ServerRegionInfo {
   return serverRegion;
 }
 
+/**
+ * Rule 1: A feed is ONLINE only if its last message/response arrived within its threshold
+ * (trades 5 s, book 3 s, perps 20 s, venues 10 s). A WS close code 1000 means closed, never ONLINE.
+ */
 export function getUpstreamHealthReports(): UpstreamHealthItem[] {
-  return Array.from(upstreamsMap.values());
+  const now = Date.now();
+  return Array.from(upstreamsMap.values()).map((item) => {
+    const ageMs = item.lastSuccessTime !== null ? Math.max(0, now - item.lastSuccessTime) : null;
+    let status: UpstreamHealthItem['status'] = 'DISCONNECTED';
+    let errText = item.lastErrorText;
+
+    if (
+      item.type === 'WEBSOCKET' &&
+      (item.wsClosed || item.lastHttpStatusOrWsCloseCode !== null)
+    ) {
+      status = 'DISCONNECTED';
+      if (!errText) {
+        errText = `WS closed (code ${item.lastHttpStatusOrWsCloseCode ?? 1000})`;
+      }
+    } else if (
+      item.lastErrorTime &&
+      (!item.lastSuccessTime || item.lastErrorTime > item.lastSuccessTime)
+    ) {
+      status = 'ERROR';
+    } else if (ageMs !== null && ageMs <= item.thresholdMs) {
+      status = 'ONLINE';
+      errText = null;
+    } else if (ageMs === null) {
+      status = 'DISCONNECTED';
+      if (!errText) {
+        errText = `No message received yet (threshold ${item.thresholdMs / 1000}s)`;
+      }
+    } else {
+      status = 'DISCONNECTED';
+      if (!errText) {
+        errText = `Last message ${(ageMs / 1000).toFixed(1)}s ago exceeds ${
+          item.thresholdMs / 1000
+        }s threshold`;
+      }
+    }
+
+    return {
+      ...item,
+      status,
+      lastMessageAgeMs: ageMs,
+      lastErrorText: errText,
+    };
+  });
 }
 
 export function getBackendHealthReport() {
   const snap = getBackendSnapshot();
   const stats = computeSqliteStats();
   const mem = process.memoryUsage();
-  const upstreamsList = Array.from(upstreamsMap.values());
+  const upstreamsList = getUpstreamHealthReports();
   const anyError = upstreamsList.some((u) => u.status === 'ERROR');
 
   const fieldDiagnostics: FieldDiagnosticItem[] = [
@@ -2485,14 +2743,14 @@ export function getBackendHealthReport() {
     },
     {
       section: 'PERPS',
-      field: 'Mark Price / Funding / Basis',
-      activeSource: perpSources.markPrice,
+      field: 'Mark Price / Funding (8h-eq + native) / Basis',
+      activeSource: perpSources.funding,
       status: snap.perp.markPrice !== null ? 'OK' : 'UNAVAILABLE',
       reason: fieldReasons.get('PERPS:mark_funding') || null,
     },
     {
       section: 'PERPS',
-      field: 'Open Interest & 1h Change (SQLite)',
+      field: 'Open Interest (BTC) & Same-Source 1h Change (SQLite)',
       activeSource: perpSources.openInterest,
       status:
         snap.perp.openInterest === null
@@ -2503,12 +2761,12 @@ export function getBackendHealthReport() {
       reason:
         fieldReasons.get('PERPS:open_interest') ||
         (snap.perp.oiChange1h === null
-          ? `SQLite OI history ${snap.perp.oiHistoryStatus || 'building 0m/60m'} (needs 60m for 1h delta)`
+          ? `SQLite OI history (${perpSources.openInterest}) ${snap.perp.oiHistoryStatus || 'building 0m/60m'}`
           : null),
     },
     {
       section: 'PERPS',
-      field: 'Global Long/Short Account Ratio',
+      field: 'Long/Short Ratio (Source & Measure)',
       activeSource: perpSources.longShort,
       status: snap.perp.longShortRatio !== null ? 'OK' : 'UNAVAILABLE',
       reason: fieldReasons.get('PERPS:long_short') || null,
@@ -2543,6 +2801,7 @@ export function getBackendHealthReport() {
     feedAges: snap.feedAges,
     feedSources: snap.feedSources,
     feedStale: snap.feedStale,
+    reconcile: lastReconcileResult,
     fieldDiagnostics,
     upstreams: upstreamsList,
     sqliteStats: stats,
@@ -2619,10 +2878,19 @@ export async function initBtcTideBackend(): Promise<void> {
   if (atr1hPollTimer) clearInterval(atr1hPollTimer);
   atr1hPollTimer = setInterval(pollBtc1hAtr, 60000);
 
+  // 30s Spot & Order Book Reconciliation against Exchange REST APIs
+  setTimeout(() => {
+    runBackendReconciliation().catch(() => {});
+  }, 3500);
+  if (reconcileTimer) clearInterval(reconcileTimer);
+  reconcileTimer = setInterval(() => {
+    runBackendReconciliation().catch(() => {});
+  }, 30000);
+
   // 6. Start 1-sec Engine Watchdog
   startBackendWatchdog();
 
-  console.log('[BTC TIDE BACKEND] 24/7 Engine is active with real depth20, multi-source perps, 1H ATR, and 9 venues.');
+  console.log('[BTC TIDE BACKEND] 24/7 Engine is active with real depth20, multi-source perps, 1H ATR, 30s reconciliation, and 9 venues.');
 }
 
 export function shutdownBtcTideBackend(): void {
@@ -2633,6 +2901,7 @@ export function shutdownBtcTideBackend(): void {
   if (perpsOiPollTimer) clearInterval(perpsOiPollTimer);
   if (venuesPollTimer) clearInterval(venuesPollTimer);
   if (atr1hPollTimer) clearInterval(atr1hPollTimer);
+  if (reconcileTimer) clearInterval(reconcileTimer);
 
   for (const s of sourceStates.values()) {
     if (s.reconnectTimer) clearTimeout(s.reconnectTimer);

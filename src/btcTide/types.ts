@@ -78,9 +78,11 @@ export interface PerpFieldSources {
 
 export interface PerpPositioning {
   markPrice: number | null;
-  fundingRate: number | null;
+  fundingRate: number | null; // Always 8h-equivalent
+  fundingRateNative?: number | null; // Native rate before 8h normalisation
+  fundingIntervalHours?: number; // 1 for Hyperliquid, 8 for Binance/OKX/Bybit
   nextFundingTime: number | null;
-  openInterest: number | null;
+  openInterest: number | null; // Always in BTC
   oiChange1h: number | null;
   oiChange1hPct: number | null;
   oiHistoryStatus?: string;
@@ -90,6 +92,7 @@ export interface PerpPositioning {
   longShortRatio: number | null;
   longAccountPct: number | null;
   shortAccountPct: number | null;
+  longShortMeasure?: 'Accounts' | 'Positions';
   liquidations5m: LiquidationItem[];
   recentLiquidations?: LiquidationItem[];
   totalLiq5mUsd: number;
@@ -98,6 +101,23 @@ export interface PerpPositioning {
   sources?: PerpFieldSources;
   status: BtcFeedStatus;
   updatedAt: number;
+}
+
+export interface ReconcileResult {
+  timestamp: number;
+  isoTime: string;
+  spotExchange: string;
+  wsSpotPrice: number | null;
+  restSpotPrice: number | null;
+  spotDiffPct: number | null;
+  spotMismatch: boolean;
+  bookExchange: string;
+  wsBookMid: number | null;
+  restBookMid: number | null;
+  bookDiffPct: number | null;
+  bookMismatch: boolean;
+  status: 'PASS' | 'FAIL' | 'PENDING';
+  detail: string;
 }
 
 export interface VenueItem {
@@ -244,6 +264,7 @@ export interface BtcTideStoreState {
     perps: boolean;
     venues: boolean;
   };
+  reconcile?: ReconcileResult;
   geoBlockedNotice: string | null;
   // Rolling store: last 30 minutes in per-second bins (1800 bins max)
   secondBins: SecondBin[];

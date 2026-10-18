@@ -50,6 +50,9 @@ export interface DecisionEngineResult {
   favoredSide: 'LONG' | 'SHORT' | 'NEUTRAL';
   components: SignalComponentScore[];
   excludedComponents?: ExcludedSignalComponent[];
+  excludedWeightSum?: number;
+  activeComponentsCount?: number;
+  isLimitedData?: boolean;
   renormalisedFactor?: number;
   absorbDriveScore: number;
   absorbDriveAgrees: boolean;
@@ -133,11 +136,13 @@ export function evaluateDecisionEngine(
   status: BtcFeedStatus,
   lastSignalTime: number | null,
   hasActiveTrade: boolean,
-  spotAgeMs: number = 0
+  spotAgeMs: number = 0,
+  spotReconcileMismatch: boolean = false
 ): DecisionEngineResult {
   const secondsCollected = secondBins.length;
   const isWarmupSilent = secondsCollected < REQUIRED_SILENCE_SECONDS;
-  const isSpotDotGreen = status === 'LIVE' && spotAgeMs < SPOT_GREEN_MAX_AGE_MS;
+  const isSpotDotGreen =
+    status === 'LIVE' && spotAgeMs < SPOT_GREEN_MAX_AGE_MS && !spotReconcileMismatch;
   const isSilent = isWarmupSilent || !isSpotDotGreen || currentPrice === null;
   const silenceRemainingSec = Math.max(0, REQUIRED_SILENCE_SECONDS - secondsCollected);
 
@@ -521,6 +526,7 @@ export function evaluateDecisionEngine(
 
   const excludedComponents: ExcludedSignalComponent[] = [];
   let activeBaseWeightSum = 0;
+  let excludedWeightSum = 0;
 
   for (const c of rawComponents) {
     if (c.excluded) {
@@ -530,12 +536,18 @@ export function evaluateDecisionEngine(
         baseWeight: c.baseWeight,
         reason: c.excludeReason || 'Field unavailable',
       });
+      excludedWeightSum += c.baseWeight;
     } else {
       activeBaseWeightSum += c.baseWeight;
     }
   }
 
-  const renormalisedFactor = activeBaseWeightSum > 0 ? 100 / activeBaseWeightSum : 1;
+  const activeComponentsCount = rawComponents.length - excludedComponents.length;
+  // Rule 5: If excluded component weight is more than 20, or fewer than 6 components are active,
+  // do NOT fire and show "LIMITED DATA" instead of re-normalising.
+  const isLimitedData = excludedWeightSum > 20 || activeComponentsCount < 6;
+  const renormalisedFactor =
+    !isLimitedData && activeBaseWeightSum > 0 ? 100 / activeBaseWeightSum : 1;
 
   const components: SignalComponentScore[] = rawComponents.map((c) => {
     if (c.excluded) {
@@ -561,7 +573,9 @@ export function evaluateDecisionEngine(
   // If engine is silent (first 3 min of live data OR SPOT dot is not green), keep scores silent & canFire = false
   if (isSilent) {
     let waitMsg = `Silent: Collecting live data (${secondsCollected}/${REQUIRED_SILENCE_SECONDS}s)`;
-    if (status !== 'LIVE') {
+    if (spotReconcileMismatch) {
+      waitMsg = `SPOT dot red (Reconcile mismatch > 0.1%) · Engine silent`;
+    } else if (status !== 'LIVE') {
       waitMsg = `SPOT dot not green (Feed ${status}) · Engine silent`;
     } else if (!isSpotDotGreen) {
       waitMsg = `SPOT dot not green (age ${(spotAgeMs / 1000).toFixed(1)}s >= 3.0s) · Engine silent`;
@@ -581,6 +595,9 @@ export function evaluateDecisionEngine(
       favoredSide: 'NEUTRAL',
       components,
       excludedComponents,
+      excludedWeightSum,
+      activeComponentsCount,
+      isLimitedData,
       renormalisedFactor: Number(renormalisedFactor.toFixed(3)),
       absorbDriveScore: 0,
       absorbDriveAgrees: false,
@@ -626,13 +643,15 @@ export function evaluateDecisionEngine(
     (favoredSide === 'SHORT' && absorbDriveScore < 0);
 
   // Firing rule:
-  // confidence >= 68 AND lead >= 22 AND absorbDriveAgrees AND cooldown expired AND no active trade AND SPOT dot green
-  const meetsCriteria = confidence >= 68 && lead >= 22 && absorbDriveAgrees;
+  // !isLimitedData AND confidence >= 68 AND lead >= 22 AND absorbDriveAgrees AND cooldown expired AND no active trade AND SPOT dot green
+  const meetsCriteria = !isLimitedData && confidence >= 68 && lead >= 22 && absorbDriveAgrees;
   const canFire =
     meetsCriteria && cooldownRemainingSec === 0 && !hasActiveTrade && isSpotDotGreen;
 
   let waitReason = 'Awaiting high-probability setup';
-  if (hasActiveTrade) {
+  if (isLimitedData) {
+    waitReason = `LIMITED DATA (${activeComponentsCount}/8 active, excluded weight ${excludedWeightSum})`;
+  } else if (hasActiveTrade) {
     waitReason = 'Active trade in progress (One trade at a time)';
   } else if (cooldownRemainingSec > 0) {
     waitReason = `Cooldown active (${Math.floor(cooldownRemainingSec / 60)}m ${
@@ -660,6 +679,9 @@ export function evaluateDecisionEngine(
     favoredSide,
     components,
     excludedComponents,
+    excludedWeightSum,
+    activeComponentsCount,
+    isLimitedData,
     renormalisedFactor: Number(renormalisedFactor.toFixed(3)),
     absorbDriveScore,
     absorbDriveAgrees,

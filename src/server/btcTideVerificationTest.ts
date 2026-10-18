@@ -212,6 +212,7 @@ export async function runBtcTideVerificationTests() {
         markPrice: 'OKX SWAP',
         funding: 'OKX SWAP',
         openInterest: 'OKX SWAP',
+        basis: 'Bybit Spot vs Perp',
         longShort: 'OKX',
         liquidations: 'Bybit allLiquidation',
       },

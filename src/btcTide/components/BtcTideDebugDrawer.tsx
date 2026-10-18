@@ -18,14 +18,35 @@ export interface UpstreamItem {
   id: string;
   name: string;
   type: 'WEBSOCKET' | 'REST';
+  category?: 'TRADES' | 'BOOK' | 'PERPS' | 'VENUES';
+  thresholdMs?: number;
   endpoint: string;
   status: 'ONLINE' | 'ERROR' | 'DISCONNECTED' | 'CONNECTING';
+  wsClosed?: boolean;
   lastHttpStatusOrWsCloseCode: number | null;
   lastSuccessTime: number | null;
   lastSuccessIso: string | null;
+  lastMessageAgeMs?: number | null;
   lastErrorTime: number | null;
   lastErrorText: string | null;
   latencyMs: number | null;
+}
+
+export interface ReconcileData {
+  timestamp: number;
+  isoTime: string;
+  spotExchange: string;
+  wsSpotPrice: number | null;
+  restSpotPrice: number | null;
+  spotDiffPct: number | null;
+  spotMismatch: boolean;
+  bookExchange: string;
+  wsBookMid: number | null;
+  restBookMid: number | null;
+  bookDiffPct: number | null;
+  bookMismatch: boolean;
+  status: 'PASS' | 'FAIL' | 'PENDING';
+  detail: string;
 }
 
 export interface FieldDiagnosticItem {
@@ -58,6 +79,7 @@ export interface HealthReport {
   feedAges?: { spot: number; book: number; perps: number; venues: number };
   feedSources?: { spot: string; book: string; perps: string; venues: string };
   feedStale?: { spot: boolean; book: boolean; perps: boolean; venues: boolean };
+  reconcile?: ReconcileData;
   fieldDiagnostics?: FieldDiagnosticItem[];
   upstreams: UpstreamItem[];
   sqliteStats: {
@@ -139,7 +161,7 @@ export const BtcTideDebugDrawer: React.FC<BtcTideDebugDrawerProps> = ({ isOpen, 
                 </span>
               </div>
               <div className="text-[10px] text-neutral-400">
-                Live upstream connectivity, HTTP status / WS close codes, field diagnostics &amp; server location
+                Live upstream connectivity, last-message age, 30s REST reconciliation &amp; field diagnostics
               </div>
             </div>
           </div>
@@ -260,7 +282,7 @@ export const BtcTideDebugDrawer: React.FC<BtcTideDebugDrawerProps> = ({ isOpen, 
                   : '-- (needs ≥ 10)'}
               </div>
               <div className="text-[10px] text-emerald-400 flex items-center gap-1">
-                <ShieldCheck className="w-3 h-3" /> ±2% Price Safety Active
+                <ShieldCheck className="w-3 h-3" /> Real Trade Hygiene Active
               </div>
             </div>
 
@@ -285,6 +307,89 @@ export const BtcTideDebugDrawer: React.FC<BtcTideDebugDrawerProps> = ({ isOpen, 
               </div>
             </div>
           </div>
+
+          {/* 1B. 30-Second Exchange REST Reconciliation Audit */}
+          {data?.reconcile && (
+            <div
+              className={`rounded-xl p-3 border space-y-2 ${
+                data.reconcile.status === 'FAIL'
+                  ? 'bg-rose-950/40 border-rose-500/50'
+                  : 'bg-black/50 border-white/10'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-white/5">
+                <span className="font-bold text-white text-xs uppercase tracking-wider flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-[#FFD97A]" />
+                  30S EXCHANGE REST RECONCILIATION (SPOT &amp; BOOK THRESHOLD &le; 0.1%)
+                </span>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                      data.reconcile.status === 'PASS'
+                        ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-400'
+                        : data.reconcile.status === 'FAIL'
+                        ? 'bg-rose-950/70 border-rose-500/50 text-rose-300'
+                        : 'bg-amber-950/60 border-amber-500/40 text-amber-300'
+                    }`}
+                  >
+                    {data.reconcile.status}
+                  </span>
+                  <span className="text-[10px] text-neutral-400">
+                    Checked {data.reconcile.timestamp ? formatAgo(data.reconcile.timestamp) : '--'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px]">
+                <div className="bg-black/40 border border-white/5 rounded-lg p-2.5 flex items-center justify-between">
+                  <div>
+                    <div className="text-[10px] text-neutral-400 uppercase">
+                      SPOT RECONCILE ({data.reconcile.spotExchange})
+                    </div>
+                    <div className="text-white font-semibold mt-0.5">
+                      WS: {data.reconcile.wsSpotPrice !== null ? `$${data.reconcile.wsSpotPrice.toFixed(2)}` : '--'}{' '}
+                      vs REST:{' '}
+                      {data.reconcile.restSpotPrice !== null ? `$${data.reconcile.restSpotPrice.toFixed(2)}` : '--'}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span
+                      className={`font-bold ${
+                        data.reconcile.spotMismatch ? 'text-rose-400' : 'text-emerald-400'
+                      }`}
+                    >
+                      {data.reconcile.spotDiffPct !== null ? `${data.reconcile.spotDiffPct}%` : '--'}
+                    </span>
+                    <div className="text-[9px] text-neutral-500">max 0.1%</div>
+                  </div>
+                </div>
+
+                <div className="bg-black/40 border border-white/5 rounded-lg p-2.5 flex items-center justify-between">
+                  <div>
+                    <div className="text-[10px] text-neutral-400 uppercase">
+                      BOOK MID RECONCILE ({data.reconcile.bookExchange})
+                    </div>
+                    <div className="text-white font-semibold mt-0.5">
+                      WS Mid: {data.reconcile.wsBookMid !== null ? `$${data.reconcile.wsBookMid.toFixed(2)}` : '--'}{' '}
+                      vs REST Mid:{' '}
+                      {data.reconcile.restBookMid !== null ? `$${data.reconcile.restBookMid.toFixed(2)}` : '--'}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span
+                      className={`font-bold ${
+                        data.reconcile.bookMismatch ? 'text-rose-400' : 'text-emerald-400'
+                      }`}
+                    >
+                      {data.reconcile.bookDiffPct !== null ? `${data.reconcile.bookDiffPct}%` : '--'}
+                    </span>
+                    <div className="text-[9px] text-neutral-500">max 0.1%</div>
+                  </div>
+                </div>
+              </div>
+              <div className="text-[10px] text-neutral-400">{data.reconcile.detail}</div>
+            </div>
+          )}
 
           {/* 2. Field-Level Diagnostics Matrix (Sources & Reasons for any "--" or building fields) */}
           {data?.fieldDiagnostics && data.fieldDiagnostics.length > 0 && (
@@ -363,8 +468,8 @@ export const BtcTideDebugDrawer: React.FC<BtcTideDebugDrawerProps> = ({ isOpen, 
                     <th className="py-2 px-2">UPSTREAM</th>
                     <th className="py-2 px-2">TYPE</th>
                     <th className="py-2 px-2">STATUS</th>
+                    <th className="py-2 px-2 text-right">LAST MSG AGE / MAX</th>
                     <th className="py-2 px-2 text-right">HTTP / WS CODE</th>
-                    <th className="py-2 px-2 text-right">LAST SUCCESS</th>
                     <th className="py-2 px-2 text-right">LATENCY</th>
                     <th className="py-2 px-2">LAST ERROR TEXT</th>
                   </tr>
@@ -380,6 +485,15 @@ export const BtcTideDebugDrawer: React.FC<BtcTideDebugDrawerProps> = ({ isOpen, 
                     data.upstreams.map((u) => {
                       const isOnline = u.status === 'ONLINE';
                       const isError = u.status === 'ERROR';
+                      const ageMs =
+                        u.lastMessageAgeMs !== undefined && u.lastMessageAgeMs !== null
+                          ? u.lastMessageAgeMs
+                          : u.lastSuccessTime
+                          ? Math.max(0, Date.now() - u.lastSuccessTime)
+                          : null;
+                      const thresholdSec = u.thresholdMs ? u.thresholdMs / 1000 : 10;
+                      const ageExceeded =
+                        ageMs !== null && u.thresholdMs ? ageMs > u.thresholdMs : false;
 
                       return (
                         <tr key={u.id} className="hover:bg-white/[0.03] transition-colors">
@@ -412,29 +526,42 @@ export const BtcTideDebugDrawer: React.FC<BtcTideDebugDrawerProps> = ({ isOpen, 
                             )}
                           </td>
 
+                          <td className="py-2.5 px-2 text-right font-mono text-[10px]">
+                            {ageMs !== null ? (
+                              <span
+                                className={
+                                  ageExceeded || !isOnline
+                                    ? 'text-amber-300 font-bold'
+                                    : 'text-emerald-300 font-semibold'
+                                }
+                              >
+                                {(ageMs / 1000).toFixed(1)}s / {thresholdSec}s
+                              </span>
+                            ) : (
+                              <span className="text-neutral-500">-- / {thresholdSec}s</span>
+                            )}
+                          </td>
+
                           <td className="py-2.5 px-2 text-right font-mono font-bold">
                             {u.lastHttpStatusOrWsCloseCode !== null ? (
                               <span
                                 className={
+                                  u.type === 'REST' &&
                                   u.lastHttpStatusOrWsCloseCode >= 200 &&
                                   u.lastHttpStatusOrWsCloseCode < 300
                                     ? 'text-emerald-400'
-                                    : u.lastHttpStatusOrWsCloseCode === 1000
-                                    ? 'text-teal-400'
                                     : 'text-rose-400 font-bold'
                                 }
                               >
                                 {u.type === 'WEBSOCKET'
-                                  ? `WS ${u.lastHttpStatusOrWsCloseCode}`
+                                  ? `WS ${u.lastHttpStatusOrWsCloseCode} (CLOSED)`
                                   : `HTTP ${u.lastHttpStatusOrWsCloseCode}`}
                               </span>
+                            ) : u.type === 'WEBSOCKET' && isOnline ? (
+                              <span className="text-emerald-400 text-[10px]">WS OPEN</span>
                             ) : (
                               <span className="text-neutral-500">--</span>
                             )}
-                          </td>
-
-                          <td className="py-2.5 px-2 text-right text-neutral-300 text-[10px]">
-                            {u.lastSuccessTime ? formatAgo(u.lastSuccessTime) : '--'}
                           </td>
 
                           <td className="py-2.5 px-2 text-right text-neutral-300 text-[10px]">

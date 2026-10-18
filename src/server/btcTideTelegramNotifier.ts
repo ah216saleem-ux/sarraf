@@ -3,6 +3,7 @@ import {
   enqueueCommandOutbox,
 } from './commandTelegramService.ts';
 import { BtcTideTradeRecord } from './btcTideSignalDatabase.ts';
+import { getTotalSignalsCountFromSqlite } from './btcTideSqliteDatabase.ts';
 import { DecisionEngineResult } from '../btcTide/signalEngine.ts';
 
 export interface TelegramNotifyOptions {
@@ -52,23 +53,27 @@ export async function notifyNewBtcTideSignal(
   options?: TelegramNotifyOptions
 ): Promise<void> {
   try {
-    const slLossUsd = Math.abs(trade.entryPrice - trade.initialSlPrice);
-    const tp1ProfitUsd = Math.abs(trade.tp1Price - trade.entryPrice);
-    const tp2ProfitUsd = Math.abs(trade.tp2Price - trade.entryPrice);
-    const tp3ProfitUsd = Math.abs(trade.tp3Price - trade.entryPrice);
+    const totalSignals = Math.max(1, getTotalSignalsCountFromSqlite());
+    const isPaper = totalSignals <= 20;
+    const paperTag = isPaper ? ` [PAPER #${totalSignals}/20]` : '';
 
     const msg = [
-      `🟠 BTC/USD SIGNAL (${trade.side})`,
+      `📊 BTC/USD TRADE SIGNAL — ${trade.side}${paperTag}`,
       ``,
-      `🎯 Entry: ${formatPrice(trade.entryPrice)}`,
-      `🛑 Stop Loss: ${formatPrice(trade.initialSlPrice)} (${formatDollarAmount(slLossUsd)} Loss)`,
-      `✅ TP1: ${formatPrice(trade.tp1Price)} (${formatDollarAmount(tp1ProfitUsd)} Profit)`,
-      `🎯 TP2: ${formatPrice(trade.tp2Price)} (${formatDollarAmount(tp2ProfitUsd)} Profit)`,
-      `🚀 TP3: ${formatPrice(trade.tp3Price)} (${formatDollarAmount(tp3ProfitUsd)} Profit)`,
+      `━━━━━━━━━━━━━━`,
+      `📍 Entry: ${formatPrice(trade.entryPrice)}`,
+      `🛑 Stop Loss: ${formatPrice(trade.initialSlPrice)}`,
+      ``,
+      `🎯 Take Profit 1: ${formatPrice(trade.tp1Price)}`,
+      `🎯 Take Profit 2: ${formatPrice(trade.tp2Price)}`,
+      `🏆 Take Profit 3: ${formatPrice(trade.tp3Price)}`,
+      `━━━━━━━━━━━━━━`,
     ].join('\n');
 
     if (!options?.dryRun) {
-      console.log(`[BTC TIDE TELEGRAM] Dispatching NEW SIGNAL: ${trade.side} @ ${trade.entryPrice}`);
+      console.log(
+        `[BTC TIDE TELEGRAM] Dispatching NEW SIGNAL${paperTag}: ${trade.side} @ ${trade.entryPrice}`
+      );
     }
     const key = `tide_new_${trade.id}`;
     await dispatchNonBlocking(msg, key, 'new_signal', options);

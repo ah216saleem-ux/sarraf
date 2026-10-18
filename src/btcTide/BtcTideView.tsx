@@ -27,6 +27,7 @@ export const BtcTideView: React.FC = () => {
     feedAges,
     feedSources,
     feedStale,
+    reconcile,
     geoBlockedNotice,
     currentPrice,
     priceFlash,
@@ -147,6 +148,8 @@ export const BtcTideView: React.FC = () => {
                   source: feedSources?.spot ?? activeSource,
                   isStale: feedStale?.spot ?? true,
                   thresholdSec: 5,
+                  reconcileMismatch: Boolean(reconcile?.spotMismatch),
+                  reconcileDiffPct: reconcile?.spotDiffPct ?? null,
                 },
                 {
                   id: 'BOOK',
@@ -155,6 +158,8 @@ export const BtcTideView: React.FC = () => {
                   source: feedSources?.book ?? `${activeSource} Orderbook`,
                   isStale: feedStale?.book ?? true,
                   thresholdSec: 3,
+                  reconcileMismatch: Boolean(reconcile?.bookMismatch),
+                  reconcileDiffPct: reconcile?.bookDiffPct ?? null,
                 },
                 {
                   id: 'PERPS',
@@ -163,6 +168,8 @@ export const BtcTideView: React.FC = () => {
                   source: feedSources?.perps ?? 'Binance Futures',
                   isStale: feedStale?.perps ?? true,
                   thresholdSec: 20,
+                  reconcileMismatch: false,
+                  reconcileDiffPct: null,
                 },
                 {
                   id: 'VENUES',
@@ -171,29 +178,31 @@ export const BtcTideView: React.FC = () => {
                   source: feedSources?.venues ?? 'Cross-Venue (9 Exchanges)',
                   isStale: feedStale?.venues ?? true,
                   thresholdSec: 10,
+                  reconcileMismatch: false,
+                  reconcileDiffPct: null,
                 },
               ].map((dot) => {
-                const colorClass =
-                  dot.ageMs < 3000
-                    ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]'
-                    : dot.ageMs <= 10000
-                    ? 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.8)]'
-                    : 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.8)]';
+                const thresholdMs = dot.thresholdSec * 1000;
+                const isRed = dot.reconcileMismatch || dot.ageMs > thresholdMs;
+                const colorClass = isRed
+                  ? 'bg-rose-500 shadow-[0_0_6px_rgba(244,63,94,0.85)]'
+                  : 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]';
 
                 const ageFormatted = dot.ageMs < 999999 ? `${(dot.ageMs / 1000).toFixed(1)}s` : '--';
+                const reconcileNote = dot.reconcileMismatch
+                  ? ` · RECONCILE MISMATCH (${dot.reconcileDiffPct}% > 0.1%)`
+                  : '';
 
                 return (
                   <div
                     key={dot.id}
                     className="flex items-center gap-1 cursor-help"
-                    title={`${dot.label}: ${dot.source} · Age: ${ageFormatted}${
-                      dot.isStale ? ` (STALE > ${dot.thresholdSec}s)` : ''
-                    }`}
+                    title={`${dot.label}: ${dot.source} · Age: ${ageFormatted} (threshold ${dot.thresholdSec}s)${reconcileNote}`}
                   >
                     <span className={`inline-block w-2 h-2 rounded-full ${colorClass} transition-colors`} />
                     <span
                       className={`font-semibold text-[10px] ${
-                        dot.isStale ? 'text-neutral-500' : 'text-neutral-200'
+                        isRed ? 'text-rose-400' : 'text-neutral-200'
                       }`}
                     >
                       {dot.label}

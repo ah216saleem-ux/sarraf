@@ -24,6 +24,7 @@ export interface CommandOutboxRecord {
   lastAttemptAt?: string;
   lastError?: string;
   sentAt?: string;
+  telegramMessageId?: number;
 }
 
 export interface CommandTelegramSettings {
@@ -139,7 +140,7 @@ export function isTelegramConfigured(): boolean {
 const deliveredCommandTelegramKeys = new Map<string, number>();
 const inFlightCommandTelegramKeys = new Map<
   string,
-  Promise<{ success: boolean; error?: string; errorCode?: number; nonRetryable?: boolean }>
+  Promise<{ success: boolean; messageId?: number; error?: string; errorCode?: number; nonRetryable?: boolean }>
 >();
 
 /**
@@ -151,7 +152,7 @@ async function sendRawTelegramMessage(
   chatId: string,
   text: string,
   idempotencyKey?: string
-): Promise<{ success: boolean; error?: string; errorCode?: number; nonRetryable?: boolean }> {
+): Promise<{ success: boolean; messageId?: number; error?: string; errorCode?: number; nonRetryable?: boolean }> {
   const now = Date.now();
   for (const [k, ts] of deliveredCommandTelegramKeys.entries()) {
     const ttl = k.startsWith('idemp:') ? 24 * 60 * 60 * 1000 : 60 * 1000;
@@ -191,7 +192,8 @@ async function sendRawTelegramMessage(
 
       if (res.ok && data.ok) {
         deliveredCommandTelegramKeys.set(dedupeKey, Date.now());
-        return { success: true };
+        const messageId = typeof data.result?.message_id === 'number' ? data.result.message_id : undefined;
+        return { success: true, messageId };
       }
 
       const code = data.error_code || res.status;
@@ -319,13 +321,18 @@ export async function processCommandOutbox(): Promise<{ processed: number; deliv
         item.status = 'SENT';
         item.sentAt = new Date().toISOString();
         item.lastError = undefined;
+        if (typeof res.messageId === 'number') {
+          item.telegramMessageId = res.messageId;
+        }
         delivered++;
 
         settings.lastMessageTime = Date.now();
         settings.lastMessageStatus = 'OK';
         settings.lastErrorMessage = null;
         saveTelegramSettings();
-        console.log(`[SARRAF COMMAND OUTBOX] Delivered message ${item.id} (${item.idempotencyKey || 'plain'})`);
+        console.log(
+          `[SARRAF COMMAND OUTBOX] Delivered message ${item.id} (${item.idempotencyKey || 'plain'}) -> Telegram message_id=${res.messageId ?? 'ok'}`
+        );
       } else {
         item.lastError = res.error || 'Failed to dispatch';
         if (res.nonRetryable || item.retryCount >= 5) {
@@ -379,7 +386,7 @@ export async function sendTelegramMessageWithRetry(
   text: string,
   _maxRetries = 3,
   idempotencyKey?: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; messageId?: number; outboxId?: string; error?: string }> {
   const creds = getCredentials();
 
   if (!creds.tokenPresent || !creds.token) {
@@ -413,11 +420,12 @@ export async function sendTelegramMessageWithRetry(
   const currentOutbox = readCommandOutbox();
   const current = currentOutbox.find((r) => r.id === item.id);
   if (current && current.status === 'SENT') {
-    return { success: true };
+    return { success: true, messageId: current.telegramMessageId, outboxId: current.id };
   }
 
   return {
     success: false,
+    outboxId: item.id,
     error: current?.lastError || 'Message persisted to command_outbox.json; awaiting delivery or retry',
   };
 }

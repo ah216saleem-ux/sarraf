@@ -63,6 +63,9 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
       favoredSide,
       components,
       excludedComponents = [],
+      excludedWeightSum = 0,
+      activeComponentsCount = components.filter((c) => !c.excluded).length,
+      isLimitedData = false,
       renormalisedFactor = 1,
       absorbDriveScore,
       absorbDriveAgrees,
@@ -120,6 +123,13 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
               <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
               <span>SPOT DOT NOT GREEN ({ageLabel}) · SILENT</span>
             </div>
+          ) : isLimitedData ? (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-950/80 border border-rose-500/50 text-rose-300 font-mono text-[11px] font-bold">
+              <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+              <span>
+                LIMITED DATA ({activeComponentsCount}/8 active · excluded wt {excludedWeightSum})
+              </span>
+            </div>
           ) : canFire ? (
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 font-mono text-[11px] font-bold animate-pulse">
               <Zap className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
@@ -133,9 +143,15 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
           )}
         </div>
 
-        {/* Excluded PERPS Components & Re-Normalised Weights Notice (Always visible when any component is excluded) */}
+        {/* Excluded PERPS Components & Re-Normalised / LIMITED DATA Notice */}
         {excludedComponents.length > 0 && (
-          <div className="rounded-lg bg-amber-950/25 border border-amber-500/30 px-3 py-2 font-mono text-[11px] flex flex-wrap items-center justify-between gap-2">
+          <div
+            className={`rounded-lg px-3 py-2 font-mono text-[11px] flex flex-wrap items-center justify-between gap-2 ${
+              isLimitedData
+                ? 'bg-rose-950/35 border border-rose-500/40'
+                : 'bg-amber-950/25 border border-amber-500/30'
+            }`}
+          >
             <div className="flex flex-wrap items-center gap-1.5 text-amber-200">
               <Sliders className="w-3.5 h-3.5 text-amber-400 shrink-0" />
               <span className="font-bold uppercase text-amber-300">
@@ -150,9 +166,15 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
                 </span>
               ))}
             </div>
-            <span className="text-[10px] text-[#FFD97A] font-semibold">
-              Active weights re-normalised ×{renormalisedFactor.toFixed(2)} (Sum = 100)
-            </span>
+            {isLimitedData ? (
+              <span className="text-[10px] text-rose-300 font-bold uppercase">
+                LIMITED DATA (Excluded wt {excludedWeightSum} &gt; 20 or &lt;6 active · Firing Blocked, Not Re-normalised)
+              </span>
+            ) : (
+              <span className="text-[10px] text-[#FFD97A] font-semibold">
+                Active weights re-normalised ×{renormalisedFactor.toFixed(2)} (Sum = 100)
+              </span>
+            )}
           </div>
         )}
 
@@ -289,7 +311,9 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
               <span className="text-[10px] font-normal text-neutral-400">
                 ({components.filter((c) => !c.excluded).length}/8 included
                 {excludedComponents.length > 0
-                  ? ` · ${excludedComponents.length} excluded & re-normalised`
+                  ? isLimitedData
+                    ? ` · ${excludedComponents.length} excluded · LIMITED DATA`
+                    : ` · ${excludedComponents.length} excluded & re-normalised`
                   : ''}
                 )
               </span>

@@ -1,0 +1,42 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: sarraf-btc-tide
+  annotations:
+    run.googleapis.com/launch-stage: BETA
+spec:
+  template:
+    metadata:
+      annotations:
+        # Always-on: keep at least 1 instance running 24/7 even with zero visitors
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "1"
+        # Allocate CPU continuously outside of HTTP requests so background WS & pollers run 24/7
+        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/execution-environment: gen2
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 3600
+      containers:
+        - image: gcr.io/PROJECT_ID/sarraf-btc-tide:latest
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: DATA_DIR
+              value: "/app/data"
+          resources:
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: persistent-data-volume
+              mountPath: /app/data
+      volumes:
+        - name: persistent-data-volume
+          csi:
+            driver: gcsfuse.run.googleapis.com
+            readOnly: false
+            volumeAttributes:
+              bucketName: sarraf-btc-tide-persistent-data

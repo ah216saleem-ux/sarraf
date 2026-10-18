@@ -22,8 +22,9 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV DATA_DIR=/app/data
 
-# Ensure persistent data directory exists
+# Ensure persistent data directory exists and declare volume mount point
 RUN mkdir -p /app/data
+VOLUME ["/app/data"]
 
 # Expose default port
 EXPOSE 3000

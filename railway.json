@@ -6,9 +6,11 @@
   },
   "deploy": {
     "startCommand": "npm start",
+    "numReplicas": 1,
+    "sleepApplication": false,
     "healthcheckPath": "/api/health",
     "healthcheckTimeout": 300,
-    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyType": "ALWAYS",
     "restartPolicyMaxRetries": 10
   }
 }

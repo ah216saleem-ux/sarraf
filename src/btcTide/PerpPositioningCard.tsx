@@ -45,6 +45,8 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
     const {
       markPrice,
       fundingRate,
+      fundingRateNative,
+      fundingIntervalHours = 8,
       openInterest,
       oiChange1h,
       oiChange1hPct,
@@ -54,6 +56,7 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
       longShortRatio,
       longAccountPct,
       shortAccountPct,
+      longShortMeasure = 'Accounts',
       liquidations5m = [],
       recentLiquidations = [],
       totalLiq5mUsd,
@@ -110,17 +113,17 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
               isStaleOrOffline ? 'opacity-60' : ''
             }`}
           >
-            {/* 1. Funding Rate & Next Funding Countdown */}
+            {/* 1. Funding Rate (8h-Equivalent + Source Native Interval) & Next Funding Countdown */}
             <div className="bg-black/40 border border-white/5 rounded-lg p-2.5 flex flex-col justify-between">
               <div>
                 <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between gap-1">
-                  <span>FUNDING</span>
-                  <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[85px]">
+                  <span>FUNDING (8H-EQ)</span>
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[95px]">
                     {sources?.funding || 'OKX SWAP'}
                   </span>
                 </div>
                 <div
-                  className={`text-sm sm:text-base font-bold mt-1 ${
+                  className={`text-sm sm:text-base font-bold mt-1 flex items-baseline gap-1.5 ${
                     isStaleOrOffline || fundingRate === null
                       ? 'text-neutral-500'
                       : isFundingPositive
@@ -128,14 +131,25 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
                       : 'text-rose-400'
                   }`}
                 >
-                  {fundingRate !== null
-                    ? `${isFundingPositive ? '+' : ''}${(fundingRate * 100).toFixed(4)}%`
-                    : '--'}
+                  <span>
+                    {fundingRate !== null
+                      ? `${isFundingPositive ? '+' : ''}${(fundingRate * 100).toFixed(4)}%`
+                      : '--'}
+                  </span>
+                  {fundingRate !== null && (
+                    <span className="text-[9px] font-normal text-neutral-400">
+                      /8h (native {fundingIntervalHours}h
+                      {fundingIntervalHours === 1 && fundingRateNative !== null && fundingRateNative !== undefined
+                        ? `: ${fundingRateNative >= 0 ? '+' : ''}${(fundingRateNative * 100).toFixed(4)}%`
+                        : ''}
+                      )
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="text-[10px] text-neutral-400 mt-1 flex items-center gap-1">
                 <Clock className="w-3 h-3 text-[#FFD97A] shrink-0" />
-                <span>NEXT:</span>
+                <span>NEXT ({fundingIntervalHours}h):</span>
                 <span
                   className={`font-semibold ${
                     isStaleOrOffline ? 'text-neutral-500' : 'text-[#FFD97A]'
@@ -146,12 +160,12 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
               </div>
             </div>
 
-            {/* 2. Open Interest & SQLite 1h Change */}
+            {/* 2. Open Interest (BTC) & Same-Source SQLite 1h Change */}
             <div className="bg-black/40 border border-white/5 rounded-lg p-2.5 flex flex-col justify-between">
               <div>
                 <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between gap-1">
-                  <span>OPEN INTEREST</span>
-                  <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[85px]">
+                  <span>OI (BTC)</span>
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[95px]">
                     {sources?.openInterest || 'OKX SWAP'}
                   </span>
                 </div>
@@ -161,7 +175,7 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
                   }`}
                 >
                   {openInterest !== null
-                    ? `${openInterest.toLocaleString('en-US', { maximumFractionDigits: 0 })} ₿`
+                    ? `${openInterest.toLocaleString('en-US', { maximumFractionDigits: 0 })} BTC`
                     : '--'}
                 </div>
               </div>
@@ -183,7 +197,7 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
                     )}
                     <span>
                       {isOiChangePositive ? '+' : ''}
-                      {oiChange1h.toFixed(1)}₿ (
+                      {oiChange1h.toFixed(1)} BTC (
                       {oiChange1hPct !== null
                         ? `${oiChange1hPct > 0 ? '+' : ''}${oiChange1hPct.toFixed(2)}%`
                         : '1h'}
@@ -204,7 +218,7 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
               <div>
                 <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between gap-1">
                   <span>BASIS</span>
-                  <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[85px]">
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[95px]">
                     {sources?.basis || 'OKX SWAP'}
                   </span>
                 </div>
@@ -227,23 +241,29 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
               </div>
             </div>
 
-            {/* 4. Global Long/Short Ratio */}
+            {/* 4. Global Long/Short Ratio (Source + Accounts vs Positions Measure) */}
             <div className="bg-black/40 border border-white/5 rounded-lg p-2.5 flex flex-col justify-between">
               <div>
                 <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between gap-1">
-                  <span>L/S RATIO</span>
-                  <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[85px]">
-                    {sources?.longShort || 'OKX'}
+                  <span>L/S ({longShortMeasure.toUpperCase()})</span>
+                  <span
+                    className="text-[9px] px-1 py-0.2 rounded bg-white/5 border border-white/10 text-neutral-300 truncate max-w-[105px]"
+                    title={`${sources?.longShort || 'OKX'} · Measures ${longShortMeasure}`}
+                  >
+                    {sources?.longShort || `OKX (${longShortMeasure})`}
                   </span>
                 </div>
                 <div
-                  className={`text-sm sm:text-base font-bold mt-1 ${
+                  className={`text-sm sm:text-base font-bold mt-1 flex items-baseline gap-1.5 ${
                     isStaleOrOffline || longShortRatio === null
                       ? 'text-neutral-500'
                       : 'text-[#FFD97A]'
                   }`}
                 >
-                  {longShortRatio !== null ? `${longShortRatio.toFixed(2)}x` : '--'}
+                  <span>{longShortRatio !== null ? `${longShortRatio.toFixed(2)}x` : '--'}</span>
+                  <span className="text-[9px] font-normal text-neutral-400">
+                    {longShortMeasure}
+                  </span>
                 </div>
               </div>
               <div className="text-[10px] mt-1 flex items-center justify-between">

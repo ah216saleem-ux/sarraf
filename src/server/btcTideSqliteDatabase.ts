@@ -115,31 +115,13 @@ export async function initBtcTideSqlite(): Promise<Database> {
 export function enforceSqliteTodayHygiene(): void {
   if (!dbInstance) return;
   try {
-    const now = new Date();
-    const startOfTodayUtcMs = Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate(),
-      0,
-      0,
-      0,
-      0
-    );
-
-    // 1. Remove any synthetic/test rows or non-closed rows older than today
+    // ONLY delete rows explicitly flagged test/mock.
+    // NEVER delete an active trade or a real closed trade, and NEVER delete based on "older than today".
     dbInstance.run(
       `DELETE FROM btc_tide_signals
        WHERE id LIKE 'mock_%'
           OR id LIKE 'test_%'
-          OR trigger_reason LIKE '%Mock%'
-          OR (entry_time < ? AND (status != 'CLOSED' OR outcome IS NULL));`,
-      [startOfTodayUtcMs]
-    );
-
-    // 2. Remove any OI history rows older than today
-    dbInstance.run(
-      `DELETE FROM btc_tide_oi_history WHERE timestamp < ?;`,
-      [startOfTodayUtcMs]
+          OR trigger_reason LIKE '%Mock%';`
     );
   } catch (err: any) {
     console.error('[BTC TIDE SQLITE] Hygiene check error:', err.message);
@@ -403,6 +385,17 @@ export function getLastSignalTimeFromSqlite(): number | null {
   return null;
 }
 
+export function getTotalSignalsCountFromSqlite(): number {
+  if (!dbInstance) return 0;
+  try {
+    const res = dbInstance.exec(`SELECT COUNT(*) FROM btc_tide_signals;`);
+    if (res.length > 0 && res[0].values.length > 0) {
+      return Number(res[0].values[0][0] || 0);
+    }
+  } catch {}
+  return 0;
+}
+
 export interface OiHistoryResult {
   oiChange1h: number | null;
   oiChange1hPct: number | null;
@@ -427,6 +420,23 @@ export function recordAndComputeOiHistory(
   }
 
   try {
+    // Check if the most recent OI sample came from a different source (source switch detection)
+    const latestRes = dbInstance.exec(
+      `SELECT source FROM btc_tide_oi_history ORDER BY timestamp DESC LIMIT 1;`
+    );
+    const prevSource =
+      latestRes.length > 0 && latestRes[0].values.length > 0 && latestRes[0].values[0][0] !== null
+        ? String(latestRes[0].values[0][0])
+        : null;
+
+    if (prevSource !== null && prevSource !== source) {
+      // Source switched: restart "building Xm/60m" for the new source by clearing prior streak samples
+      console.log(
+        `[BTC TIDE SQLITE] OI source switched (${prevSource} -> ${source}). Restarting 60m OI history window.`
+      );
+      dbInstance.run(`DELETE FROM btc_tide_oi_history;`);
+    }
+
     dbInstance.run(
       `INSERT OR REPLACE INTO btc_tide_oi_history (timestamp, open_interest, source) VALUES (?, ?, ?);`,
       [nowMs, openInterest, source]
@@ -442,7 +452,7 @@ export function recordAndComputeOiHistory(
       persistSqliteToDisk();
     }
 
-    // Check oldest timestamp for this source
+    // Check oldest timestamp strictly for this source
     const oldestRes = dbInstance.exec(
       `SELECT MIN(timestamp) FROM btc_tide_oi_history WHERE source = ?;`,
       [source]
@@ -464,7 +474,7 @@ export function recordAndComputeOiHistory(
       };
     }
 
-    // We have >= 60m of history: find the sample closest to (nowMs - 3600_000)
+    // We have >= 60m of history from the SAME source: find the sample closest to (nowMs - 3600_000)
     const targetTs = nowMs - 3600 * 1000;
     const sampleRes = dbInstance.exec(
       `SELECT open_interest FROM btc_tide_oi_history WHERE source = ? ORDER BY ABS(timestamp - ?) ASC LIMIT 1;`,

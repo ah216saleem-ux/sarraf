@@ -81,6 +81,8 @@ import {
   startTelegramSignals,
   stopTelegramSignals,
   startCommandTelegramWorker,
+  sendTelegramMessageWithRetry,
+  readCommandOutbox,
 } from './src/server/commandTelegramService.ts';
 import {
   startTelegramWorker,
@@ -186,7 +188,6 @@ import {
   getBackendSnapshot,
   getBackendHealthReport,
   registerSseClient,
-  simulateBinanceSpotDisconnectForQa,
 } from './src/server/btcTideBackendEngine.ts';
 import {
   initBtcTideSqlite,
@@ -1467,19 +1468,56 @@ app.get('/api/btc-tide/signals', btcTideRateLimiter, (_req, res) => {
   });
 });
 
-// 5. QA Failover Verification Hook (Kills primary Binance WS and verifies non-blanking failover)
-app.post('/api/btc-tide/qa-failover', btcTideRateLimiter, (_req, res) => {
-  const result = simulateBinanceSpotDisconnectForQa(8000);
+// 5. Admin-Only Real Telegram Test & Outbox Inspection Endpoint (/api/btc-tide/qa-failover removed from production)
+app.post('/api/btc-tide/admin/telegram-test', btcTideRateLimiter, async (req, res) => {
+  const tokenHeader =
+    (req.headers['x-admin-token'] as string | undefined)?.trim() ||
+    (req.headers['authorization'] as string | undefined)?.replace(/^Bearer\s+/i, '').trim() ||
+    (typeof req.body?.adminToken === 'string' ? req.body.adminToken.trim() : '');
+
+  const envAdminToken = (process.env.ADMIN_TOKEN || process.env.COMMAND_ADMIN_PASSWORD || '').trim();
+  const sessionToken = req.cookies?.sarraf_session;
+  const hasValidSession = Boolean(
+    sessionToken && activeSessions.has(sessionToken) && activeSessions.get(sessionToken)!.expiresAt > Date.now()
+  );
+
+  let isAuthorized = hasValidSession;
+  if (!isAuthorized && tokenHeader) {
+    if (envAdminToken && tokenHeader === envAdminToken) {
+      isAuthorized = true;
+    } else if (await verifyAdminPassword(tokenHeader)) {
+      isAuthorized = true;
+    }
+  }
+
+  if (!isAuthorized) {
+    return res.status(401).json({
+      success: false,
+      error: 'Unauthorized: Valid admin token (x-admin-token) or admin session required',
+    });
+  }
+
+  const snap = getBackendSnapshot();
+  const priceStr = snap.currentPrice ? `$${snap.currentPrice.toFixed(2)}` : '--';
+  const customText =
+    typeof req.body?.text === 'string' && req.body.text.trim()
+      ? req.body.text.trim()
+      : `🟠 BTC/USD ADMIN VERIFICATION TEST\nLive Price: ${priceStr} (${snap.activeSource})\nTimestamp: ${new Date().toISOString()}`;
+  const idempKey =
+    typeof req.body?.idempotencyKey === 'string' && req.body.idempotencyKey.trim()
+      ? req.body.idempotencyKey.trim()
+      : `admin_tg_test_${Date.now()}`;
+
+  const result = await sendTelegramMessageWithRetry(customText, 3, idempKey);
+  const outboxItem = readCommandOutbox().find((r) => r.id === result.outboxId || r.idempotencyKey === idempKey);
+
   return res.json({
-    success: true,
-    ...result,
-    snapshot: {
-      activeSource: getBackendSnapshot().activeSource,
-      currentPrice: getBackendSnapshot().currentPrice,
-      secondBinsCount: getBackendSnapshot().secondBins.length,
-      recentTradesCount: getBackendSnapshot().recentTrades.length,
-      depthBidsCount: getBackendSnapshot().depth.bids.length,
-    },
+    success: result.success,
+    telegram_message_id: result.messageId ?? outboxItem?.telegramMessageId ?? null,
+    outboxId: result.outboxId ?? outboxItem?.id ?? null,
+    outboxStatus: outboxItem?.status ?? null,
+    sentAt: outboxItem?.sentAt ?? null,
+    error: result.error ?? null,
   });
 });
 

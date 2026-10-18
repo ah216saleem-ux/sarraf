@@ -277,6 +277,7 @@ function connectBackendSse() {
           feedAges: data.feedAges || currentState.feedAges,
           feedSources: data.feedSources || currentState.feedSources,
           feedStale: data.feedStale || currentState.feedStale,
+          reconcile: data.reconcile || currentState.reconcile,
           geoBlockedNotice: data.geoBlockedNotice || null,
           bookTicker: data.bookTicker || currentState.bookTicker,
           depth: data.depth || currentState.depth,
