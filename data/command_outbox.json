@@ -1,0 +1,22 @@
+[
+  {
+    "id": "cmd_out_1792277431879_e288q",
+    "text": "❌ SL hit (-$10)",
+    "createdAt": "2026-10-17T22:50:31.879Z",
+    "status": "SENT",
+    "retryCount": 1,
+    "idempotencyKey": "cmd_SIG-1791560197216_CLOSED_SL",
+    "lastAttemptAt": "2026-10-17T22:50:31.879Z",
+    "sentAt": "2026-10-17T22:50:31.936Z"
+  },
+  {
+    "id": "cmd_out_1792277431937_qnbnh",
+    "text": "⏳ Cooldown 30 min. Next setup after analysis.",
+    "createdAt": "2026-10-17T22:50:31.937Z",
+    "status": "SENT",
+    "retryCount": 1,
+    "idempotencyKey": "cmd_SIG-1791560197216_COOLDOWN",
+    "lastAttemptAt": "2026-10-17T22:50:31.938Z",
+    "sentAt": "2026-10-17T22:50:31.994Z"
+  }
+]

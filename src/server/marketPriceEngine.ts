@@ -284,6 +284,68 @@ export function get5MinTickBuffer(): PersistedTickData[] {
   return tickBuffer5m;
 }
 
+export interface FlowMetrics60s {
+  buyRatio: number;
+  sellRatio: number;
+  buyTicks60s: number;
+  sellTicks60s: number;
+  flatTicks60s: number;
+  buyDelta60s: number;
+  sellDelta60s: number;
+  isWarmingUp: boolean;
+  ticksCount: number;
+}
+
+export function get60SecFlowMetrics(nowMs: number = Date.now()): FlowMetrics60s {
+  const buffer = get5MinTickBuffer();
+  const cutoff = nowMs - 60 * 1000;
+  const recent = buffer.filter((t) => t.lastReceivedAt >= cutoff);
+
+  let buyTicks = 0;
+  let sellTicks = 0;
+  let flatTicks = 0;
+  let buyDelta = 0;
+  let sellDelta = 0;
+
+  for (let i = 0; i < recent.length; i++) {
+    const t = recent[i];
+    const prevPrice = i > 0 ? recent[i - 1].price : t.price;
+    const priceDiff = Number((t.price - prevPrice).toFixed(2));
+    const dir = t.direction || (priceDiff > 0 ? 'UP' : priceDiff < 0 ? 'DOWN' : 'FLAT');
+    const absDelta = Math.abs(priceDiff);
+
+    if (dir === 'UP') {
+      buyTicks += 1;
+      buyDelta += absDelta > 0 ? absDelta : 0.05;
+    } else if (dir === 'DOWN') {
+      sellTicks += 1;
+      sellDelta += absDelta > 0 ? absDelta : 0.05;
+    } else {
+      flatTicks += 1;
+    }
+  }
+
+  const totalDirectional = buyTicks + sellTicks;
+  const totalTicks = recent.length;
+  // If buffer has fewer than 5 ticks, it is warming up after server start
+  const isWarmingUp = totalTicks < 5 || totalDirectional === 0;
+
+  const buyRatio = totalDirectional > 0 ? Number(((buyTicks / totalDirectional) * 100).toFixed(1)) : 50;
+  const sellRatio = totalDirectional > 0 ? Number((100 - buyRatio).toFixed(1)) : 50;
+
+  return {
+    buyRatio,
+    sellRatio,
+    buyTicks60s: buyTicks,
+    sellTicks60s: sellTicks,
+    flatTicks60s: flatTicks,
+    buyDelta60s: Number(buyDelta.toFixed(2)),
+    sellDelta60s: Number(sellDelta.toFixed(2)),
+    isWarmingUp,
+    ticksCount: totalTicks,
+  };
+}
+
 // Record an incoming real tick from feed
 export function recordLiveTick(tick: {
   symbol?: string;

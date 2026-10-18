@@ -392,10 +392,8 @@ class CommandFeedStore {
           if (store.H4?.length) this.candles.H4 = mapCandles(store.H4);
           if (store.D1?.length) this.candles.D1 = mapCandles(store.D1);
 
-          // Build M1 and M5 from M15 seed if not provided
-          if (!this.candles.M1.length && this.candles.M15.length) {
-            this.buildLowerTfSeedsFromM15(this.candles.M15);
-          }
+          // Aggregate M5 from real M1 candles only if M5 store is empty, and seed minute flow buckets from real M1
+          this.seedLowerTfAndMinuteFlowsFromRealM1();
 
           this.isSeeded = true;
           this.lastCandleTimestamp = Date.now();
@@ -466,56 +464,39 @@ class CommandFeedStore {
     }
   }
 
-  private buildLowerTfSeedsFromM15(m15List: Candle[]) {
-    const recent = m15List.slice(-16);
-    const m5Candles: Candle[] = [];
-    const m1Candles: Candle[] = [];
-
-    for (const c of recent) {
-      // 3 M5 candles per M15
-      for (let i = 0; i < 3; i++) {
-        const subTime = c.time + i * 5 * 60 * 1000;
-        const progress = (i + 1) / 3;
-        const subOpen = i === 0 ? c.open : c.open + (c.close - c.open) * (i / 3);
-        const subClose = c.open + (c.close - c.open) * progress;
-        m5Candles.push({
-          time: subTime,
-          openTimeStr: new Date(subTime).toISOString(),
-          open: Number(subOpen.toFixed(2)),
-          high: Number(Math.max(subOpen, subClose, c.high - (1 - progress) * 0.4).toFixed(2)),
-          low: Number(Math.min(subOpen, subClose, c.low + (1 - progress) * 0.4).toFixed(2)),
-          close: Number(subClose.toFixed(2)),
-          volume: Math.max(1, Math.round(c.volume / 3)),
+  private seedLowerTfAndMinuteFlowsFromRealM1() {
+    if (!this.candles.M5.length && this.candles.M1.length > 0) {
+      const m5Buckets = new Map<number, Candle[]>();
+      for (const bar of this.candles.M1) {
+        const floored = Math.floor(bar.time / (5 * 60 * 1000)) * (5 * 60 * 1000);
+        if (!m5Buckets.has(floored)) m5Buckets.set(floored, []);
+        m5Buckets.get(floored)!.push(bar);
+      }
+      const aggregatedM5: Candle[] = [];
+      for (const [bucketTime, bars] of m5Buckets.entries()) {
+        aggregatedM5.push({
+          time: bucketTime,
+          openTimeStr: new Date(bucketTime).toISOString(),
+          open: bars[0].open,
+          high: Math.max(...bars.map((b) => b.high)),
+          low: Math.min(...bars.map((b) => b.low)),
+          close: bars[bars.length - 1].close,
+          volume: bars.reduce((sum, b) => sum + b.volume, 0),
+          isClosed: bars.length >= 5,
         });
       }
-
-      // 15 M1 candles per M15
-      for (let j = 0; j < 15; j++) {
-        const subTime = c.time + j * 60 * 1000;
-        const prog = (j + 1) / 15;
-        const subOpen = j === 0 ? c.open : c.open + (c.close - c.open) * (j / 15);
-        const subClose = c.open + (c.close - c.open) * prog;
-        m1Candles.push({
-          time: subTime,
-          openTimeStr: new Date(subTime).toISOString(),
-          open: Number(subOpen.toFixed(2)),
-          high: Number(Math.max(subOpen, subClose, subOpen + 0.2).toFixed(2)),
-          low: Number(Math.min(subOpen, subClose, subOpen - 0.2).toFixed(2)),
-          close: Number(subClose.toFixed(2)),
-          volume: Math.max(1, Math.round(c.volume / 15)),
-        });
-      }
+      this.candles.M5 = aggregatedM5.sort((a, b) => a.time - b.time);
     }
 
-    this.candles.M5 = m5Candles;
-    this.candles.M1 = m1Candles;
-
-    // Seed 40-60 minute flow buckets from historical M1 candles so histogram has 40-60 thin bars
-    if (this.minuteFlows.length < 40 && m1Candles.length > 0) {
-      const recentM1 = m1Candles.slice(-60);
+    // Seed 40-60 minute flow buckets from historical real M1 candles so histogram has 40-60 thin bars
+    if (this.minuteFlows.length < 40 && this.candles.M1.length > 0) {
+      const recentM1 = this.candles.M1.slice(-60);
       const seededFlows: MinuteFlowBucket[] = [];
       for (const m of recentM1) {
-        const netTicks = m.close >= m.open ? Math.max(1, Math.round((m.close - m.open) * 15)) : -Math.max(1, Math.round((m.open - m.close) * 15));
+        const netTicks =
+          m.close >= m.open
+            ? Math.max(1, Math.round((m.close - m.open) * 15))
+            : -Math.max(1, Math.round((m.open - m.close) * 15));
         const buyTicks = netTicks > 0 ? Math.abs(netTicks) + 4 : 4;
         const sellTicks = netTicks < 0 ? Math.abs(netTicks) + 4 : 4;
         const impact = Math.abs(m.close - m.open) / Math.max(1, buyTicks + sellTicks);
@@ -806,19 +787,19 @@ class CommandFeedStore {
     if (!this.marketOpen) {
       targetStatus = 'MARKET_CLOSED';
       targetBadgeText = 'CLOSED';
-    } else if (msgAgeSec <= 10) {
-      // LIVE when message arrived in last 10s (or LIVE (POLLING) if fallback polling)
+    } else if (msgAgeSec <= 10 && tickAgeSec <= 10) {
+      // LIVE when message and tick both arrived in last 10s
       targetStatus = 'LIVE';
       targetBadgeText = this.isPollingFallback ? 'LIVE (POLLING)' : 'LIVE';
-    } else if (this.isPollingFallback && msgAgeSec <= 15) {
-      // While polling works, the UI must show LIVE (POLLING), not RECONNECTING
+    } else if (this.isPollingFallback && msgAgeSec <= 15 && tickAgeSec <= 10) {
+      // While polling works with fresh ticks, the UI shows LIVE (POLLING), not RECONNECTING
       targetStatus = 'LIVE';
       targetBadgeText = 'LIVE (POLLING)';
     } else if (this.isReconnecting) {
       // RECONNECTING only while a reconnect is actually in progress
       targetStatus = 'RECONNECTING';
       targetBadgeText = 'RECONNECTING';
-    } else if (msgAgeSec <= 20) {
+    } else if (msgAgeSec <= 20 || tickAgeSec <= 20) {
       targetStatus = 'STALE';
       targetBadgeText = `STALE ${tickAgeSec < 999 ? tickAgeSec : msgAgeSec}s`;
     } else {

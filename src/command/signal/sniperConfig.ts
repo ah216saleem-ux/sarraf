@@ -23,6 +23,7 @@ export interface SniperConfig {
   w1d1SwingLookback: number;       // Bars to lookback for daily swing high/low
   h4SweepTolerance: number;        // Tolerance in dollars to confirm H4 liquidity sweep
   h1DisplacementMin: number;       // Minimum H1 move size in dollars for BOS/CHoCH
+  h1ObLookback: number;            // H1 candles lookback window for unmitigated opposing Order Blocks (100 bars)
   m30FvgMinSize: number;           // Minimum M30 FVG pocket in dollars ($0.80)
   m15BodyRatioMin: number;         // Minimum M15 body-to-range ratio (50%)
   m5RetestBuffer: number;          // Retest proximity buffer in dollars ($2.50)
@@ -52,6 +53,7 @@ export const SNIPER_CONFIG: SniperConfig = {
   w1d1SwingLookback: 20,
   h4SweepTolerance: 3.0,
   h1DisplacementMin: 2.0,
+  h1ObLookback: 100,
   m30FvgMinSize: 0.8,
   m15BodyRatioMin: 0.5,
   m5RetestBuffer: 2.5,

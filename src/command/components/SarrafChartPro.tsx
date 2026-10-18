@@ -68,8 +68,8 @@ export const SarrafChartPro: React.FC<SarrafChartProProps> = React.memo(({
   // Timeframes list
   const timeframes: Timeframe[] = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1'];
 
-  // Check if history is still building (< 60 candles)
-  const isBuildingHistory = candles.length < 60;
+  // Check if history is still empty (0 candles)
+  const isBuildingHistory = candles.length === 0;
 
   // Merge latest tick price on the forming candle without full-array cloning
   const displayCandles = useMemo(() => {

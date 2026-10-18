@@ -28,6 +28,7 @@ import {
   Calendar,
   FileText,
   Compass,
+  Waves,
 } from 'lucide-react';
 import {
   formatNewSignalMessage,
@@ -41,6 +42,7 @@ import { GoLiveChecklistTab } from './GoLiveChecklistTab';
 import { SarrafCommandView } from '../command/SarrafCommandView';
 import { SarrafAtlasView } from '../atlas/SarrafAtlasView';
 import { SpyOptionsView } from '../spy/SpyOptionsView';
+import { BtcTideView } from '../btcTide/BtcTideView';
 import { useCommandFeed } from '../command/data/useCommandFeed';
 
 const DashboardPriceHeader: React.FC<{ fallbackPrice: number | null; fallbackStatus: string }> = React.memo(
@@ -97,6 +99,7 @@ export const DashboardView: React.FC = () => {
   const [sarrafSection, setSarrafSection] = useState<'COMMAND' | 'DECK' | 'ATLAS'>('COMMAND');
   const [activeMainTab, setActiveMainTab] = useState<
     | 'OVERVIEW'
+    | 'BTC_TIDE'
     | 'TELEGRAM'
     | 'SPY'
     | 'NEWS'
@@ -533,10 +536,10 @@ export const DashboardView: React.FC = () => {
           </div>
 
           {/* Navigation Tabs */}
-          <div className="flex items-center gap-1 bg-black/60 p-1 rounded-xl border border-white/10 font-mono text-xs overflow-x-auto max-w-full">
+          <div className="flex items-center gap-1 bg-black/60 p-1 rounded-xl border border-white/10 font-mono text-xs overflow-x-auto max-w-full w-full lg:w-auto">
             <button
               onClick={() => setActiveMainTab('OVERVIEW')}
-              className={`px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+              className={`px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'OVERVIEW'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
                   : 'text-neutral-400 hover:text-white'
@@ -545,92 +548,119 @@ export const DashboardView: React.FC = () => {
               SARRAF
             </button>
             <button
+              onClick={() => setActiveMainTab('BTC_TIDE')}
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
+                activeMainTab === 'BTC_TIDE'
+                  ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+            >
+              <Waves className={`w-3.5 h-3.5 shrink-0 ${activeMainTab === 'BTC_TIDE' ? 'text-black' : 'text-[#FFD97A]'}`} />
+              <span>BTC TIDE</span>
+            </button>
+            <button
               onClick={() => setActiveMainTab('TELEGRAM')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'TELEGRAM'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              <Send className="w-3.5 h-3.5" />
+              <Send className="w-3.5 h-3.5 shrink-0" />
               <span>TELEGRAM</span>
             </button>
             <button
               ref={spyNavTabRef}
               onClick={() => setActiveMainTab('SPY')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-all cursor-pointer shrink-0 ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'SPY'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              <TrendingUp className="w-3.5 h-3.5" />
+              <TrendingUp className="w-3.5 h-3.5 shrink-0" />
               <span>SPY</span>
             </button>
             <button
               onClick={() => setActiveMainTab('NEWS')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'NEWS'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              <Radio className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+              <Radio
+                className={`w-3.5 h-3.5 shrink-0 ${
+                  activeMainTab === 'NEWS' ? 'text-black' : 'text-amber-400 animate-pulse'
+                }`}
+              />
               <span>NEWS</span>
             </button>
             <button
               onClick={() => setActiveMainTab('GOOGLE_CHAT')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'GOOGLE_CHAT'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              <MessageSquare className="w-3.5 h-3.5 text-blue-400" />
+              <MessageSquare
+                className={`w-3.5 h-3.5 shrink-0 ${
+                  activeMainTab === 'GOOGLE_CHAT' ? 'text-black' : 'text-blue-400'
+                }`}
+              />
               <span>GOOGLE CHAT</span>
             </button>
             <button
               onClick={() => setActiveMainTab('AI_CHAT')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'AI_CHAT'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              <Bot className="w-3.5 h-3.5" />
+              <Bot className="w-3.5 h-3.5 shrink-0" />
               <span>AI</span>
             </button>
             <button
               onClick={() => setActiveMainTab('SETTINGS')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'SETTINGS'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              <Sliders className="w-3.5 h-3.5 text-[#FFD97A]" />
+              <Sliders
+                className={`w-3.5 h-3.5 shrink-0 ${
+                  activeMainTab === 'SETTINGS' ? 'text-black' : 'text-[#FFD97A]'
+                }`}
+              />
               <span>SETTINGS</span>
             </button>
             <button
               onClick={() => setActiveMainTab('PERFORMANCE')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'PERFORMANCE'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              <BarChart2 className="w-3.5 h-3.5" />
+              <BarChart2 className="w-3.5 h-3.5 shrink-0" />
               <span>PERF</span>
             </button>
             <button
               onClick={() => setActiveMainTab('CHECKLIST')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'CHECKLIST'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              <ShieldCheck
+                className={`w-3.5 h-3.5 shrink-0 ${
+                  activeMainTab === 'CHECKLIST' ? 'text-black' : 'text-emerald-400'
+                }`}
+              />
               <span>GO-LIVE</span>
             </button>
             <button
@@ -638,13 +668,13 @@ export const DashboardView: React.FC = () => {
                 setActiveMainTab('TESTS');
                 handleRunAllTests();
               }}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg transition-all cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'TESTS'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              <CheckCircle2 className="w-3.5 h-3.5" />
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
               <span>TESTS</span>
             </button>
           </div>
@@ -721,49 +751,61 @@ export const DashboardView: React.FC = () => {
         {activeMainTab === 'OVERVIEW' && (
           <div className="space-y-4">
             {/* Section Switcher inside Sarraf Tab */}
-            <div className="flex items-center justify-between border-b border-white/10 pb-3">
-              <div className="flex items-center gap-2 font-mono text-xs select-none">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3 gap-2">
+              <div className="flex items-center gap-2 font-mono text-xs select-none overflow-x-auto max-w-full w-full sm:w-auto pb-1 sm:pb-0">
                 <button
                   onClick={() => setSarrafSection('COMMAND')}
-                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                  className={`flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                     sarrafSection === 'COMMAND'
                       ? 'bg-[#E8B84A] text-black font-extrabold border-[#E8B84A] shadow-[0_0_15px_rgba(232,184,74,0.35)]'
-                      : 'bg-black/60 text-neutral-400 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
+                      : 'bg-black/60 text-neutral-300 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
                   }`}
                 >
-                  <Zap className="w-3.5 h-3.5" />
+                  <Zap className="w-3.5 h-3.5 shrink-0" />
                   <span>SARRAF COMMAND</span>
-                  <span className="text-[9px] px-1 py-0.2 rounded bg-black/40 text-black font-bold">
+                  <span
+                    className={`text-[9px] px-1.5 py-0.5 rounded font-bold tracking-wider ${
+                      sarrafSection === 'COMMAND'
+                        ? 'bg-black/85 text-[#FFD97A] border border-black/40'
+                        : 'bg-[#E8B84A]/15 text-[#FFD97A] border border-[#E8B84A]/30'
+                    }`}
+                  >
                     LIVE
                   </span>
                 </button>
                 <button
                   onClick={() => setSarrafSection('DECK')}
-                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                  className={`flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                     sarrafSection === 'DECK'
                       ? 'bg-[#E8B84A] text-black font-extrabold border-[#E8B84A] shadow-[0_0_15px_rgba(232,184,74,0.35)]'
-                      : 'bg-black/60 text-neutral-400 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
+                      : 'bg-black/60 text-neutral-300 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
                   }`}
                 >
                   <span>TRADING DECK</span>
                 </button>
                 <button
                   onClick={() => setSarrafSection('ATLAS')}
-                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                  className={`flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                     sarrafSection === 'ATLAS'
                       ? 'bg-[#E8B84A] text-black font-extrabold border-[#E8B84A] shadow-[0_0_15px_rgba(232,184,74,0.35)]'
-                      : 'bg-black/60 text-neutral-400 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
+                      : 'bg-black/60 text-neutral-300 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
                   }`}
                 >
-                  <Compass className="w-3.5 h-3.5" />
+                  <Compass className="w-3.5 h-3.5 shrink-0" />
                   <span>SARRAF ATLAS</span>
-                  <span className="text-[9px] px-1 py-0.2 rounded bg-black/40 text-black font-bold">
+                  <span
+                    className={`text-[9px] px-1.5 py-0.5 rounded font-bold tracking-wider ${
+                      sarrafSection === 'ATLAS'
+                        ? 'bg-black/85 text-[#FFD97A] border border-black/40'
+                        : 'bg-[#E8B84A]/15 text-[#FFD97A] border border-[#E8B84A]/30'
+                    }`}
+                  >
                     ZONES
                   </span>
                 </button>
               </div>
 
-              <span className="text-[10px] font-mono text-neutral-500 hidden sm:inline">
+              <span className="text-[10px] font-mono text-neutral-500 hidden sm:inline shrink-0">
                 SECTION: {sarrafSection === 'COMMAND' ? 'SARRAF COMMAND' : sarrafSection === 'DECK' ? 'TRADING DECK' : 'SARRAF ATLAS'}
               </span>
             </div>
@@ -1297,6 +1339,9 @@ export const DashboardView: React.FC = () => {
             )}
           </div>
         )}
+
+        {/* TAB: BTC TIDE (Real-time Flow & Cumulative Delta) */}
+        {activeMainTab === 'BTC_TIDE' && <BtcTideView />}
 
         {/* TAB 2: TELEGRAM COMMAND CENTER (Phase 4 Centerpiece) */}
         {activeMainTab === 'TELEGRAM' && (

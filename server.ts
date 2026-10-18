@@ -28,6 +28,7 @@ import {
   evaluateMarketPriceStatus,
   getMarketSchedule,
   get5MinTickBuffer,
+  get60SecFlowMetrics,
   LAST_TICK_FILE,
 } from './src/server/marketPriceEngine.ts';
 import {
@@ -79,6 +80,7 @@ import {
   saveTelegramSettings,
   startTelegramSignals,
   stopTelegramSignals,
+  startCommandTelegramWorker,
 } from './src/server/commandTelegramService.ts';
 import {
   startTelegramWorker,
@@ -178,6 +180,18 @@ import {
   getWhitelistedEmails,
 } from './src/server/googleChatService.ts';
 import { runGoogleChatHardeningTests } from './src/server/googleChatHardenTests.ts';
+import {
+  initBtcTideBackend,
+  shutdownBtcTideBackend,
+  getBackendSnapshot,
+  registerSseClient,
+} from './src/server/btcTideBackendEngine.ts';
+import {
+  initBtcTideSqlite,
+  getActiveTradeFromSqlite,
+  getClosedTradesFromSqlite,
+  computeSqliteStats,
+} from './src/server/btcTideSqliteDatabase.ts';
 import {
   initSpyFeed,
   getSpyFeedState,
@@ -656,6 +670,9 @@ async function fetchBiquoteTick() {
       isNewsLockActive(now)
     );
 
+    // Compute real 60-second buy/sell flow ratio and price delta from rolling tick buffer
+    const flow60s = get60SecFlowMetrics(now);
+
     // Feed tick into the Phase 4 Ahmed Sniper Signal Engine
     processCommandSignalTick(
       latestLiveQuote.price,
@@ -663,11 +680,14 @@ async function fetchBiquoteTick() {
       latestLiveQuote.ask,
       latestLiveQuote.spread,
       marketEval.isLive,
-      marketEval.isLive ? 'LIVE' : marketEval.status === 'FEED_STALE' ? 'RECONNECTING' : 'OFFLINE',
-      recordedTick.direction === 'UP' ? 58 : recordedTick.direction === 'DOWN' ? 42 : 50,
-      recordedTick.direction === 'DOWN' ? 58 : recordedTick.direction === 'UP' ? 42 : 50,
-      recordedTick.direction === 'UP' ? 1 : 0,
-      recordedTick.direction === 'DOWN' ? 1 : 0
+      marketEval.isLive && effectiveAgeSeconds <= 10 ? 'LIVE' : marketEval.status === 'FEED_STALE' ? 'RECONNECTING' : 'OFFLINE',
+      flow60s.buyRatio,
+      flow60s.sellRatio,
+      flow60s.buyDelta60s,
+      flow60s.sellDelta60s,
+      effectiveAgeSeconds,
+      flow60s.isWarmingUp,
+      flow60s.ticksCount
     );
 
     // Broadcast tick immediately to SARRAF COMMAND clients
@@ -830,12 +850,24 @@ app.get('/api/command/snapshot', (_req, res) => {
   const schedule = getMarketSchedule();
   const ticks5m = get5MinTickBuffer();
   const now = Date.now();
-  const lastTickAgeMs = lastUpstreamTickAt > 0 ? now - lastUpstreamTickAt : 0;
+  const lastTickAgeMs = lastUpstreamTickAt > 0 ? now - lastUpstreamTickAt : (now - (latestLiveQuote?.lastReceivedAt || now));
   const upstreamInfo = getUpstreamStatusInfo();
+  const marketEval = evaluateMarketPriceStatus(new Date(now));
+
+  // Max staleness limit for polling data: max 10s for LIVE
+  const effectiveStatus = !schedule.isOpen
+    ? 'MARKET_CLOSED'
+    : (marketEval.isLive && lastTickAgeMs <= 10000 && upstreamInfo.upstream === 'up')
+    ? 'LIVE'
+    : lastTickAgeMs <= 60000
+    ? 'STALE'
+    : 'OFFLINE';
 
   const payload = {
-    status: latestLiveQuote?.status || (schedule.isOpen ? 'LIVE' : 'MARKET_CLOSED'),
     ...(latestLiveQuote || {}),
+    status: effectiveStatus,
+    isLive: effectiveStatus === 'LIVE',
+    quoteAgeSeconds: Math.floor(lastTickAgeMs / 1000),
     ticks5m,
     marketOpen: schedule.isOpen,
     upstream: upstreamInfo.upstream,
@@ -1299,6 +1331,422 @@ app.get('/api/spy/history', (_req, res) => {
     history,
     stats,
   });
+});
+
+// -------------------------------------------------------------
+// BTC TIDE - LIVE EXCHANGE FEED SNAPSHOT & CACHE
+// -------------------------------------------------------------
+let btcTideCache: { timestamp: number; data: any } | null = null;
+
+app.get('/api/btc-tide/snapshot', async (_req, res) => {
+  const now = Date.now();
+  if (btcTideCache && now - btcTideCache.timestamp < 2500) {
+    return res.json({ success: true, ...btcTideCache.data, cached: true });
+  }
+
+  try {
+    const [tickerRes, klinesRes] = await Promise.all([
+      fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT'),
+      fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=30'),
+    ]);
+
+    if (!tickerRes.ok) {
+      throw new Error(`Binance ticker HTTP ${tickerRes.status}`);
+    }
+
+    const ticker = await tickerRes.json();
+    const rawKlines = klinesRes.ok ? await klinesRes.json() : [];
+
+    let runningCvd = 0;
+    const klines = Array.isArray(rawKlines)
+      ? rawKlines.map((k: any) => {
+          const vol = parseFloat(k[5]);
+          const takerBuy = parseFloat(k[9]);
+          const sellVol = Math.max(0, vol - takerBuy);
+          const delta = takerBuy - sellVol;
+          runningCvd += delta;
+          return {
+            time: Number(k[0]),
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+            volume: vol,
+            buyVolume: takerBuy,
+            sellVolume: sellVol,
+            cvd: Number(runningCvd.toFixed(4)),
+          };
+        })
+      : [];
+
+    const result = {
+      success: true,
+      symbol: 'BTCUSDT',
+      price: parseFloat(ticker.lastPrice),
+      high24h: parseFloat(ticker.highPrice),
+      low24h: parseFloat(ticker.lowPrice),
+      changePercent24h: parseFloat(ticker.priceChangePercent),
+      volumeBtc24h: parseFloat(ticker.volume),
+      volumeUsdt24h: parseFloat(ticker.quoteVolume),
+      klines,
+      timestamp: now,
+      source: 'binance',
+    };
+
+    btcTideCache = { timestamp: now, data: result };
+    return res.json(result);
+  } catch (err: any) {
+    if (btcTideCache) {
+      return res.json({ success: true, ...btcTideCache.data, stale: true, cacheAgeMs: now - btcTideCache.timestamp });
+    }
+    return res.status(502).json({ success: false, error: err.message, status: 'OFFLINE' });
+  }
+});
+
+// -------------------------------------------------------------
+// BTC TIDE - 24/7 NODE.JS BACKEND ENGINE & SQLITE DATABASE API
+// -------------------------------------------------------------
+const btcTideRateMap = new Map<string, { count: number; resetAt: number }>();
+function btcTideRateLimiter(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const entry = btcTideRateMap.get(ip) || { count: 0, resetAt: now + 60000 };
+  if (now > entry.resetAt) {
+    entry.count = 0;
+    entry.resetAt = now + 60000;
+  }
+  entry.count += 1;
+  btcTideRateMap.set(ip, entry);
+  if (entry.count > 180) {
+    return res.status(429).json({ success: false, error: 'Rate limit exceeded (180 requests/min)' });
+  }
+  next();
+}
+
+// 1. Server-Sent Events (SSE) Live Feed Stream for tab
+app.get('/api/btc-tide/live-stream', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders?.();
+
+  const unregister = registerSseClient(res);
+  req.on('close', () => {
+    unregister();
+  });
+});
+
+// 2. Health Endpoint
+app.get('/api/btc-tide/health', (_req, res) => {
+  const snap = getBackendSnapshot();
+  const stats = computeSqliteStats();
+  const uptimeSeconds = Math.floor(process.uptime());
+  const mem = process.memoryUsage();
+
+  res.json({
+    status: snap.status === 'LIVE' ? 'HEALTHY' : snap.status === 'STALE' ? 'DEGRADED' : 'DOWN',
+    activeSource: snap.activeSource,
+    feedStatus: snap.status,
+    messageAgeMs: snap.messageAgeMs,
+    currentPrice: snap.currentPrice,
+    ticksSeen: snap.session.ticksSeen,
+    decisionScore: snap.decision.totalScore,
+    activeTrade: snap.activeTrade
+      ? {
+          id: snap.activeTrade.id,
+          side: snap.activeTrade.side,
+          entryPrice: snap.activeTrade.entryPrice,
+          currentR: snap.activeTrade.currentR,
+          status: snap.activeTrade.status,
+        }
+      : null,
+    sqliteStats: stats,
+    uptimeSeconds,
+    memoryMb: {
+      rss: Math.round(mem.rss / 1024 / 1024),
+      heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
+    },
+    timestamp: Date.now(),
+  });
+});
+
+// 3. State Snapshot Endpoint
+app.get('/api/btc-tide/state', btcTideRateLimiter, (_req, res) => {
+  const snapshot = getBackendSnapshot();
+  return res.json({ success: true, ...snapshot });
+});
+
+// 4. Signals and Outcomes from SQLite Database
+app.get('/api/btc-tide/signals', btcTideRateLimiter, (_req, res) => {
+  const activeTrade = getActiveTradeFromSqlite();
+  const closedTrades = getClosedTradesFromSqlite(300);
+  const stats = computeSqliteStats();
+  return res.json({
+    success: true,
+    activeTrade,
+    closedTrades,
+    stats,
+    databaseType: 'SQLite (sql.js / data/btc_tide.db)',
+  });
+});
+
+// -------------------------------------------------------------
+// BTC TIDE - VENUES TABLE PROXY (OKX, Gate.io, Bybit, MEXC, Bitget, KuCoin, Hyperliquid, Binance)
+// -------------------------------------------------------------
+interface VenueTicker {
+  venue: string;
+  price: number | null;
+  volume24h: number | null; // in BTC
+  volSharePct: number | null;
+  diffVsMedian: number | null;
+  diffVsMedianBps: number | null;
+  status: 'ONLINE' | 'OFFLINE';
+}
+
+let venuesCache: { timestamp: number; data: any } | null = null;
+
+app.get('/api/venues', async (_req, res) => {
+  const now = Date.now();
+  if (venuesCache && now - venuesCache.timestamp < 2000) {
+    return res.json({ success: true, ...venuesCache.data, cached: true });
+  }
+
+  const fetchWithTimeout = async (url: string, options: any = {}, timeoutMs = 2600) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', ...(options.headers || {}) },
+      });
+      clearTimeout(timeout);
+      if (!resp.ok) return null;
+      return await resp.json();
+    } catch {
+      clearTimeout(timeout);
+      return null;
+    }
+  };
+
+  const [binanceData, okxData, gateData, bybitData, mexcData, bitgetData, kucoinData, hlData] =
+    await Promise.all([
+      fetchWithTimeout('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT'),
+      fetchWithTimeout('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT'),
+      fetchWithTimeout('https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDT'),
+      fetchWithTimeout('https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT'),
+      fetchWithTimeout('https://api.mexc.com/api/v3/ticker/24hr?symbol=BTCUSDT'),
+      fetchWithTimeout('https://api.bitget.com/api/v2/spot/market/tickers?symbol=BTCUSDT'),
+      fetchWithTimeout('https://api.kucoin.com/api/v1/market/stats?symbol=BTC-USDT'),
+      fetchWithTimeout('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'allMids' }),
+      }),
+    ]);
+
+  const rawVenues: Array<{ venue: string; price: number | null; volume24h: number | null }> = [
+    {
+      venue: 'Binance',
+      price: binanceData ? parseFloat(binanceData.lastPrice) : null,
+      volume24h: binanceData ? parseFloat(binanceData.volume) : null,
+    },
+    {
+      venue: 'OKX',
+      price: okxData?.data?.[0]?.last ? parseFloat(okxData.data[0].last) : null,
+      volume24h: okxData?.data?.[0]?.vol24h ? parseFloat(okxData.data[0].vol24h) : null,
+    },
+    {
+      venue: 'Gate.io',
+      price: gateData?.[0]?.last ? parseFloat(gateData[0].last) : null,
+      volume24h: gateData?.[0]?.base_volume ? parseFloat(gateData[0].base_volume) : null,
+    },
+    {
+      venue: 'Bybit',
+      price: bybitData?.result?.list?.[0]?.lastPrice ? parseFloat(bybitData.result.list[0].lastPrice) : null,
+      volume24h: bybitData?.result?.list?.[0]?.volume24h ? parseFloat(bybitData.result.list[0].volume24h) : null,
+    },
+    {
+      venue: 'MEXC',
+      price: mexcData ? parseFloat(mexcData.lastPrice) : null,
+      volume24h: mexcData ? parseFloat(mexcData.volume) : null,
+    },
+    {
+      venue: 'Bitget',
+      price: bitgetData?.data?.[0]?.lastPr ? parseFloat(bitgetData.data[0].lastPr) : null,
+      volume24h: bitgetData?.data?.[0]?.baseVolume ? parseFloat(bitgetData.data[0].baseVolume) : null,
+    },
+    {
+      venue: 'KuCoin',
+      price: kucoinData?.data?.last ? parseFloat(kucoinData.data.last) : null,
+      volume24h: kucoinData?.data?.vol ? parseFloat(kucoinData.data.vol) : null,
+    },
+    {
+      venue: 'Hyperliquid',
+      price: hlData?.['BTC'] ? parseFloat(hlData['BTC']) : null,
+      volume24h: null, // Hyperliquid allMids does not return 24h spot volume
+    },
+  ];
+
+  // Calculate valid prices and median
+  const validPrices: number[] = [];
+  let totalVol = 0;
+
+  for (const v of rawVenues) {
+    if (v.price !== null && Number.isFinite(v.price) && v.price > 0) {
+      validPrices.push(v.price);
+    }
+    if (v.volume24h !== null && Number.isFinite(v.volume24h) && v.volume24h > 0) {
+      totalVol += v.volume24h;
+    }
+  }
+
+  let medianPrice: number | null = null;
+  if (validPrices.length > 0) {
+    const sorted = [...validPrices].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    medianPrice = sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  // Calculate highest & lowest venue
+  let highestVenue: { venue: string; price: number } | null = null;
+  let lowestVenue: { venue: string; price: number } | null = null;
+
+  for (const v of rawVenues) {
+    if (v.price !== null && Number.isFinite(v.price) && v.price > 0) {
+      if (!highestVenue || v.price > highestVenue.price) {
+        highestVenue = { venue: v.venue, price: v.price };
+      }
+      if (!lowestVenue || v.price < lowestVenue.price) {
+        lowestVenue = { venue: v.venue, price: v.price };
+      }
+    }
+  }
+
+  const spread = highestVenue && lowestVenue ? Number((highestVenue.price - lowestVenue.price).toFixed(2)) : null;
+
+  // Build final venues list with volShare and diffVsMedian
+  const venues: VenueTicker[] = rawVenues.map((v) => {
+    const price = v.price !== null && Number.isFinite(v.price) && v.price > 0 ? Number(v.price.toFixed(2)) : null;
+    const volume24h = v.volume24h !== null && Number.isFinite(v.volume24h) && v.volume24h > 0 ? Number(v.volume24h.toFixed(2)) : null;
+    const volSharePct = volume24h !== null && totalVol > 0 ? Number(((volume24h / totalVol) * 100).toFixed(1)) : null;
+
+    let diffVsMedian: number | null = null;
+    let diffVsMedianBps: number | null = null;
+    if (price !== null && medianPrice !== null && medianPrice > 0) {
+      diffVsMedian = Number((price - medianPrice).toFixed(2));
+      diffVsMedianBps = Number(((diffVsMedian / medianPrice) * 10000).toFixed(1));
+    }
+
+    return {
+      venue: v.venue,
+      price,
+      volume24h,
+      volSharePct,
+      diffVsMedian,
+      diffVsMedianBps,
+      status: price !== null ? 'ONLINE' : 'OFFLINE',
+    };
+  });
+
+  const responseData = {
+    venues,
+    summary: {
+      medianPrice: medianPrice !== null ? Number(medianPrice.toFixed(2)) : null,
+      spread,
+      highestVenue: highestVenue ? highestVenue.venue : null,
+      lowestVenue: lowestVenue ? lowestVenue.venue : null,
+      totalVolumeBtc: Number(totalVol.toFixed(2)),
+      validCount: validPrices.length,
+      totalCount: rawVenues.length,
+    },
+    timestamp: now,
+  };
+
+  venuesCache = { timestamp: now, data: responseData };
+  return res.json({ success: true, ...responseData });
+});
+
+// -------------------------------------------------------------
+// BTC TIDE - BINANCE FUTURES / PERP DERIVATIVES PROXY
+// -------------------------------------------------------------
+const oiHistory: Array<{ timestamp: number; oi: number }> = [];
+
+let futuresCache: { timestamp: number; data: any } | null = null;
+
+app.get('/api/binance/futures', async (_req, res) => {
+  const now = Date.now();
+  if (futuresCache && now - futuresCache.timestamp < 3000) {
+    return res.json({ success: true, ...futuresCache.data, cached: true });
+  }
+
+  try {
+    const [oiRes, lsRes, premRes] = await Promise.all([
+      fetch('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT').then((r) => r.json()).catch(() => null),
+      fetch('https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=BTCUSDT&period=5m&limit=1').then((r) => r.json()).catch(() => null),
+      fetch('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT').then((r) => r.json()).catch(() => null),
+    ]);
+
+    const oiVal = oiRes?.openInterest ? parseFloat(oiRes.openInterest) : null;
+    const markPrice = premRes?.markPrice ? parseFloat(premRes.markPrice) : null;
+    const lastFundingRate = premRes?.lastFundingRate ? parseFloat(premRes.lastFundingRate) : null;
+    const nextFundingTime = premRes?.nextFundingTime ? Number(premRes.nextFundingTime) : null;
+
+    const lsItem = Array.isArray(lsRes) && lsRes.length > 0 ? lsRes[0] : null;
+    const longShortRatio = lsItem?.longShortRatio ? parseFloat(lsItem.longShortRatio) : null;
+    const longAccount = lsItem?.longAccount ? parseFloat(lsItem.longAccount) : null;
+    const shortAccount = lsItem?.shortAccount ? parseFloat(lsItem.shortAccount) : null;
+
+    // Record OI history for 1-hour rolling change computation
+    if (oiVal !== null && Number.isFinite(oiVal)) {
+      oiHistory.push({ timestamp: now, oi: oiVal });
+      // Prune entries older than 65 minutes
+      const cutoff = now - 65 * 60 * 1000;
+      while (oiHistory.length > 0 && oiHistory[0].timestamp < cutoff) {
+        oiHistory.shift();
+      }
+    }
+
+    // Compute OI change over the last hour (between 50m and 70m ago, or earliest available)
+    let oiChange1h: number | null = null;
+    let oiChange1hPct: number | null = null;
+    if (oiVal !== null && oiHistory.length > 1) {
+      const oneHourAgo = now - 60 * 60 * 1000;
+      // Find closest entry near 1h ago, or earliest entry if runtime < 1h
+      let baseline = oiHistory[0];
+      for (const entry of oiHistory) {
+        if (Math.abs(entry.timestamp - oneHourAgo) < Math.abs(baseline.timestamp - oneHourAgo)) {
+          baseline = entry;
+        }
+      }
+      oiChange1h = Number((oiVal - baseline.oi).toFixed(3));
+      oiChange1hPct = baseline.oi > 0 ? Number(((oiChange1h / baseline.oi) * 100).toFixed(2)) : 0;
+    }
+
+    const data = {
+      openInterest: oiVal,
+      oiChange1h,
+      oiChange1hPct,
+      longShortRatio,
+      longAccount,
+      shortAccount,
+      markPrice,
+      lastFundingRate,
+      nextFundingTime,
+      timestamp: now,
+    };
+
+    futuresCache = { timestamp: now, data };
+    return res.json({ success: true, ...data });
+  } catch (err: any) {
+    if (futuresCache) {
+      return res.json({ success: true, ...futuresCache.data, stale: true });
+    }
+    return res.status(502).json({ success: false, error: err.message });
+  }
 });
 
 // Helper middleware: Admin verification & rate-limiting for signal routes
@@ -2556,6 +3004,7 @@ async function startServer() {
 
   // 9. Start background Telegram dispatch worker and long-polling handler
   startTelegramWorker();
+  startCommandTelegramWorker();
 
   // 10. Start resilient background tick worker (first upstream connection)
   fetchBiquoteTick();
@@ -2563,6 +3012,9 @@ async function startServer() {
   // 10b. Initialize SPY S&P 500 Options Feed & Signals
   loadSpySignalsFromDisk();
   initSpyFeed();
+
+  // 10c. Initialize 24/7 BTC Tide Node.js Backend & SQLite Database
+  await initBtcTideBackend();
 
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
@@ -2597,6 +3049,7 @@ function handleGracefulShutdown(signal: string) {
   saveSpyCandlesToDisk();
   saveTelegramSettings();
   saveLastTickToDisk();
+  shutdownBtcTideBackend();
   releaseInstanceLease();
   process.exit(0);
 }

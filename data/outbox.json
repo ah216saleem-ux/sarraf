@@ -419,5 +419,21 @@
     "createdAt": "2026-10-17T10:52:37.944Z",
     "status": "PENDING_DELIVERY",
     "messageText": "Weekly Report 📅 No signals this week."
+  },
+  {
+    "eventId": "SUMMARY-D-2026-10-17",
+    "signalId": "SUMMARY-D-2026-10-17",
+    "type": "DAILY_SUMMARY",
+    "payload": {
+      "signalsCount": 0,
+      "tpCount": 0,
+      "slCount": 0,
+      "beCount": 0,
+      "totalDollars": 0,
+      "totalR": 0
+    },
+    "createdAt": "2026-10-17T22:50:45.969Z",
+    "status": "PENDING_DELIVERY",
+    "messageText": "Daily Summary 📊 No signals today."
   }
 ]

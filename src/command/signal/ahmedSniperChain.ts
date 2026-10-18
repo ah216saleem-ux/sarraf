@@ -44,6 +44,9 @@ export interface SniperEvaluationInput {
   nearestSupport?: number;
   nearestResistance?: number;
   feedStatus: 'LIVE' | 'LIVE (POLLING)' | 'STALE' | 'RECONNECTING' | 'MARKET_CLOSED' | 'OFFLINE';
+  isFlowWarmingUp?: boolean;
+  flowTicksCount?: number;
+  tickAgeSeconds?: number;
   config?: SniperConfig;
 }
 
@@ -80,10 +83,13 @@ function computeLocalAtr14(candles: CandleLike[]): number {
 
 /**
  * Finds unmitigated Bullish (Demand) and Bearish (Supply) H1 Order Blocks from historical H1 candles.
- * An Order Block is formed by the last opposing candle before a displacement move (>= 1.0x ATR with BOS or >= 1.3x ATR)
- * and remains unmitigated until a subsequent bar closes beyond its invalidation edge or trades through its 50% mean threshold.
+ * Scans up to `lookback` H1 bars (default 100), detects 1-bar or 2-bar displacement impulses,
+ * and marks an Order Block mitigated only when a subsequent H1 candle body closes beyond its invalidation edge.
  */
-export function findUnmitigatedH1OrderBlocks(candles: CandleLike[]): {
+export function findUnmitigatedH1OrderBlocks(
+  candles: CandleLike[],
+  lookback: number = SNIPER_CONFIG.h1ObLookback
+): {
   bullObs: H1OrderBlockZone[];
   bearObs: H1OrderBlockZone[];
 } {
@@ -91,68 +97,92 @@ export function findUnmitigatedH1OrderBlocks(candles: CandleLike[]): {
   const bearObs: H1OrderBlockZone[] = [];
   if (!candles || candles.length < 10) return { bullObs, bearObs };
 
-  for (let i = 4; i < candles.length - 1; i++) {
-    const dispBar = candles[i];
-    const body = Math.abs(dispBar.close - dispBar.open);
-    const localAtr = computeLocalAtr14(candles.slice(Math.max(0, i - 14), i + 1));
-    if (body < 1.0 * localAtr) continue;
+  const slice = lookback > 0 && candles.length > lookback ? candles.slice(-lookback) : candles;
 
-    if (dispBar.close > dispBar.open) {
+  for (let i = 3; i < slice.length - 1; i++) {
+    const dispBar = slice[i];
+    const prevBar = slice[i - 1];
+    const body1 = Math.abs(dispBar.close - dispBar.open);
+    const localAtr = computeLocalAtr14(slice.slice(Math.max(0, i - 14), i + 1));
+
+    // Bullish 1-bar or 2-bar displacement impulse
+    const isBull1 = dispBar.close > dispBar.open && body1 >= 0.75 * localAtr;
+    const isBull2 =
+      dispBar.close > dispBar.open &&
+      prevBar.close > prevBar.open &&
+      dispBar.close - prevBar.open >= 1.1 * localAtr;
+
+    if (isBull1 || isBull2) {
+      const impStart = isBull2 ? i - 1 : i;
       let priorHigh = -Infinity;
-      for (let s = Math.max(0, i - 6); s < i; s++) {
-        if (candles[s].high > priorHigh) priorHigh = candles[s].high;
+      for (let s = Math.max(0, impStart - 5); s < impStart; s++) {
+        if (slice[s].high > priorHigh) priorHigh = slice[s].high;
       }
-      if (dispBar.close > priorHigh || body >= 1.3 * localAtr) {
-        let obIdx = i - 1;
-        for (let k = i - 1; k >= Math.max(0, i - 4); k--) {
-          if (candles[k].close < candles[k].open) {
+      if (dispBar.close > priorHigh || body1 >= 1.0 * localAtr || isBull2) {
+        let obIdx = impStart - 1;
+        for (let k = impStart - 1; k >= Math.max(0, impStart - 4); k--) {
+          if (slice[k].close < slice[k].open) {
             obIdx = k;
             break;
           }
         }
-        const obBar = candles[obIdx];
-        const top = Number(Math.max(obBar.open, obBar.close).toFixed(2));
-        const bottom = Number(obBar.low.toFixed(2));
-        const mid = Number(((top + bottom) / 2).toFixed(2));
+        if (obIdx >= 0) {
+          const obBar = slice[obIdx];
+          const top = Number(Math.max(obBar.open, obBar.close).toFixed(2));
+          const bottom = Number(obBar.low.toFixed(2));
+          const mid = Number(((top + bottom) / 2).toFixed(2));
 
-        let mitigated = false;
-        for (let j = i + 1; j < candles.length; j++) {
-          if (candles[j].close < bottom || (j > i + 1 && candles[j].low <= mid)) {
-            mitigated = true;
-            break;
+          let mitigated = false;
+          for (let j = i + 1; j < slice.length; j++) {
+            if (slice[j].close < bottom) {
+              mitigated = true;
+              break;
+            }
+          }
+          if (!mitigated) {
+            bullObs.push({ side: 'BUY', top, bottom, mid, createdAt: obBar.time });
           }
         }
-        if (!mitigated) {
-          bullObs.push({ side: 'BUY', top, bottom, mid, createdAt: obBar.time });
-        }
       }
-    } else if (dispBar.close < dispBar.open) {
+    }
+
+    // Bearish 1-bar or 2-bar displacement impulse
+    const isBear1 = dispBar.close < dispBar.open && body1 >= 0.75 * localAtr;
+    const isBear2 =
+      dispBar.close < dispBar.open &&
+      prevBar.close < prevBar.open &&
+      prevBar.open - dispBar.close >= 1.1 * localAtr;
+
+    if (isBear1 || isBear2) {
+      const impStart = isBear2 ? i - 1 : i;
       let priorLow = Infinity;
-      for (let s = Math.max(0, i - 6); s < i; s++) {
-        if (candles[s].low < priorLow) priorLow = candles[s].low;
+      for (let s = Math.max(0, impStart - 5); s < impStart; s++) {
+        if (slice[s].low < priorLow) priorLow = slice[s].low;
       }
-      if (dispBar.close < priorLow || body >= 1.3 * localAtr) {
-        let obIdx = i - 1;
-        for (let k = i - 1; k >= Math.max(0, i - 4); k--) {
-          if (candles[k].close > candles[k].open) {
+      if (dispBar.close < priorLow || body1 >= 1.0 * localAtr || isBear2) {
+        let obIdx = impStart - 1;
+        for (let k = impStart - 1; k >= Math.max(0, impStart - 4); k--) {
+          if (slice[k].close > slice[k].open) {
             obIdx = k;
             break;
           }
         }
-        const obBar = candles[obIdx];
-        const top = Number(obBar.high.toFixed(2));
-        const bottom = Number(Math.min(obBar.open, obBar.close).toFixed(2));
-        const mid = Number(((top + bottom) / 2).toFixed(2));
+        if (obIdx >= 0) {
+          const obBar = slice[obIdx];
+          const top = Number(obBar.high.toFixed(2));
+          const bottom = Number(Math.min(obBar.open, obBar.close).toFixed(2));
+          const mid = Number(((top + bottom) / 2).toFixed(2));
 
-        let mitigated = false;
-        for (let j = i + 1; j < candles.length; j++) {
-          if (candles[j].close > top || (j > i + 1 && candles[j].high >= mid)) {
-            mitigated = true;
-            break;
+          let mitigated = false;
+          for (let j = i + 1; j < slice.length; j++) {
+            if (slice[j].close > top) {
+              mitigated = true;
+              break;
+            }
           }
-        }
-        if (!mitigated) {
-          bearObs.push({ side: 'SELL', top, bottom, mid, createdAt: obBar.time });
+          if (!mitigated) {
+            bearObs.push({ side: 'SELL', top, bottom, mid, createdAt: obBar.time });
+          }
         }
       }
     }
@@ -171,7 +201,8 @@ export function evaluateOpposingH1OrderBlockPath(
   direction: SignalSide | null,
   minPathClearDollars: number = 10.0,
   explicitSupport?: number,
-  explicitResistance?: number
+  explicitResistance?: number,
+  lookback: number = SNIPER_CONFIG.h1ObLookback
 ): OpposingZoneCheck {
   if (!direction || currentPrice <= 0) {
     return {
@@ -183,7 +214,7 @@ export function evaluateOpposingH1OrderBlockPath(
   }
 
   if (h1Candles && h1Candles.length >= 10) {
-    const { bullObs, bearObs } = findUnmitigatedH1OrderBlocks(h1Candles);
+    const { bullObs, bearObs } = findUnmitigatedH1OrderBlocks(h1Candles, lookback);
 
     if (direction === 'BUY') {
       const opposingBear = bearObs
@@ -295,17 +326,23 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
 
   // Rule: Never generate a signal from missing, stale, or reconnecting data.
   const isFeedActive = feedStatus === 'LIVE' || feedStatus === 'LIVE (POLLING)';
-  if (!isFeedActive || currentPrice <= 0) {
+  const isPriceStale = typeof input.tickAgeSeconds === 'number' && input.tickAgeSeconds > 10;
+  if (!isFeedActive || isPriceStale || currentPrice <= 0) {
     const isHistoryMissing = d1Candles.length === 0;
+    const disconnectReason = isHistoryMissing
+      ? 'History loading (upstream down)'
+      : isPriceStale
+      ? `Price feed stale (${input.tickAgeSeconds}s old) · Awaiting fresh stream`
+      : 'Feed disconnected · Awaiting live stream';
     const lockedGates: SniperGateResult[] = [
-      { id: 'g1', name: 'W1/D1 Context', shortName: 'D1 Context', timeframe: 'D1', status: 'LOCKED', direction: 'NEUTRAL', reason: isHistoryMissing ? 'History loading (upstream down)' : 'Feed disconnected · Awaiting live stream' },
-      { id: 'g2', name: 'H4 Bias', shortName: 'H4 Bias', timeframe: 'H4', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Feed disconnected · Awaiting live stream' },
-      { id: 'g3', name: 'H1 Confirmation', shortName: 'H1 Confirm', timeframe: 'H1', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Feed disconnected · Awaiting live stream' },
-      { id: 'g4', name: 'M30 Refinement', shortName: 'M30 Refine', timeframe: 'M30', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Feed disconnected · Awaiting live stream' },
-      { id: 'g5', name: 'M15 Body Close', shortName: 'M15 Close', timeframe: 'M15', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Feed disconnected · Awaiting live stream' },
-      { id: 'g6', name: 'M5 Retest', shortName: 'M5 Retest', timeframe: 'M5', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Feed disconnected · Awaiting live stream', isEstimated: true },
-      { id: 'g7', name: 'M5 Confirmation', shortName: 'M5 Confirm', timeframe: 'M5', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Feed disconnected · Awaiting live stream', isEstimated: true },
-      { id: 'g8', name: 'Entry Trigger', shortName: 'Tick Trigger', timeframe: 'TICK', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Feed disconnected · Awaiting live stream' },
+      { id: 'g1', name: 'W1/D1 Context', shortName: 'D1 Context', timeframe: 'D1', status: 'LOCKED', direction: 'NEUTRAL', reason: disconnectReason },
+      { id: 'g2', name: 'H4 Bias', shortName: 'H4 Bias', timeframe: 'H4', status: 'LOCKED', direction: 'NEUTRAL', reason: disconnectReason },
+      { id: 'g3', name: 'H1 Confirmation', shortName: 'H1 Confirm', timeframe: 'H1', status: 'LOCKED', direction: 'NEUTRAL', reason: disconnectReason },
+      { id: 'g4', name: 'M30 Refinement', shortName: 'M30 Refine', timeframe: 'M30', status: 'LOCKED', direction: 'NEUTRAL', reason: disconnectReason },
+      { id: 'g5', name: 'M15 Body Close', shortName: 'M15 Close', timeframe: 'M15', status: 'LOCKED', direction: 'NEUTRAL', reason: disconnectReason },
+      { id: 'g6', name: 'M5 Retest', shortName: 'M5 Retest', timeframe: 'M5', status: 'LOCKED', direction: 'NEUTRAL', reason: disconnectReason, isEstimated: false },
+      { id: 'g7', name: 'M5 Confirmation', shortName: 'M5 Confirm', timeframe: 'M5', status: 'LOCKED', direction: 'NEUTRAL', reason: disconnectReason, isEstimated: false },
+      { id: 'g8', name: 'Entry Trigger', shortName: 'Tick Trigger', timeframe: 'TICK', status: 'LOCKED', direction: 'NEUTRAL', reason: disconnectReason },
     ];
 
     return {
@@ -319,6 +356,8 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
       canIssueSignal: false,
       waitReason: isHistoryMissing
         ? 'History loading (upstream down)'
+        : isPriceStale
+        ? `WAIT: Price feed stale (${input.tickAgeSeconds}s old) · signals paused until fresh live ticks resume.`
         : 'Feed reconnecting · Signals paused until live ticks resume.',
     };
   }
@@ -557,13 +596,12 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
   let g6Reason = 'Awaiting M15 body close';
 
   if (g5Status === 'PASS') {
-    // If M5 candles available (or derived M5)
-    const candlesToUse = m5Candles.length > 0 ? m5Candles : m15Candles;
-    if (candlesToUse.length < 3) {
+    // Strictly use authentic M5 candles
+    if (m5Candles.length < 3) {
       g6Status = 'LOCKED';
       g6Reason = 'Accumulating M5 bars';
     } else {
-      const recentM5 = candlesToUse.slice(-4);
+      const recentM5 = m5Candles.slice(-4);
       const minLow = Math.min(...recentM5.map((c) => c.low));
       const maxHigh = Math.max(...recentM5.map((c) => c.high));
 
@@ -602,8 +640,7 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
   let g7Reason = 'Awaiting M5 retest';
 
   if (g6Status === 'PASS') {
-    const candlesToUse = m5Candles.length > 0 ? m5Candles : m15Candles;
-    const lastM5 = candlesToUse[candlesToUse.length - 1];
+    const lastM5 = m5Candles[m5Candles.length - 1];
     const lowerWick = Math.max(0, Math.min(lastM5.open, lastM5.close) - lastM5.low);
     const upperWick = Math.max(0, lastM5.high - Math.max(lastM5.open, lastM5.close));
 
@@ -642,7 +679,11 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
   if (g7Status === 'PASS') {
     const isSpreadOk = spread <= cfg.maxSpreadEntryDollars;
 
-    if (!isSpreadOk) {
+    if (input.isFlowWarmingUp || (input.flowTicksCount !== undefined && input.flowTicksCount < 5)) {
+      g8Status = 'LOCKED';
+      g8Dir = 'NEUTRAL';
+      g8Reason = `Accumulating 60s tick flow buffer (${input.flowTicksCount ?? 0} ticks · warming up)`;
+    } else if (!isSpreadOk) {
       g8Status = 'FAIL';
       g8Dir = 'NEUTRAL';
       g8Reason = `Spread too wide: $${spread.toFixed(2)} (max allowed $${cfg.maxSpreadEntryDollars.toFixed(2)})`;
@@ -676,8 +717,8 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
     { id: 'g3', name: 'H1 Confirmation', shortName: 'H1 Confirm', timeframe: 'H1', status: g3Status, direction: g3Dir, reason: g3Reason },
     { id: 'g4', name: 'M30 Refinement', shortName: 'M30 Refine', timeframe: 'M30', status: g4Status, direction: g4Dir, reason: g4Reason },
     { id: 'g5', name: 'M15 Body Close', shortName: 'M15 Close', timeframe: 'M15', status: g5Status, direction: g5Dir, reason: g5Reason },
-    { id: 'g6', name: 'M5 Retest', shortName: 'M5 Retest', timeframe: 'M5', status: g6Status, direction: g6Dir, reason: g6Reason, isEstimated: true },
-    { id: 'g7', name: 'M5 Confirmation', shortName: 'M5 Confirm', timeframe: 'M5', status: g7Status, direction: g7Dir, reason: g7Reason, isEstimated: true },
+    { id: 'g6', name: 'M5 Retest', shortName: 'M5 Retest', timeframe: 'M5', status: g6Status, direction: g6Dir, reason: g6Reason, isEstimated: false },
+    { id: 'g7', name: 'M5 Confirmation', shortName: 'M5 Confirm', timeframe: 'M5', status: g7Status, direction: g7Dir, reason: g7Reason, isEstimated: false },
     { id: 'g8', name: 'Entry Trigger', shortName: 'Tick Trigger', timeframe: 'TICK', status: g8Status, direction: g8Dir, reason: g8Reason },
   ];
 
@@ -703,7 +744,8 @@ export function evaluateAhmedSniperChain(input: SniperEvaluationInput): SniperEv
     candidateDirection,
     cfg.minPathClearDollars,
     input.nearestSupport,
-    input.nearestResistance
+    input.nearestResistance,
+    cfg.h1ObLookback
   );
 
   const pathClearDollars = obPathEval.pathClearDollars;

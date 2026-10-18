@@ -12,7 +12,7 @@ import {
 } from '../command/signal/types.ts';
 import { SNIPER_CONFIG } from '../command/signal/sniperConfig.ts';
 import { evaluateAhmedSniperChain, CandleLike } from '../command/signal/ahmedSniperChain.ts';
-import { getCandleStore } from './candleEngine.ts';
+import { getCandleStore, buildM5FromM1 } from './candleEngine.ts';
 import { DATA_DIR, writeJsonAtomic } from './deploymentSafety.ts';
 import {
   notifyNewSignal,
@@ -205,7 +205,10 @@ export function processCommandSignalTick(
   buyRatio: number = 50,
   sellRatio: number = 50,
   buyDelta: number = 0,
-  sellDelta: number = 0
+  sellDelta: number = 0,
+  tickAgeSeconds: number = 0,
+  isFlowWarmingUp: boolean = false,
+  flowTicksCount: number = 60
 ) {
   lastEvaluatedAt = Date.now();
   lastFeedStatus = feedStatus;
@@ -299,11 +302,22 @@ export function processCommandSignalTick(
 
   // 3. In WAIT or COOLDOWN: Evaluate Ahmed Sniper Chain Gates
   // Analysis continues even during ACTIVE or COOLDOWN (per requirements: "While one is active, analysis continues but no new signal is issued.")
-  evaluateGatesWithCurrentMarket(price, spread, buyRatio, sellRatio, buyDelta, sellDelta, feedStatus);
+  evaluateGatesWithCurrentMarket(
+    price,
+    spread,
+    buyRatio,
+    sellRatio,
+    buyDelta,
+    sellDelta,
+    feedStatus,
+    tickAgeSeconds,
+    isFlowWarmingUp,
+    flowTicksCount
+  );
 
-  // 4. Issue Signal if conditions met, in WAIT, and feed is LIVE or LIVE (POLLING)
-  const isFeedActive = feedStatus === 'LIVE' || feedStatus === 'LIVE (POLLING)';
-  if (lifecycle === 'WAIT' && isLive && isFeedActive) {
+  // 4. Issue Signal if conditions met, in WAIT, and feed is LIVE or LIVE (POLLING) and price is fresh (<= 10s) and flow buffer ready
+  const isFeedActive = (feedStatus === 'LIVE' || feedStatus === 'LIVE (POLLING)') && tickAgeSeconds <= 10;
+  if (lifecycle === 'WAIT' && isLive && isFeedActive && !isFlowWarmingUp) {
     // Check if gates allow issuing a signal
     if (lastGates.length === 8 && lastGates.every((g) => g.status === 'PASS') && lastAlignedDirection) {
       if (lastConfidence >= SNIPER_CONFIG.minConfidencePercent && lastPathClearDollars >= SNIPER_CONFIG.minPathClearDollars) {
@@ -320,7 +334,10 @@ function evaluateGatesWithCurrentMarket(
   sellRatio: number,
   buyDelta: number,
   sellDelta: number,
-  feedStatus: 'LIVE' | 'LIVE (POLLING)' | 'RECONNECTING' | 'OFFLINE'
+  feedStatus: 'LIVE' | 'LIVE (POLLING)' | 'RECONNECTING' | 'OFFLINE',
+  tickAgeSeconds: number = 0,
+  isFlowWarmingUp: boolean = false,
+  flowTicksCount: number = 60
 ) {
   try {
     const store = getCandleStore();
@@ -344,27 +361,11 @@ function evaluateGatesWithCurrentMarket(
     const m30Candles = mapCandles(store.M30);
     const m15Candles = mapCandles(store.M15);
 
-    // Use native M5 candles from store when available, otherwise derive from recent M15
-    let m5Candles: CandleLike[] = mapCandles(store.M5);
-    if (m5Candles.length < 3 && m15Candles.length > 0) {
-      const recentM15 = m15Candles.slice(-8);
-      for (const m of recentM15) {
-        for (let i = 0; i < 3; i++) {
-          const prog = (i + 1) / 3;
-          const subOpen = i === 0 ? m.open : m.open + (m.close - m.open) * (i / 3);
-          const subClose = m.open + (m.close - m.open) * prog;
-          m5Candles.push({
-            open: Number(subOpen.toFixed(2)),
-            high: Number(Math.max(subOpen, subClose, m.high - (1 - prog) * 0.4).toFixed(2)),
-            low: Number(Math.min(subOpen, subClose, m.low + (1 - prog) * 0.4).toFixed(2)),
-            close: Number(subClose.toFixed(2)),
-            volume: Math.max(1, Math.round((m.volume || 10) / 3)),
-          });
-        }
-      }
-    }
+    // Strictly use authentic M5 candles from store (or aggregate from real M1 candles if M5 store is empty)
+    const rawM5 = store.M5 && store.M5.length >= 3 ? store.M5 : buildM5FromM1(store.M1 || []);
+    const m5Candles: CandleLike[] = mapCandles(rawM5);
 
-    const isFeedActive = feedStatus === 'LIVE' || feedStatus === 'LIVE (POLLING)';
+    const isFeedActive = (feedStatus === 'LIVE' || feedStatus === 'LIVE (POLLING)') && tickAgeSeconds <= 10;
 
     // Estimated composite confidence
     const confidenceScore = Math.min(
@@ -394,6 +395,9 @@ function evaluateGatesWithCurrentMarket(
       sellDelta60s: sellDelta,
       confidence: confidenceScore,
       feedStatus,
+      isFlowWarmingUp,
+      flowTicksCount,
+      tickAgeSeconds,
     });
 
     lastGates = result.gates;
@@ -639,8 +643,8 @@ export function getCommandSignalState(currentTickPrice?: number): SignalEnginePu
     { id: 'g3', name: 'H1 Confirmation', shortName: 'H1 Confirm', timeframe: 'H1', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Scanning multi-timeframe context...' },
     { id: 'g4', name: 'M30 Refinement', shortName: 'M30 Refine', timeframe: 'M30', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Scanning multi-timeframe context...' },
     { id: 'g5', name: 'M15 Body Close', shortName: 'M15 Close', timeframe: 'M15', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Scanning multi-timeframe context...' },
-    { id: 'g6', name: 'M5 Retest', shortName: 'M5 Retest', timeframe: 'M5', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Scanning multi-timeframe context...', isEstimated: true },
-    { id: 'g7', name: 'M5 Confirmation', shortName: 'M5 Confirm', timeframe: 'M5', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Scanning multi-timeframe context...', isEstimated: true },
+    { id: 'g6', name: 'M5 Retest', shortName: 'M5 Retest', timeframe: 'M5', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Scanning multi-timeframe context...', isEstimated: false },
+    { id: 'g7', name: 'M5 Confirmation', shortName: 'M5 Confirm', timeframe: 'M5', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Scanning multi-timeframe context...', isEstimated: false },
     { id: 'g8', name: 'Entry Trigger', shortName: 'Tick Trigger', timeframe: 'TICK', status: 'LOCKED', direction: 'NEUTRAL', reason: 'Scanning multi-timeframe context...' },
   ];
 

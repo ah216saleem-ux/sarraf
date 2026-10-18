@@ -96,7 +96,7 @@ export interface SignalEnginePublicState {
   stats: SignalEngineStats;
   history: CommandSignalLogEntry[];
   lastEvaluatedAt: number;
-  feedStatus: 'LIVE' | 'RECONNECTING' | 'OFFLINE';
+  feedStatus: 'LIVE' | 'LIVE (POLLING)' | 'RECONNECTING' | 'OFFLINE';
   pathClearR: number; // distance in $ to opposing zone
   confidence: number;
 }

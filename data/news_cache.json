@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-17T12:41:52.183Z",
+  "timestamp": "2026-10-17T16:59:39.645Z",
   "eventsCount": 35,
   "events": [
     {
@@ -30,7 +30,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -7302,
+      "minutesUntil": -7560,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -62,7 +62,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -6992,
+      "minutesUntil": -7250,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -94,7 +94,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -6057,
+      "minutesUntil": -6315,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -126,7 +126,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -5922,
+      "minutesUntil": -6180,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -158,7 +158,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -5787,
+      "minutesUntil": -6045,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -190,7 +190,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -5682,
+      "minutesUntil": -5940,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -222,7 +222,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -5502,
+      "minutesUntil": -5760,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -254,7 +254,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -5322,
+      "minutesUntil": -5580,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -286,7 +286,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -4502,
+      "minutesUntil": -4760,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -318,7 +318,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -4332,
+      "minutesUntil": -4590,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -350,7 +350,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -4332,
+      "minutesUntil": -4590,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -382,7 +382,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -4332,
+      "minutesUntil": -4590,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -414,7 +414,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -4332,
+      "minutesUntil": -4590,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -447,7 +447,7 @@
       "isAllDay": false,
       "isCancelledOrRemoved": false,
       "changeNote": "Rescheduled from Tue, 13 Oct 2026 17:00:00 GMT",
-      "minutesUntil": -4032,
+      "minutesUntil": -4290,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -479,7 +479,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -4002,
+      "minutesUntil": -4260,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -511,7 +511,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -3942,
+      "minutesUntil": -4200,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -543,7 +543,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -3852,
+      "minutesUntil": -4110,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -576,7 +576,7 @@
       "isAllDay": false,
       "isCancelledOrRemoved": false,
       "changeNote": "Rescheduled from Wed, 14 Oct 2026 09:40:00 GMT",
-      "minutesUntil": -3467,
+      "minutesUntil": -3725,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -608,7 +608,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -2892,
+      "minutesUntil": -3150,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -640,7 +640,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -2892,
+      "minutesUntil": -3150,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -672,7 +672,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -2892,
+      "minutesUntil": -3150,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -704,7 +704,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -2892,
+      "minutesUntil": -3150,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -736,7 +736,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -2892,
+      "minutesUntil": -3150,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -768,7 +768,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -2892,
+      "minutesUntil": -3150,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -800,7 +800,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -2892,
+      "minutesUntil": -3150,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -832,7 +832,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -2802,
+      "minutesUntil": -3060,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -864,7 +864,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -2772,
+      "minutesUntil": -3030,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -896,7 +896,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -2682,
+      "minutesUntil": -2940,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -929,7 +929,7 @@
       "isAllDay": false,
       "isCancelledOrRemoved": false,
       "changeNote": "Rescheduled from Mon, 12 Oct 2026 16:10:00 GMT",
-      "minutesUntil": -2412,
+      "minutesUntil": -2670,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -961,7 +961,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -1992,
+      "minutesUntil": -2250,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -993,7 +993,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -1452,
+      "minutesUntil": -1710,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -1025,7 +1025,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -1407,
+      "minutesUntil": -1665,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -1057,7 +1057,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -1407,
+      "minutesUntil": -1665,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -1089,7 +1089,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -1117,
+      "minutesUntil": -1375,
       "isReleased": true,
       "isInsideLockWindow": false
     },
@@ -1121,7 +1121,7 @@
       "isTentative": false,
       "isAllDay": false,
       "isCancelledOrRemoved": false,
-      "minutesUntil": -1002,
+      "minutesUntil": -1260,
       "isReleased": true,
       "isInsideLockWindow": false
     }

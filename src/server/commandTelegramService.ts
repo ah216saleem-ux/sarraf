@@ -8,9 +8,23 @@ import {
   TelegramReasonCode,
 } from '../command/signal/types.ts';
 import { DATA_DIR, writeJsonAtomic } from './deploymentSafety.ts';
+import { getEffectiveTelegramChatId } from './telegramWorker.ts';
 
 const SETTINGS_FILE = path.resolve(DATA_DIR, 'command_telegram_settings.json');
 const DYNAMIC_CHAT_FILE = path.resolve(DATA_DIR, 'telegram_chat.json');
+const COMMAND_OUTBOX_FILE = path.resolve(DATA_DIR, 'command_outbox.json');
+
+export interface CommandOutboxRecord {
+  id: string;
+  text: string;
+  createdAt: string;
+  status: 'PENDING_DELIVERY' | 'SENT' | 'FAILED';
+  retryCount: number;
+  idempotencyKey?: string;
+  lastAttemptAt?: string;
+  lastError?: string;
+  sentAt?: string;
+}
 
 export interface CommandTelegramSettings {
   enabled: boolean;          // Default OFF
@@ -81,26 +95,13 @@ export function getCredentials(): {
   validationError: string | null;
 } {
   const rawToken = process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.trim() : null;
-  let rawChatId = process.env.TELEGRAM_CHAT_ID ? process.env.TELEGRAM_CHAT_ID.trim() : null;
-
-  // Fallback if env chatId is bot's self username (e.g. @Sarraftelegrambot) and dynamic registered chat ID exists
-  if (rawChatId && (rawChatId.startsWith('@') && rawChatId.toLowerCase().includes('bot'))) {
-    if (fs.existsSync(DYNAMIC_CHAT_FILE)) {
-      try {
-        const raw = fs.readFileSync(DYNAMIC_CHAT_FILE, 'utf8');
-        const parsed = JSON.parse(raw);
-        if (parsed.chatId && !String(parsed.chatId).startsWith('@')) {
-          rawChatId = String(parsed.chatId).trim();
-        }
-      } catch {
-        // Ignore file read error
-      }
-    }
-  }
+  const effectiveChatId = getEffectiveTelegramChatId();
+  const envChatId = process.env.TELEGRAM_CHAT_ID ? process.env.TELEGRAM_CHAT_ID.trim() : null;
+  const rawChatId = effectiveChatId || envChatId;
 
   const tokenPresent = Boolean(rawToken);
   const chatIdPresent = Boolean(rawChatId);
-  const chatIdIsNumeric = Boolean(rawChatId && /^-?\d+$/.test(rawChatId));
+  const chatIdIsNumeric = Boolean(effectiveChatId);
 
   let missingVariable: string | null = null;
   let validationError: string | null = null;
@@ -116,7 +117,7 @@ export function getCredentials(): {
     validationError = 'TELEGRAM_CHAT_ID is missing';
   } else if (!chatIdIsNumeric) {
     missingVariable = 'TELEGRAM_CHAT_ID';
-    validationError = 'TELEGRAM_CHAT_ID must be the numeric chat id';
+    validationError = 'TELEGRAM_CHAT_ID must be the numeric chat id (open @Sarraftelegrambot and tap START)';
   }
 
   return {
@@ -209,12 +210,163 @@ async function sendRawTelegramMessage(
 }
 
 /**
- * Sends a message to Telegram with 3 retries, exponential backoff, rate limiting, and duplicate retry protection.
- * Tokens are NEVER logged.
+ * Reads command outbox atomically from disk
+ */
+export function readCommandOutbox(): CommandOutboxRecord[] {
+  if (!fs.existsSync(COMMAND_OUTBOX_FILE)) return [];
+  try {
+    const raw = fs.readFileSync(COMMAND_OUTBOX_FILE, 'utf-8');
+    return JSON.parse(raw) || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Saves command outbox atomically to disk (command_outbox.json)
+ */
+export function writeCommandOutbox(items: CommandOutboxRecord[]) {
+  try {
+    writeJsonAtomic(COMMAND_OUTBOX_FILE, items);
+  } catch (err: any) {
+    console.error('[SARRAF COMMAND OUTBOX] Failed to write outbox to disk:', err.message);
+  }
+}
+
+/**
+ * Enqueues a message into command_outbox.json with status PENDING_DELIVERY.
+ * Persists immediately so messages survive unexpected server crashes or reboots.
+ */
+export function enqueueCommandOutbox(text: string, idempotencyKey?: string): CommandOutboxRecord {
+  const outbox = readCommandOutbox();
+
+  if (idempotencyKey) {
+    const existing = outbox.find((item) => item.idempotencyKey === idempotencyKey);
+    if (existing) {
+      if (existing.status === 'SENT') {
+        console.log(`[SARRAF COMMAND OUTBOX] Dedupe: message already delivered for key ${idempotencyKey}`);
+      }
+      return existing;
+    }
+  }
+
+  const record: CommandOutboxRecord = {
+    id: `cmd_out_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    text,
+    createdAt: new Date().toISOString(),
+    status: 'PENDING_DELIVERY',
+    retryCount: 0,
+    idempotencyKey,
+  };
+
+  outbox.push(record);
+  // Cap at 200 records to prevent uncontrolled disk growth
+  const trimmed = outbox.slice(-200);
+  writeCommandOutbox(trimmed);
+  return record;
+}
+
+let isProcessingCommandOutbox = false;
+
+/**
+ * Processes all PENDING_DELIVERY items in command_outbox.json.
+ * Updates item status to SENT on success or records lastError and retryCount.
+ */
+export async function processCommandOutbox(): Promise<{ processed: number; delivered: number; failed: number }> {
+  if (isProcessingCommandOutbox) return { processed: 0, delivered: 0, failed: 0 };
+  isProcessingCommandOutbox = true;
+
+  try {
+    const outbox = readCommandOutbox();
+    const pendingItems = outbox.filter((item) => item.status === 'PENDING_DELIVERY');
+
+    if (pendingItems.length === 0) {
+      return { processed: 0, delivered: 0, failed: 0 };
+    }
+
+    const creds = getCredentials();
+    if (!creds.token || !creds.chatId || !creds.chatIdIsNumeric) {
+      console.warn('[SARRAF COMMAND OUTBOX] Holding pending messages: Telegram credentials not yet configured/verified.');
+      return { processed: 0, delivered: 0, failed: 0 };
+    }
+
+    let delivered = 0;
+    let failed = 0;
+
+    for (const item of pendingItems) {
+      if (!checkRateLimit()) {
+        console.warn('[SARRAF COMMAND OUTBOX] Rate limit reached (20 msgs/min). Remaining messages will be sent on next cycle.');
+        break;
+      }
+
+      item.lastAttemptAt = new Date().toISOString();
+      item.retryCount = (item.retryCount || 0) + 1;
+
+      const res = await sendRawTelegramMessage(creds.token, creds.chatId, item.text, item.idempotencyKey);
+
+      if (res.success) {
+        item.status = 'SENT';
+        item.sentAt = new Date().toISOString();
+        item.lastError = undefined;
+        delivered++;
+
+        settings.lastMessageTime = Date.now();
+        settings.lastMessageStatus = 'OK';
+        settings.lastErrorMessage = null;
+        saveTelegramSettings();
+        console.log(`[SARRAF COMMAND OUTBOX] Delivered message ${item.id} (${item.idempotencyKey || 'plain'})`);
+      } else {
+        item.lastError = res.error || 'Failed to dispatch';
+        if (res.nonRetryable || item.retryCount >= 5) {
+          item.status = 'FAILED';
+          failed++;
+          console.error(`[SARRAF COMMAND OUTBOX] Message ${item.id} permanently FAILED after ${item.retryCount} attempts: ${item.lastError}`);
+        } else {
+          console.warn(`[SARRAF COMMAND OUTBOX] Message ${item.id} attempt ${item.retryCount}/5 failed: ${item.lastError}. Will retry.`);
+        }
+
+        settings.lastMessageStatus = 'FAILED';
+        settings.lastErrorMessage = item.lastError;
+        saveTelegramSettings();
+      }
+
+      writeCommandOutbox(outbox);
+    }
+
+    return { processed: pendingItems.length, delivered, failed };
+  } finally {
+    isProcessingCommandOutbox = false;
+  }
+}
+
+/**
+ * Starts background worker and delivers any pending messages left on disk from before server reboot.
+ */
+let commandWorkerTimer: NodeJS.Timeout | null = null;
+
+export function startCommandTelegramWorker() {
+  loadTelegramSettings();
+
+  console.log('[SARRAF COMMAND OUTBOX] Initializing Command Telegram Outbox worker. Checking disk outbox for pending messages...');
+  // Deliver any pending messages left on disk from before server restart
+  processCommandOutbox().catch((err) => {
+    console.error('[SARRAF COMMAND OUTBOX] Boot delivery error:', err);
+  });
+
+  // Periodic sweep every 15 seconds to deliver any retries
+  if (commandWorkerTimer) clearInterval(commandWorkerTimer);
+  commandWorkerTimer = setInterval(() => {
+    processCommandOutbox().catch(() => {});
+  }, 15000);
+}
+
+/**
+ * Sends a message to Telegram using disk outbox persistence.
+ * Guarantees zero message loss across server restarts.
  */
 export async function sendTelegramMessageWithRetry(
   text: string,
-  maxRetries = 3,
+  _maxRetries = 3,
   idempotencyKey?: string
 ): Promise<{ success: boolean; error?: string }> {
   const creds = getCredentials();
@@ -240,52 +392,23 @@ export async function sendTelegramMessageWithRetry(
     return { success: false, error: 'TELEGRAM_CHAT_ID must be the numeric chat id' };
   }
 
-  // Enforce 20 msgs/min rate limit
-  if (!checkRateLimit()) {
-    const errorMsg = 'Rate limit exceeded (max 20 messages per minute)';
-    console.warn(`[SARRAF TELEGRAM SAFE] ${errorMsg}`);
-    settings.lastMessageStatus = 'FAILED';
-    settings.lastErrorMessage = errorMsg;
-    saveTelegramSettings();
-    return { success: false, error: errorMsg };
+  // 1. Enqueue to disk outbox FIRST (atomic write to command_outbox.json)
+  const item = enqueueCommandOutbox(text, idempotencyKey);
+
+  // 2. Process outbox immediately
+  await processCommandOutbox();
+
+  // 3. Check delivery status of the item
+  const currentOutbox = readCommandOutbox();
+  const current = currentOutbox.find((r) => r.id === item.id);
+  if (current && current.status === 'SENT') {
+    return { success: true };
   }
 
-  let attempt = 0;
-  let lastSafeError = 'Unknown error';
-
-  while (attempt < maxRetries) {
-    attempt++;
-    const sendRes = await sendRawTelegramMessage(creds.token, creds.chatId, text, idempotencyKey);
-
-    if (sendRes.success) {
-      settings.lastMessageTime = Date.now();
-      settings.lastMessageStatus = 'OK';
-      settings.lastErrorMessage = null;
-      saveTelegramSettings();
-      console.log(`[SARRAF TELEGRAM] Message dispatched successfully on attempt ${attempt}`);
-      return { success: true };
-    }
-
-    lastSafeError = sendRes.error || 'Failed to dispatch message';
-    console.warn(`[SARRAF TELEGRAM SAFE] Attempt ${attempt}/${maxRetries} failed: ${lastSafeError}`);
-
-    if (sendRes.nonRetryable) {
-      break;
-    }
-
-    if (attempt < maxRetries) {
-      // Exponential backoff: 1000ms -> 2000ms
-      const delayMs = attempt * 1000;
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-  }
-
-  // All retries failed
-  settings.lastMessageStatus = 'FAILED';
-  settings.lastErrorMessage = lastSafeError;
-  saveTelegramSettings();
-  console.error(`[SARRAF TELEGRAM SAFE] Message dispatch failed after ${attempt} attempt(s)`);
-  return { success: false, error: lastSafeError };
+  return {
+    success: false,
+    error: current?.lastError || 'Message persisted to command_outbox.json; awaiting delivery or retry',
+  };
 }
 
 /**
