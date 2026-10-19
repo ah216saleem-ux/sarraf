@@ -330,8 +330,8 @@ export function saveTradeToSqlite(trade: BtcTideTradeRecord, livePrice?: number 
         id, side, entry_time, entry_price, initial_sl_price, sl_price,
         tp1_price, tp2_price, tp3_price, one_r, current_r, pnl_percent,
         tp1_hit, tp2_hit, tp3_hit, be_moved, status, outcome, realized_r,
-        closed_at, close_price, expiry_time, confidence, lead, trigger_reason, engine_version, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        closed_at, close_price, expiry_time, confidence, lead, trigger_reason, created_at, engine_version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     `;
 
     dbInstance.run(stmt, [
