@@ -85,7 +85,8 @@ export async function initBtcTideSqlite(): Promise<Database> {
       confidence REAL NOT NULL,
       lead REAL NOT NULL,
       trigger_reason TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      engine_version TEXT DEFAULT 'v6.0'
     );
 
     CREATE TABLE IF NOT EXISTS btc_tide_meta (
@@ -100,6 +101,7 @@ export async function initBtcTideSqlite(): Promise<Database> {
     );
   `);
 
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN engine_version TEXT DEFAULT 'v6.0';"); } catch {}
   dbInstance = db;
   isDbInitialized = true;
 
@@ -180,7 +182,7 @@ export function getActiveTradeFromSqlite(): BtcTideTradeRecord | null {
       SELECT id, side, entry_time, entry_price, initial_sl_price, sl_price,
              tp1_price, tp2_price, tp3_price, one_r, current_r, pnl_percent,
              tp1_hit, tp2_hit, tp3_hit, be_moved, status, outcome, realized_r,
-             closed_at, close_price, expiry_time, confidence, lead, trigger_reason
+             closed_at, close_price, expiry_time, confidence, lead, trigger_reason, engine_version
       FROM btc_tide_signals
       WHERE status != 'CLOSED'
       ORDER BY entry_time DESC
@@ -203,7 +205,7 @@ export function getClosedTradesFromSqlite(limit = 300): BtcTideTradeRecord[] {
       SELECT id, side, entry_time, entry_price, initial_sl_price, sl_price,
              tp1_price, tp2_price, tp3_price, one_r, current_r, pnl_percent,
              tp1_hit, tp2_hit, tp3_hit, be_moved, status, outcome, realized_r,
-             closed_at, close_price, expiry_time, confidence, lead, trigger_reason
+             closed_at, close_price, expiry_time, confidence, lead, trigger_reason, engine_version
       FROM btc_tide_signals
       WHERE status = 'CLOSED'
       ORDER BY entry_time DESC
@@ -239,8 +241,8 @@ export function computeSqliteStats(): BtcTideStats {
     const res = dbInstance.exec(`
       SELECT
         COUNT(*) as total_closed,
-        SUM(CASE WHEN realized_r > 0 THEN 1 ELSE 0 END) as wins_count,
-        SUM(CASE WHEN realized_r < 0 THEN 1 ELSE 0 END) as losses_count,
+        SUM(CASE WHEN outcome IN ('TP1+BE', 'TP2', 'TP3') THEN 1 ELSE 0 END) as wins_count,
+        SUM(CASE WHEN outcome = 'SL' THEN 1 ELSE 0 END) as losses_count,
         AVG(realized_r) as avg_r,
         SUM(CASE WHEN outcome = 'TP1+BE' THEN 1 ELSE 0 END) as tp1_be_count,
         SUM(CASE WHEN outcome = 'TP2' THEN 1 ELSE 0 END) as tp2_count,
@@ -248,7 +250,7 @@ export function computeSqliteStats(): BtcTideStats {
         SUM(CASE WHEN outcome = 'SL' THEN 1 ELSE 0 END) as sl_count,
         SUM(CASE WHEN outcome = 'EXPIRED' THEN 1 ELSE 0 END) as expired_count
       FROM btc_tide_signals
-      WHERE status = 'CLOSED';
+      WHERE status = 'CLOSED' AND engine_version >= 'v6.0';
     `);
 
     if (res.length > 0 && res[0].values.length > 0) {
@@ -328,7 +330,7 @@ export function saveTradeToSqlite(trade: BtcTideTradeRecord, livePrice?: number 
         id, side, entry_time, entry_price, initial_sl_price, sl_price,
         tp1_price, tp2_price, tp3_price, one_r, current_r, pnl_percent,
         tp1_hit, tp2_hit, tp3_hit, be_moved, status, outcome, realized_r,
-        closed_at, close_price, expiry_time, confidence, lead, trigger_reason, created_at
+        closed_at, close_price, expiry_time, confidence, lead, trigger_reason, engine_version, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     `;
 
@@ -359,6 +361,7 @@ export function saveTradeToSqlite(trade: BtcTideTradeRecord, livePrice?: number 
       trade.lead,
       trade.triggerReason,
       Date.now(),
+      trade.engine_version || 'v6.0',
     ]);
 
     // Update meta last signal time

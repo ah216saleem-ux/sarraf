@@ -11,6 +11,8 @@ import {
   DepthLevel,
   LiquidationItem,
   ReconcileResult,
+  HeatmapBucket,
+  HeatmapColumn,
 } from '../btcTide/types.ts';
 import {
   evaluateDecisionEngine,
@@ -173,10 +175,11 @@ export interface BtcTideBackendState {
   activeTrade: any | null;
   closedTrades: any[];
   signalStats: any;
+  latestHeatmap?: HeatmapColumn;
 }
 
 const MAX_BINS_RETENTION_SEC = 1800; // 30 min
-const MAX_RECENT_TRADES = 400;
+const MAX_RECENT_TRADES = 1000; // Keep up to 1000 recent real fills for 10m Liquidity Tape
 const LARGE_PRINT_USD = 50000;
 
 // Central Backend Singleton State
@@ -184,6 +187,11 @@ const binsMap = new Map<number, SecondBin>();
 let recentTradesList: AggTrade[] = [];
 let largePrintsList: AggTrade[] = [];
 let allLiquidationsList: LiquidationItem[] = [];
+
+// 1-second rolling Heatmap Ring Buffer (600s = 10 minutes wide order book history)
+const heatmapRingBuffer: HeatmapColumn[] = [];
+let latestHeatmapColumn: HeatmapColumn | null = null;
+let wideBookHeatmapTimer: NodeJS.Timeout | null = null;
 
 let activeSourceId: SpotSourceId = 'binance_primary';
 let activeSourceLabel = 'Binance';
@@ -2121,11 +2129,11 @@ async function pollBackendVenues() {
         venue: 'Bybit',
         price: bybitRes.data?.result?.list?.[0]?.lastPrice
           ? parseFloat(bybitRes.data.result.list[0].lastPrice)
-          : null,
+          : (sourceStates.get('bybit')?.lastPrice ?? null),
         volume24h: bybitRes.data?.result?.list?.[0]?.volume24h
           ? parseFloat(bybitRes.data.result.list[0].volume24h)
           : null,
-        errorReason: bybitRes.error,
+        errorReason: bybitRes.error || (sourceStates.get('bybit')?.lastPrice ? null : 'HTTP 403 (Datacenter IP)'),
       },
       {
         venue: 'Gate',
@@ -2185,8 +2193,9 @@ async function pollBackendVenues() {
         : Number(sorted[mid].toFixed(2));
     };
 
-    // Pass 1: Initial median across all online venues
+    // Pass 1: Initial median across all online USDT venues (Coinbase is USD pair, excluded)
     const allValidPrices = rawVenues
+      .filter((v) => v.venue !== 'Coinbase')
       .map((v) => v.price)
       .filter((p): p is number => p !== null && Number.isFinite(p) && p > 0);
     const initialMedian = computeMedian(allValidPrices);
@@ -2205,6 +2214,7 @@ async function pollBackendVenues() {
 
     const cleanVenuesForRange = rawVenues.filter(
       (v) =>
+        v.venue !== 'Coinbase' &&
         v.price !== null &&
         v.price > 0 &&
         cleanMedian !== null &&
@@ -2495,6 +2505,111 @@ export async function runBackendReconciliation(): Promise<ReconcileResult> {
 }
 
 // ---------------------------------------------------------------------------
+// 5B. Wide Order Book Depth (~0.35% from price) & 1-Second Heatmap Ring Buffer
+// ---------------------------------------------------------------------------
+export function getHeatmapHistory(limit = 600): HeatmapColumn[] {
+  return heatmapRingBuffer.slice(-limit);
+}
+
+export async function pollWideBookAndHeatmap(): Promise<void> {
+  const now = Date.now();
+  const sec = Math.floor(now / 1000);
+
+  let rawBids: [string, string][] = [];
+  let rawAsks: [string, string][] = [];
+
+  try {
+    const res = await fetchJsonWithStatus(
+      'https://data-api.binance.vision/api/v3/depth?symbol=BTCUSDT&limit=1000',
+      {},
+      2000
+    );
+    if (res.ok && res.data && Array.isArray(res.data.bids) && Array.isArray(res.data.asks)) {
+      rawBids = res.data.bids;
+      rawAsks = res.data.asks;
+    } else {
+      const fb = await fetchJsonWithStatus(
+        'https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000',
+        {},
+        2000
+      );
+      if (fb.ok && fb.data && Array.isArray(fb.data.bids) && Array.isArray(fb.data.asks)) {
+        rawBids = fb.data.bids;
+        rawAsks = fb.data.asks;
+      } else {
+        const bybit = await fetchJsonWithStatus(
+          'https://api.bybit.com/v5/market/orderbook?category=spot&symbol=BTCUSDT&limit=200',
+          {},
+          2000
+        );
+        if (bybit.ok && bybit.data?.result) {
+          rawBids = bybit.data.result.b || [];
+          rawAsks = bybit.data.result.a || [];
+        }
+      }
+    }
+  } catch {}
+
+  if (rawBids.length === 0 && rawAsks.length === 0) return;
+
+  const bestBid = parseFloat(rawBids[0]?.[0] || '0');
+  const bestAsk = parseFloat(rawAsks[0]?.[0] || '0');
+  const mid =
+    bestBid > 0 && bestAsk > 0
+      ? Number(((bestBid + bestAsk) / 2).toFixed(2))
+      : currentPrice || 82500;
+
+  // Adapts bucket size to price range ($1-$5). For BTC at $80K-$100K, $2 is high-res, $5 if high ATR
+  const bSize = currentAtr1h && currentAtr1h > 750 ? 5 : 2;
+  const range = mid * 0.0035; // ~0.35% depth (±$290 at $82k)
+  const minP = mid - range;
+  const maxP = mid + range;
+
+  const bucketMap = new Map<number, { p: number; b: number; a: number }>();
+
+  for (const [pStr, qStr] of rawBids) {
+    const p = parseFloat(pStr);
+    if (p < minP || p > maxP) continue;
+    const bucket = Math.floor(p / bSize) * bSize;
+    const cur = bucketMap.get(bucket) || { p: bucket, b: 0, a: 0 };
+    cur.b = Number((cur.b + parseFloat(qStr)).toFixed(4));
+    bucketMap.set(bucket, cur);
+  }
+
+  for (const [pStr, qStr] of rawAsks) {
+    const p = parseFloat(pStr);
+    if (p < minP || p > maxP) continue;
+    const bucket = Math.floor(p / bSize) * bSize;
+    const cur = bucketMap.get(bucket) || { p: bucket, b: 0, a: 0 };
+    cur.a = Number((cur.a + parseFloat(qStr)).toFixed(4));
+    bucketMap.set(bucket, cur);
+  }
+
+  const buckets: HeatmapBucket[] = Array.from(bucketMap.values()).sort((a, b) => a.p - b.p);
+
+  const column: HeatmapColumn = {
+    sec,
+    mid,
+    bSize,
+    buckets,
+  };
+
+  latestHeatmapColumn = column;
+
+  // Maintain rolling 10-minute ring buffer (600 seconds)
+  const lastSecInBuf =
+    heatmapRingBuffer.length > 0 ? heatmapRingBuffer[heatmapRingBuffer.length - 1].sec : 0;
+  if (sec > lastSecInBuf) {
+    heatmapRingBuffer.push(column);
+    if (heatmapRingBuffer.length > 600) {
+      heatmapRingBuffer.shift();
+    }
+  } else if (heatmapRingBuffer.length > 0) {
+    heatmapRingBuffer[heatmapRingBuffer.length - 1] = column;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 6. Signal Engine Evaluation Loop (1 Hz)
 // ---------------------------------------------------------------------------
 function runBackendSignalEngineStep() {
@@ -2669,6 +2784,7 @@ export function getBackendSnapshot(): BtcTideBackendState {
     activeTrade: currentActiveTrade,
     closedTrades: currentClosedTrades,
     signalStats: computeSqliteStats(),
+    latestHeatmap: latestHeatmapColumn || undefined,
   };
 }
 
@@ -2865,6 +2981,13 @@ export async function initBtcTideBackend(): Promise<void> {
     pollBtc1hAtr(),
   ]);
 
+  // Wide Order Book Depth (~0.35% from price) polled every 1s for the Liquidity Tape Heatmap
+  pollWideBookAndHeatmap().catch(() => {});
+  if (wideBookHeatmapTimer) clearInterval(wideBookHeatmapTimer);
+  wideBookHeatmapTimer = setInterval(() => {
+    pollWideBookAndHeatmap().catch(() => {});
+  }, 1000);
+
   if (venuesPollTimer) clearInterval(venuesPollTimer);
   venuesPollTimer = setInterval(pollBackendVenues, 3000);
 
@@ -2890,13 +3013,14 @@ export async function initBtcTideBackend(): Promise<void> {
   // 6. Start 1-sec Engine Watchdog
   startBackendWatchdog();
 
-  console.log('[BTC TIDE BACKEND] 24/7 Engine is active with real depth20, multi-source perps, 1H ATR, 30s reconciliation, and 9 venues.');
+  console.log('[BTC TIDE BACKEND] 24/7 Engine is active with real depth20, multi-source perps, 1H ATR, 30s reconciliation, 1s wide heatmap, and 9 venues.');
 }
 
 export function shutdownBtcTideBackend(): void {
   console.log('[BTC TIDE BACKEND] Gracefully shutting down...');
   if (engineWatchdogTimer) clearInterval(engineWatchdogTimer);
   if (broadcastTimer) clearTimeout(broadcastTimer);
+  if (wideBookHeatmapTimer) clearInterval(wideBookHeatmapTimer);
   if (perpsFastPollTimer) clearInterval(perpsFastPollTimer);
   if (perpsOiPollTimer) clearInterval(perpsOiPollTimer);
   if (venuesPollTimer) clearInterval(venuesPollTimer);

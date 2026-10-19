@@ -187,6 +187,7 @@ import {
   shutdownBtcTideBackend,
   getBackendSnapshot,
   getBackendHealthReport,
+  getHeatmapHistory,
   registerSseClient,
 } from './src/server/btcTideBackendEngine.ts';
 import {
@@ -1452,6 +1453,17 @@ app.get('/api/btc-tide/health', (_req, res) => {
 app.get('/api/btc-tide/state', btcTideRateLimiter, (_req, res) => {
   const snapshot = getBackendSnapshot();
   return res.json({ success: true, ...snapshot });
+});
+
+// 3B. Rolling Wide Order Book Heatmap History Endpoint (up to 600s = 10m)
+app.get('/api/btc-tide/heatmap', btcTideRateLimiter, (req, res) => {
+  const limit = Math.min(600, Math.max(10, parseInt((req.query.limit as string) || '600', 10)));
+  const history = getHeatmapHistory(limit);
+  return res.json({
+    success: true,
+    count: history.length,
+    history,
+  });
 });
 
 // 4. Signals and Outcomes from SQLite Database

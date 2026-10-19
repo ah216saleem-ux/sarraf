@@ -29,9 +29,8 @@ import { evaluateStructureBias, isGoldMarketOpen } from './sarrafEngine.ts';
 import { getCurrentSettings, updateSettings, verifyAdminUsername, verifyAdminPassword } from './settingsEngine.ts';
 import { getNewsFeedStatus, checkNewsLockState } from './newsEngine.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const DATA_DIR = path.resolve(__dirname, '../../data');
+import { DATA_DIR } from './deploymentSafety.ts';
+
 const OUTBOX_FILE = path.resolve(DATA_DIR, 'outbox.json');
 const THREAD_MAP_FILE = path.resolve(DATA_DIR, 'telegram_threads.json');
 const DYNAMIC_CHAT_FILE = path.resolve(DATA_DIR, 'telegram_chat.json');

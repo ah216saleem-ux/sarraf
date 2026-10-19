@@ -25,7 +25,7 @@ function formatDuration(startMs: number, endMs: number | null): string {
 
 export const SignalLogTableCard: React.FC<SignalLogTableCardProps> = React.memo(
   ({ closedTrades, stats }) => {
-    const { totalClosed, winRate, avgR, winsCount, lossesCount } = stats;
+    const { totalClosed, winRate, avgR, winsCount, lossesCount, expiredCount = 0 } = stats;
 
     return (
       <div className="bg-[#08080a] border border-[#E8B84A]/20 rounded-xl p-4 sm:p-5 backdrop-blur-md shadow-[0_4px_24px_rgba(0,0,0,0.5)] space-y-4">
@@ -95,7 +95,14 @@ export const SignalLogTableCard: React.FC<SignalLogTableCardProps> = React.memo(
             <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-1.5">
               <div className="text-[9px] text-neutral-400 uppercase">CLOSED TRADES</div>
               <div className="text-sm font-black text-white">
-                {totalClosed} ({winsCount}W / {lossesCount}L)
+                {totalClosed} ({winsCount}W / {lossesCount}L / {expiredCount} Exp)
+              </div>
+            </div>
+            {/* Expired Trades - Explicitly Not Wins */}
+            <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-1.5">
+              <div className="text-[9px] text-neutral-400 uppercase">EXPIRED (NOT WINS)</div>
+              <div className="text-sm font-black text-amber-300">
+                {expiredCount}
               </div>
             </div>
           </div>
@@ -108,6 +115,7 @@ export const SignalLogTableCard: React.FC<SignalLogTableCardProps> = React.memo(
               <tr className="text-[10px] text-neutral-400 uppercase border-b border-white/5">
                 <th className="py-2 px-2">TIME (UTC)</th>
                 <th className="py-2 px-2">SIDE</th>
+                <th className="py-2 px-2 text-center">VERSION</th>
                 <th className="py-2 px-2 text-right">ENTRY</th>
                 <th className="py-2 px-2 text-right">SL</th>
                 <th className="py-2 px-2 text-right">TP1 / TP2 / TP3</th>
@@ -119,7 +127,7 @@ export const SignalLogTableCard: React.FC<SignalLogTableCardProps> = React.memo(
             <tbody className="divide-y divide-white/[0.03]">
               {closedTrades.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-neutral-500 text-xs">
+                  <td colSpan={9} className="py-8 text-center text-neutral-500 text-xs">
                     No closed signals yet. Signals fire only after &ge; 3 min of live data, &ge; 68%
                     confidence, and &ge; 22% lead over opposite side.
                   </td>

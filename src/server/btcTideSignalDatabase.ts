@@ -30,6 +30,7 @@ export interface BtcTideTradeRecord {
   confidence: number;
   lead: number;
   triggerReason: string;
+  engine_version?: string;
 }
 
 export interface BtcTideDatabaseState {
@@ -43,8 +44,8 @@ export interface BtcTideStats {
   totalClosed: number;
   winsCount: number;
   lossesCount: number;
-  winRate: number | null; // null if 0 closed trades
-  avgR: number | null; // null if 0 closed trades
+  winRate: number | null; // null if < 10 closed trades
+  avgR: number | null; // null if < 10 closed trades
   tp1BeCount: number;
   tp2Count: number;
   tp3Count: number;
@@ -89,7 +90,12 @@ export function saveBtcTideDatabase(): void {
 }
 
 export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTideStats {
-  if (closedTrades.length === 0) {
+  // Only consider trades from Phase 6 fixes (engine_version >= 'v6.0' or explicit v6.0)
+  const validTrades = closedTrades.filter(
+    (t) => !t.engine_version || t.engine_version >= 'v6.0'
+  );
+
+  if (validTrades.length === 0) {
     return {
       totalClosed: 0,
       winsCount: 0,
@@ -113,20 +119,26 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
   let slCount = 0;
   let expiredCount = 0;
 
-  for (const t of closedTrades) {
+  for (const t of validTrades) {
     const r = typeof t.realizedR === 'number' ? t.realizedR : 0;
     sumR += r;
-    if (r > 0) winsCount++;
-    else if (r < 0) lossesCount++;
+
+    // Strict win vs loss vs expired logic (EXPIRED is NOT a win)
+    if (t.outcome === 'TP1+BE' || t.outcome === 'TP2' || t.outcome === 'TP3') {
+      winsCount++;
+    } else if (t.outcome === 'SL') {
+      lossesCount++;
+    } else if (t.outcome === 'EXPIRED') {
+      expiredCount++;
+    }
 
     if (t.outcome === 'TP1+BE') tp1BeCount++;
     else if (t.outcome === 'TP2') tp2Count++;
     else if (t.outcome === 'TP3') tp3Count++;
     else if (t.outcome === 'SL') slCount++;
-    else if (t.outcome === 'EXPIRED') expiredCount++;
   }
 
-  const totalClosed = closedTrades.length;
+  const totalClosed = validTrades.length;
   // Win rate and average R show "--" (null) until at least 10 real closed trades exist
   const winRate = totalClosed >= 10 ? Number(((winsCount / totalClosed) * 100).toFixed(1)) : null;
   const avgR = totalClosed >= 10 ? Number((sumR / totalClosed).toFixed(2)) : null;

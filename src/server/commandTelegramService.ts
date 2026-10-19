@@ -137,6 +137,14 @@ export function isTelegramConfigured(): boolean {
   return Boolean(tokenPresent && chatIdPresent && chatIdIsNumeric);
 }
 
+
+export type MockTelegramSender = (text: string, chatId: string, idempotencyKey?: string) => Promise<{ success: boolean; messageId?: number }>;
+let activeMockSender: MockTelegramSender | null = null;
+
+export function setMockTelegramSender(mock: MockTelegramSender | null): void {
+  activeMockSender = mock;
+}
+
 const deliveredCommandTelegramKeys = new Map<string, number>();
 const inFlightCommandTelegramKeys = new Map<
   string,
@@ -163,6 +171,16 @@ async function sendRawTelegramMessage(
   if (deliveredCommandTelegramKeys.has(dedupeKey)) {
     console.log(`[SARRAF TELEGRAM DEDUPE] Skipping duplicate retry for already-delivered message (${idempotencyKey || 'content-hash'})`);
     return { success: true };
+  }
+
+  
+  if (activeMockSender || process.env.MOCK_TELEGRAM === "true" || process.env.NODE_ENV === "test") {
+    console.log(`[SARRAF TELEGRAM MOCK] Intercepted test message (chat: ${chatId}, key: ${idempotencyKey || "none"}): ${text.slice(0, 50).replace(/\n/g, " ")}...`);
+    deliveredCommandTelegramKeys.set(dedupeKey, Date.now());
+    if (activeMockSender) {
+      return activeMockSender(text, chatId, idempotencyKey);
+    }
+    return { success: true, messageId: Math.floor(Math.random() * 900000) + 100000 };
   }
 
   const inFlight = inFlightCommandTelegramKeys.get(dedupeKey);

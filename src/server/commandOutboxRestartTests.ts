@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { setMockTelegramSender } from './commandTelegramService.ts';
 import {
   readCommandOutbox,
   writeCommandOutbox,

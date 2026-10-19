@@ -272,4 +272,22 @@ export interface BtcTideStoreState {
   recentTrades: AggTrade[];
   // Large prints >= $50,000 USD (newest first, last 30 min)
   largePrints: AggTrade[];
+  latestHeatmap?: HeatmapColumn;
+  heatmapHistory?: HeatmapColumn[];
 }
+
+export interface HeatmapBucket {
+  p: number; // bucket price in USD
+  b: number; // resting bid size in BTC
+  a: number; // resting ask size in BTC
+}
+
+export interface HeatmapColumn {
+  sec: number; // unix timestamp in seconds
+  mid: number; // mid price at this second
+  bSize: number; // bucket size in USD (e.g. 2 or 5)
+  buckets: HeatmapBucket[];
+}
+
+export type TapeTimeframe = '1m' | '3m' | '10m';
+

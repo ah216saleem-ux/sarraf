@@ -9,9 +9,7 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.resolve(__dirname, '../../data');
+import { DATA_DIR } from './deploymentSafety.ts';
 const BRIEFS_CACHE_FILE = path.resolve(DATA_DIR, 'news_ai_briefs.json');
 
 export type AhmedEventTier = 1 | 2 | 3;

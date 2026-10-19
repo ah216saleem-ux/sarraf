@@ -69,10 +69,19 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
     const isFundingPositive = fundingRate !== null && fundingRate >= 0;
     const isOiChangePositive = oiChange1h !== null && oiChange1h >= 0;
 
-    // Show the last 10 events across our ingested streams (recentLiquidations or liquidations5m)
-    const last10Events = (
-      recentLiquidations.length > 0 ? recentLiquidations : liquidations5m
-    ).slice(0, 10);
+    const nowMs = Date.now();
+    const allEventsRaw = [...recentLiquidations, ...liquidations5m];
+    const seenLiqIds = new Set<string>();
+    const allUniqueEvents = allEventsRaw.filter((item) => {
+      if (seenLiqIds.has(item.id)) return false;
+      seenLiqIds.add(item.id);
+      return true;
+    }).sort((a, b) => b.time - a.time);
+
+    // Strictly separate events inside the 5 min window from older events
+    const fiveMinCutoff = nowMs - 5 * 60 * 1000;
+    const eventsInside5m = allUniqueEvents.filter((l) => l.time >= fiveMinCutoff);
+    const olderEvents = allUniqueEvents.filter((l) => l.time < fiveMinCutoff).slice(0, 10);
 
     return (
       <div className="bg-[#08080a] border border-[#E8B84A]/20 rounded-xl p-4 backdrop-blur-md flex flex-col justify-between shadow-[0_4px_24px_rgba(0,0,0,0.5)]">
@@ -304,14 +313,18 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
               </div>
             </div>
 
-            {/* Last 10 Liquidations List */}
-            <div className="max-h-28 overflow-y-auto divide-y divide-white/[0.04] font-mono text-[11px] pr-1">
-              {last10Events.length === 0 ? (
+            {/* Inside 5m Window Liquidations List */}
+            <div className="max-h-36 overflow-y-auto divide-y divide-white/[0.04] font-mono text-[11px] pr-1">
+              <div className="text-[10px] uppercase font-bold text-neutral-400 py-1 flex items-center justify-between">
+                <span>Recent Events (&le; 5m Window)</span>
+                <span className="text-neutral-500 font-normal">All times UTC</span>
+              </div>
+              {eventsInside5m.length === 0 ? (
                 <div className="py-2 text-center text-neutral-500 text-xs">
-                  Zero liquidations recorded yet · Listening on Binance / OKX / Bybit...
+                  Zero liquidations recorded in last 5 minutes · Listening on Binance / OKX / Bybit...
                 </div>
               ) : (
-                last10Events.map((l) => {
+                eventsInside5m.map((l) => {
                   const isLongLiq = l.side === 'SELL';
                   return (
                     <div
@@ -320,7 +333,7 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
                     >
                       <div className="flex items-center gap-2">
                         <span className="text-neutral-500 text-[10px]">
-                          {new Date(l.time).toTimeString().split(' ')[0]}
+                          {new Date(l.time).toISOString().slice(11, 19)} UTC
                         </span>
                         <span
                           className={`font-bold text-[9px] px-1 py-0.2 rounded ${
@@ -350,6 +363,48 @@ export const PerpPositioningCard: React.FC<PerpPositioningCardProps> = React.mem
                     </div>
                   );
                 })
+              )}
+              {olderEvents.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-white/5">
+                  <div className="text-[10px] uppercase font-bold text-neutral-500 py-1">
+                    Older Liquidations (&gt; 5m)
+                  </div>
+                  {olderEvents.map((l) => {
+                    const isLongLiq = l.side === 'SELL';
+                    return (
+                      <div
+                        key={l.id}
+                        className="flex items-center justify-between py-1 px-1 hover:bg-white/5 transition-colors opacity-75 text-[10px]"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-neutral-500">
+                            {new Date(l.time).toISOString().slice(11, 19)} UTC
+                          </span>
+                          <span
+                            className={`font-bold text-[8px] px-1 py-0.2 rounded ${
+                              isLongLiq
+                                ? 'bg-rose-950/40 text-rose-300/80 border border-rose-500/30'
+                                : 'bg-teal-950/40 text-teal-300/80 border border-teal-500/30'
+                            }`}
+                          >
+                            {isLongLiq ? 'LONG REKT' : 'SHORT REKT'}
+                          </span>
+                          {l.source && (
+                            <span className="text-[9px] text-neutral-600 hidden sm:inline">
+                              [{l.source}]
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-neutral-300">${l.price.toFixed(2)}</span>
+                          <span className={isLongLiq ? 'text-rose-400/80' : 'text-teal-400/80'}>
+                            {formatUsdCompact(l.usdValue)} ({l.qty.toFixed(3)}₿)
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
           </div>

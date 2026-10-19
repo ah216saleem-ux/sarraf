@@ -9,7 +9,7 @@ import { CvdAndDeltaPanel } from './CvdAndDeltaPanel';
 import { OrderBookDepthCard } from './OrderBookDepthCard';
 import { PerpPositioningCard } from './PerpPositioningCard';
 import { VenuesTableCard } from './VenuesTableCard';
-import { HeroTideCanvas } from './HeroTideCanvas';
+import { LiquidityTapeCanvas } from './LiquidityTapeCanvas';
 import { BtcTideDecisionCard } from './components/BtcTideDecisionCard';
 import { ActiveTradePlanCard } from './components/ActiveTradePlanCard';
 import { SignalLogTableCard } from './components/SignalLogTableCard';
@@ -45,6 +45,7 @@ export const BtcTideView: React.FC = () => {
     secondBins,
     recentTrades,
     largePrints,
+    heatmapHistory,
   } = store;
 
   const [activeSubTab, setActiveSubTab] = useState<BtcTideSubTab>('FLOW');
@@ -221,8 +222,8 @@ export const BtcTideView: React.FC = () => {
         </div>
       </div>
 
-      {/* 2. Top Hero: Flow Reactor Default Scene + Overlay + Single Compact Stat Row Under Price */}
-      <HeroTideCanvas
+      {/* 2. Top Hero: LIQUIDITY TAPE Data-Literal Canvas */}
+      <LiquidityTapeCanvas
         currentPrice={currentPrice}
         priceFlash={priceFlash}
         status={status}
@@ -237,6 +238,8 @@ export const BtcTideView: React.FC = () => {
         spotAgeMs={feedAges?.spot}
         isBookStale={feedStale?.book}
         bookAgeMs={feedAges?.book}
+        heatmapHistory={heatmapHistory}
+        recentTrades={recentTrades}
       />
 
       {/* 3. Sticky Segmented Control with 4 Sub-Tabs: FLOW | BOOK | PERPS | SIGNALS */}

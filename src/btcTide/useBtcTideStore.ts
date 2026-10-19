@@ -141,7 +141,11 @@ let currentState: BtcTideStoreState = {
   secondBins: [],
   recentTrades: [],
   largePrints: [],
+  heatmapHistory: [],
+  latestHeatmap: undefined,
 };
+
+let seenTradeIds = new Set<string>();
 
 type Listener = (state: BtcTideStoreState) => void;
 const listeners = new Set<Listener>();
@@ -230,12 +234,17 @@ function connectBackendSse() {
         if (data.perp?.markPrice) lastPerpsUpdate = now;
         if (data.venues?.updatedAt) lastVenuesUpdate = now;
 
-        // Trade particle notifications for HeroTideCanvas
-        if (Array.isArray(data.recentTrades) && data.recentTrades.length > 0) {
-          const newest = data.recentTrades[0];
-          if (!lastSeenTradeId || newest.id !== lastSeenTradeId) {
-            lastSeenTradeId = newest.id;
-            tradeListeners.forEach((cb) => cb(newest));
+        // Dispatch real trades to listeners (deduplicating by real trade ID)
+        if (Array.isArray(data.recentTrades)) {
+          for (let i = data.recentTrades.length - 1; i >= 0; i--) {
+            const t = data.recentTrades[i];
+            if (t && t.id && !seenTradeIds.has(t.id)) {
+              seenTradeIds.add(t.id);
+              tradeListeners.forEach((cb) => cb(t));
+            }
+          }
+          if (seenTradeIds.size > 2000) {
+            seenTradeIds = new Set(Array.from(seenTradeIds).slice(-1000));
           }
         }
 
@@ -265,6 +274,19 @@ function connectBackendSse() {
           };
         }
 
+        let updatedHeatmapHistory = currentState.heatmapHistory || [];
+        if (data.latestHeatmap) {
+          const lastH =
+            updatedHeatmapHistory.length > 0
+              ? updatedHeatmapHistory[updatedHeatmapHistory.length - 1]
+              : null;
+          if (!lastH || data.latestHeatmap.sec > lastH.sec) {
+            updatedHeatmapHistory = [...updatedHeatmapHistory, data.latestHeatmap].slice(-600);
+          } else {
+            updatedHeatmapHistory = [...updatedHeatmapHistory.slice(0, -1), data.latestHeatmap];
+          }
+        }
+
         currentState = {
           ...currentState,
           activeSource: data.activeSource || 'Binance',
@@ -292,6 +314,8 @@ function connectBackendSse() {
           closedTrades: data.closedTrades || [],
           signalStats: data.signalStats || currentState.signalStats,
           activeSignal,
+          heatmapHistory: updatedHeatmapHistory,
+          latestHeatmap: data.latestHeatmap || currentState.latestHeatmap,
         };
 
         scheduleEmit();
@@ -336,6 +360,17 @@ async function fetchInitialBackendState() {
         };
       }
 
+      let initialHeatmapHistory = currentState.heatmapHistory || [];
+      try {
+        const hmRes = await fetch('/api/btc-tide/heatmap?limit=600');
+        if (hmRes.ok) {
+          const hmJson = await hmRes.json();
+          if (Array.isArray(hmJson.history) && hmJson.history.length > 0) {
+            initialHeatmapHistory = hmJson.history;
+          }
+        }
+      } catch {}
+
       currentState = {
         ...currentState,
         activeSource: json.activeSource || 'Binance',
@@ -362,6 +397,8 @@ async function fetchInitialBackendState() {
         closedTrades: json.closedTrades || [],
         signalStats: json.signalStats || currentState.signalStats,
         activeSignal,
+        heatmapHistory: initialHeatmapHistory,
+        latestHeatmap: json.latestHeatmap || initialHeatmapHistory[initialHeatmapHistory.length - 1],
       };
       scheduleEmit();
     }
