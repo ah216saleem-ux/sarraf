@@ -22,6 +22,19 @@ export interface ValidationLogItem extends ValidationResult {
   lessonsUsedCount: number;
 }
 
+export function resolveGeminiModel(): string {
+  const raw = (process.env.GEMINI_MODEL || "").trim();
+  if (
+    !raw ||
+    raw.includes("gemini-2.5-flash") ||
+    raw.includes("gemini-2.0") ||
+    raw.includes("gemini-1.5")
+  ) {
+    return "gemini-3.8-flash";
+  }
+  return raw;
+}
+
 const validationLogs: ValidationLogItem[] = [];
 
 // Initialize Google GenAI client safely
@@ -31,7 +44,14 @@ function getGenAIClient(): GoogleGenAI | null {
     return null;
   }
   try {
-    return new GoogleGenAI({ apiKey });
+    return new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    });
   } catch (err: any) {
     console.warn('[GEMINI VALIDATOR] Error initializing GoogleGenAI client:', err.message);
     return null;
@@ -66,7 +86,7 @@ export async function validateSignalWithGemini(signal: {
   upcomingNews?: string;
 }): Promise<ValidationResult> {
   const startMs = Date.now();
-  const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const modelName = resolveGeminiModel();
 
   const ai = getGenAIClient();
 
@@ -114,32 +134,31 @@ CRITICAL INSTRUCTIONS:
 {"verdict":"APPROVE"|"REJECT","confidence":0-100,"reason":"maximum 20 words rationale"}`;
 
   // Helper with 8s timeout and 1 retry after 2s
-  const callWithTimeout = async (retry: boolean = true): Promise<ValidationResult> => {
+  const callWithTimeout = async (targetModel: string = modelName, allowFallbackModel: boolean = true): Promise<ValidationResult> => {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
 
       const response = await ai.models.generateContent({
-        model: modelName,
+        model: targetModel,
         contents: prompt,
       });
 
       clearTimeout(timeoutId);
+      const text = response.text?.trim() || "";
 
-      const text = response.text?.trim() || '';
-      // Parse JSON
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
-        throw new Error('Invalid non-JSON response format from AI');
+        throw new Error("Invalid non-JSON response format from AI");
       }
 
       const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.verdict !== 'APPROVE' && parsed.verdict !== 'REJECT') {
-        throw new Error('Verdict must be APPROVE or REJECT');
+      if (parsed.verdict !== "APPROVE" && parsed.verdict !== "REJECT") {
+        throw new Error("Verdict must be APPROVE or REJECT");
       }
 
-      const confidence = typeof parsed.confidence === 'number' ? Math.min(100, Math.max(0, parsed.confidence)) : 75;
-      const reason = typeof parsed.reason === 'string' ? parsed.reason.slice(0, 160) : 'Standard structure confirmed';
+      const confidence = typeof parsed.confidence === "number" ? Math.min(100, Math.max(0, parsed.confidence)) : 75;
+      const reason = typeof parsed.reason === "string" ? parsed.reason.slice(0, 160) : "Standard structure confirmed";
 
       return {
         verdict: parsed.verdict,
@@ -147,30 +166,27 @@ CRITICAL INSTRUCTIONS:
         reason,
         latencyMs: Date.now() - startMs,
         timestamp: new Date().toISOString(),
-        model: modelName,
+        model: targetModel,
         lessonsUsedCount,
       };
     } catch (err: any) {
-      if (retry) {
-        console.warn(`[GEMINI VALIDATOR] Attempt 1 failed (${err.message}). Retrying in 2 seconds...`);
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        return callWithTimeout(false);
+      const msg = String(err?.message || err || "");
+      if (allowFallbackModel && targetModel !== "gemini-3.1-flash-lite") {
+        return callWithTimeout("gemini-3.1-flash-lite", false);
       }
-      console.warn(`[GEMINI VALIDATOR] AI validation failed: ${err.message}. Fallback to engine score.`);
       return {
-        verdict: 'APPROVE',
+        verdict: "APPROVE",
         confidence: 50,
-        reason: `AI UNAVAILABLE (${err.message.slice(0, 40)}). Engine score authority retained.`,
+        reason: "AI quota/network fallback: Engine score authority retained.",
         latencyMs: Date.now() - startMs,
         timestamp: new Date().toISOString(),
-        model: modelName,
+        model: targetModel,
         lessonsUsedCount,
-        error: err.message,
       };
     }
   };
 
-  const finalResult = await callWithTimeout(true);
+  const finalResult = await callWithTimeout(modelName, true);
   logValidation(signal, finalResult);
   return finalResult;
 }
@@ -212,7 +228,7 @@ export async function generateMarketChat(
     };
   }
 
-  const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const modelName = resolveGeminiModel();
 
   const systemInstruction = `You are SARRAF AI — an elite macro bullion strategist and algorithmic risk advisor for XAU/USD spot trading desks.
 

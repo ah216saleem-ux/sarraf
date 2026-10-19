@@ -1675,7 +1675,7 @@ export const DashboardView: React.FC = () => {
                 </div>
               </div>
               <span className="text-[10px] font-mono text-neutral-400 bg-black/40 px-2 py-1 rounded border border-white/10">
-                Model: gemini-2.5-flash
+                Model: gemini-3.8-flash
               </span>
             </div>
 

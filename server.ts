@@ -1840,7 +1840,7 @@ app.get('/api/system/health', (req, res) => {
     },
     gemini: {
       configured: geminiConfigured,
-      model: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+      model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
       lastValidation: geminiLogs[0] || null,
     },
     newsFeed: news.status,
@@ -2585,7 +2585,7 @@ app.get('/api/admin/go-live/status', requireAdminAuth, (_req, res) => {
       id: 'gemini',
       name: 'Gemini AI Intelligence Validator',
       passed: isGeminiWorking,
-      details: isGeminiWorking ? `Model: ${process.env.GEMINI_MODEL || 'gemini-2.5-flash'}` : 'GEMINI_API_KEY not configured',
+      details: isGeminiWorking ? `Model: ${process.env.GEMINI_MODEL || 'gemini-3.8-flash'}` : 'GEMINI_API_KEY not configured',
     },
     {
       id: 'telegram',

@@ -9,6 +9,7 @@ import {
 } from '../command/signal/types.ts';
 import { DATA_DIR, writeJsonAtomic } from './deploymentSafety.ts';
 import { getEffectiveTelegramChatId } from './telegramWorker.ts';
+import { getAllApprovedRecipients } from './telegramSubscribers.ts';
 
 const SETTINGS_FILE = path.resolve(DATA_DIR, 'command_telegram_settings.json');
 const DYNAMIC_CHAT_FILE = path.resolve(DATA_DIR, 'telegram_chat.json');
@@ -35,7 +36,7 @@ export interface CommandTelegramSettings {
 }
 
 let settings: CommandTelegramSettings = {
-  enabled: false,
+  enabled: true,
   lastMessageTime: null,
   lastMessageStatus: 'NONE',
   lastErrorMessage: null,
@@ -61,7 +62,7 @@ export function loadTelegramSettings() {
       const raw = fs.readFileSync(SETTINGS_FILE, 'utf8');
       const data = JSON.parse(raw);
       settings = {
-        enabled: Boolean(data.enabled),
+        enabled: data.enabled !== undefined ? Boolean(data.enabled) : true,
         lastMessageTime: typeof data.lastMessageTime === 'number' ? data.lastMessageTime : null,
         lastMessageStatus: data.lastMessageStatus || 'NONE',
         lastErrorMessage: data.lastErrorMessage || null,
@@ -333,7 +334,14 @@ export async function processCommandOutbox(): Promise<{ processed: number; deliv
       item.lastAttemptAt = new Date().toISOString();
       item.retryCount = (item.retryCount || 0) + 1;
 
-      const res = await sendRawTelegramMessage(creds.token, creds.chatId, item.text, item.idempotencyKey);
+      const recipients = getAllApprovedRecipients(creds.chatId);
+      const primaryChat = recipients[0] || creds.chatId;
+      const res = await sendRawTelegramMessage(creds.token, primaryChat, item.text, item.idempotencyKey);
+      if (res.success && recipients.length > 1) {
+        for (const extraChat of recipients.slice(1)) {
+          sendRawTelegramMessage(creds.token, extraChat, item.text, item.idempotencyKey ? `${item.idempotencyKey}_${extraChat}` : undefined).catch(() => {});
+        }
+      }
 
       if (res.success) {
         item.status = 'SENT';

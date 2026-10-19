@@ -828,8 +828,12 @@ export async function lookupActualValueWithGemini(
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: { headers: { "User-Agent": "aistudio-build" } },
+    });
+    const rawModel = (process.env.GEMINI_MODEL || "").trim();
+    const model = (!rawModel || rawModel.includes("gemini-2.5-flash") || rawModel.includes("gemini-2.0") || rawModel.includes("gemini-1.5")) ? "gemini-3.8-flash" : rawModel;
 
     const prompt = `You are SARRAF News Intelligence Assistant.
 Explain in 1 short sentence (max 20 words) the gold (XAU/USD) impact of this verified macroeconomic release.

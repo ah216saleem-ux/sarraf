@@ -754,8 +754,12 @@ async function callGoogleGenAiFallback(inputPrompt: string): Promise<string | nu
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') return null;
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
-    const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: { headers: { "User-Agent": "aistudio-build" } },
+    });
+    const rawModel = (process.env.GEMINI_MODEL || "").trim();
+    const model = (!rawModel || rawModel.includes("gemini-2.5-flash") || rawModel.includes("gemini-2.0") || rawModel.includes("gemini-1.5")) ? "gemini-3.8-flash" : rawModel;
 
     const systemInstruction =
       'You are AHMED AI, an sarraf gold macro briefing engine. Output ONLY a strict JSON object with four keys: headline, what_it_is, why_gold_cares, watch_for. Each must be 1 short sentence (headline under 12 words). DO NOT introduce any numbers not found in the input. Never predict actual values.';

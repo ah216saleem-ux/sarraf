@@ -2,5 +2,7 @@
   "name": "SARRAF — Gold Intelligence in Real Time",
   "description": "Real-time XAU/USD gold price tracking and disciplined trade signals delivered directly to Telegram.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

@@ -29,7 +29,21 @@ import { evaluateStructureBias, isGoldMarketOpen } from './sarrafEngine.ts';
 import { getCurrentSettings, updateSettings, verifyAdminUsername, verifyAdminPassword } from './settingsEngine.ts';
 import { getNewsFeedStatus, checkNewsLockState } from './newsEngine.ts';
 
-import { DATA_DIR } from './deploymentSafety.ts';
+import { DATA_DIR } from "./deploymentSafety.ts";
+import {
+  isChatAdmin,
+  isChatApproved,
+  getSubscriber,
+  registerAdminChat,
+  upsertUserRequest,
+  setSubscriberStatus,
+  getAllAdmins,
+  getAllApprovedRecipients,
+  getAllSubscribersList,
+} from "./telegramSubscribers.ts";
+import { getBackendSnapshot } from "./btcTideBackendEngine.ts";
+import { getAtlasState } from "../../server/atlas/atlasEngine.ts";
+import { processCommandOutbox } from "./commandTelegramService.ts";
 
 const OUTBOX_FILE = path.resolve(DATA_DIR, 'outbox.json');
 const THREAD_MAP_FILE = path.resolve(DATA_DIR, 'telegram_threads.json');
@@ -551,144 +565,507 @@ async function processOutboxItem(item: OutboxRecord): Promise<void> {
   }
 }
 
-// Generate interactive inline keyboard for Telegram Admin Dashboard
+// Generate interactive inline keyboard for Telegram Admin Dashboard (ADMIN ONLY)
 export function getMainControlKeyboard() {
   const dryRun = getIsDryRun();
   const managerState = getFullManagerState();
   const isPaused = managerState.isPaused;
+  const subs = getAllSubscribersList();
+  const pendingCount = subs.filter((s) => s.status === "PENDING").length;
 
   return {
     inline_keyboard: [
       [
-        { text: '📊 Live Status', callback_data: 'cmd_status' },
-        { text: '⚡ Send Test Signal', callback_data: 'cmd_test' },
+        { text: "📊 Live Status", callback_data: "cmd_status" },
+        { text: "⚡ Send Test Signal", callback_data: "cmd_test" },
       ],
       [
-        { text: dryRun ? '🔴 Switch to LIVE Mode' : '🟡 Switch to DRY RUN', callback_data: 'cmd_toggle_dryrun' },
-        { text: isPaused ? '▶️ Resume Engine' : '⏸️ Pause Engine', callback_data: 'cmd_toggle_pause' },
+        { text: "💰 Gold Price & Bias", callback_data: "cmd_price" },
+        { text: "₿ BTC Tide Live", callback_data: "cmd_btc" },
       ],
       [
-        { text: '📈 Active & History', callback_data: 'cmd_signals' },
-        { text: '💰 Gold Price & Bias', callback_data: 'cmd_price' },
+        { text: "🏛️ Sarraf Atlas Zones", callback_data: "cmd_atlas" },
+        { text: "📈 Active & History", callback_data: "cmd_signals" },
       ],
       [
-        { text: '📰 News & Locks', callback_data: 'cmd_news' },
-        { text: '🏆 Performance Stats', callback_data: 'cmd_stats' },
+        {
+          text: pendingCount > 0 ? `👥 Users (${pendingCount} Pending 🔔)` : "👥 Manage Users",
+          callback_data: "cmd_users",
+        },
+        { text: "🔄 Flush Pending Signals", callback_data: "cmd_flush" },
       ],
       [
-        { text: '⚙️ Risk Parameters', callback_data: 'cmd_risk' },
-        { text: '👥 Channels & Users', callback_data: 'cmd_users' },
+        {
+          text: dryRun ? "🔴 Switch to LIVE Mode" : "🟡 Switch to DRY RUN",
+          callback_data: "cmd_toggle_dryrun",
+        },
+        {
+          text: isPaused ? "▶️ Resume Engine" : "⏸️ Pause Engine",
+          callback_data: "cmd_toggle_pause",
+        },
+      ],
+      [
+        { text: "⚙️ Risk & SL/TP", callback_data: "cmd_risk" },
+        { text: "🏆 Win Rate & Stats", callback_data: "cmd_stats" },
+      ],
+      [
+        { text: "📰 News & Locks", callback_data: "cmd_news" },
+        { text: "❓ Admin Guide", callback_data: "cmd_help" },
       ],
     ],
   };
 }
 
-// Register Telegram Bot Command Menu with Telegram API for native client menu button
-export async function registerBotCommands(token: string) {
+// Register Telegram Bot Command Menu:
+// - Normal users (default scope) ONLY see /start
+// - Admin chat scope sees full admin control commands
+export async function registerBotCommands(token: string, adminChatId?: string | number) {
   try {
     const url = `https://api.telegram.org/bot${token}/setMyCommands`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    // 1. Default scope for regular subscribers: ONLY /start
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         commands: [
-          { command: 'start', description: '🚀 Main Control Terminal & Interactive Dashboard' },
-          { command: 'menu', description: '📱 Open Interactive Control Buttons' },
-          { command: 'status', description: '📊 Live Engine, Price, Cooldown & Outbox Status' },
-          { command: 'testsignal', description: '⚡ Send Live Verification Gold Trade Signal' },
-          { command: 'signals', description: '📈 Active Trade & Last Executed Signals' },
-          { command: 'dryrun', description: '🔄 Toggle DRY RUN / LIVE Dispatch Mode' },
-          { command: 'price', description: '💰 Live Gold XAU/USD Quote & Structure Biases' },
-          { command: 'news', description: '📰 Upcoming USD High Impact Events & Lock Windows' },
-          { command: 'stats', description: '🏆 Performance Win Rate & Net R Gains' },
-          { command: 'risk', description: '⚙️ Stop Loss & Take Profit Target Parameters' },
-          { command: 'users', description: '👥 Connected Channels, Admin & Webhook Status' },
-          { command: 'pause', description: '⏸️ Pause Automated Signal Manager' },
-          { command: 'resume', description: '▶️ Resume Automated Signal Manager' },
-          { command: 'help', description: '❓ Complete Command Manual & Remote Guide' },
+          { command: "start", description: "🔱 Start SARRAF VIP Signal Feed" },
         ],
       }),
     });
-    if (res.ok) {
-      console.log('[TELEGRAM WORKER] Bot commands menu registered successfully with Telegram API.');
+
+    // 2. Admin-specific command menu for all registered Admin chats
+    const adminIds = new Set<string>();
+    if (adminChatId) adminIds.add(String(adminChatId));
+    const dyn = getDynamicTelegramChatId();
+    if (dyn) adminIds.add(String(dyn));
+    for (const a of getAllAdmins()) {
+      adminIds.add(a.chatId);
     }
+
+    const adminCommands = [
+      { command: "start", description: "👑 Open Master Admin Control Panel" },
+      { command: "menu", description: "📱 Open Interactive Admin Buttons" },
+      { command: "status", description: "📊 Live Gold, BTC & Outbox Status" },
+      { command: "users", description: "👥 Approve / Block Subscribers" },
+      { command: "testsignal", description: "⚡ Send Live Test Signal Now" },
+      { command: "btc", description: "₿ Live BTC Tide Orderflow & Signal" },
+      { command: "atlas", description: "🏛️ Today Sarraf Atlas Zones & Bias" },
+      { command: "signals", description: "📈 Active Trade & Recent History" },
+      { command: "price", description: "💰 Live Gold XAU/USD Quote & Bias" },
+      { command: "risk", description: "⚙️ View / Edit SL, TP & Min Score" },
+      { command: "stats", description: "🏆 Win Rate & R-Multiple Performance" },
+      { command: "news", description: "📰 USD High-Impact News & Lock Radar" },
+      { command: "pause", description: "⏸️ Pause Automated Signal Scanner" },
+      { command: "resume", description: "▶️ Resume Automated Signal Scanner" },
+      { command: "flush", description: "🔄 Force Deliver Queued Signals" },
+      { command: "help", description: "❓ Complete Admin Remote Control Manual" },
+    ];
+
+    for (const idStr of adminIds) {
+      const numId = Number(idStr);
+      if (Number.isFinite(numId)) {
+        await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            scope: { type: "chat", chat_id: numId },
+            commands: adminCommands,
+          }),
+        }).catch(() => {});
+      }
+    }
+    console.log("[TELEGRAM WORKER] Role-based bot command menus registered with Telegram API.");
   } catch (err: any) {
-    console.warn('[TELEGRAM WORKER] Failed to register bot commands menu:', err.message);
+    console.warn("[TELEGRAM WORKER] Failed to register bot commands menu:", err.message);
   }
 }
 
-// Universal handler for commands and inline buttons
+// Handle Normal User (Non-Admin) interactions
+async function handleRegularUserInteraction(
+  chatId: string | number,
+  replyToMessageId?: number,
+  username?: string,
+  firstName?: string,
+  callbackData?: string
+): Promise<void> {
+  const idStr = String(chatId).trim();
+  const { subscriber, isNewPending } = upsertUserRequest(idStr, username, firstName);
+
+  // If user is APPROVED: show simple clean VIP Subscriber status card (no admin commands!)
+  if (subscriber.status === "APPROVED") {
+    const approvedText = [
+      "🔱 <b>SARRAF VIP SIGNAL FEED</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      "🟢 <b>Status:</b> Active & Approved Subscriber",
+      `👤 <b>Member:</b> ${firstName || username || "VIP Trader"}`,
+      "📡 <b>Live Feeds:</b> XAU/USD Gold & BTC/USD Active",
+      "",
+      "✅ <b>Aapka VIP signal feed active hai!</b>",
+      "Jab bhi koi high-probability Gold ya BTC trade trigger hoga, aapko yahan automatic Entry, Stop Loss, aur Take Profit updates milengi.",
+    ].join("\n");
+    await sendTelegramHttpRequest(approvedText, replyToMessageId, chatId, undefined, "HTML");
+    return;
+  }
+
+  // If user is BLOCKED
+  if (subscriber.status === "BLOCKED") {
+    const blockedText = [
+      "🚫 <b>ACCESS RESTRICTED</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      "Aapka access Admin ki taraf se disable hai.",
+    ].join("\n");
+    await sendTelegramHttpRequest(blockedText, replyToMessageId, chatId, undefined, "HTML");
+    return;
+  }
+
+  // User is PENDING approval
+  const hasAnyAdmin = getAllAdmins().length > 0 || Boolean(getDynamicTelegramChatId());
+  const userPendingKeyboard: any = {
+    inline_keyboard: [
+      [{ text: "🔄 Check Approval Status", callback_data: "user_check_status" }],
+    ],
+  };
+  // If no admin has bound the bot yet, show a 1-tap Owner Admin Claim button so the owner can claim Admin without typing
+  if (!hasAnyAdmin) {
+    userPendingKeyboard.inline_keyboard.push([
+      { text: "👑 I am the Admin (Activate Admin Panel)", callback_data: "claim_owner_admin" },
+    ]);
+  }
+
+  const pendingText = [
+    "🔱 <b>SARRAF VIP TRADING BOT</b>",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━",
+    "⏳ <b>Status:</b> Pending Admin Approval",
+    `👤 <b>User:</b> ${firstName || ""} ${username ? `(@${username})` : ""}`,
+    `🆔 <b>Chat ID:</b> <code>${idStr}</code>`,
+    "",
+    "Aapki VIP Signal access request Admin ko bhej di gayi hai.",
+    "Jaise hi Admin approve karenge, aapko automatic <b>XAU/USD (Gold)</b> aur <b>BTC/USD</b> trade signals milna shuru ho jayenge!",
+  ].join("\n");
+
+  await sendTelegramHttpRequest(pendingText, replyToMessageId, chatId, userPendingKeyboard, "HTML");
+
+  // Notify Admin(s) immediately when a new user requests access (or taps Check Status)
+  if (isNewPending || callbackData === "user_check_status") {
+    const adminTargets = new Set<string>();
+    const dynAdmin = getDynamicTelegramChatId();
+    if (dynAdmin) adminTargets.add(dynAdmin);
+    for (const a of getAllAdmins()) adminTargets.add(a.chatId);
+
+    const adminNotifyText = [
+      "🔔 <b>NEW SUBSCRIBER APPROVAL REQUEST</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `👤 <b>Name:</b> ${firstName || "Trader"}`,
+      `🔗 <b>Username:</b> ${username ? `@${username}` : "No username"}`,
+      `🆔 <b>Chat ID:</b> <code>${idStr}</code>`,
+      "",
+      "Kya aap is user ko Live Trade Signals ke liye <b>Approve</b> karna chahte hain?",
+    ].join("\n");
+
+    const approvalKeyboard = {
+      inline_keyboard: [
+        [
+          { text: `✅ Approve ${firstName || username || idStr}`, callback_data: `adm_approve_${idStr}` },
+          { text: "❌ Block / Reject", callback_data: `adm_block_${idStr}` },
+        ],
+        [{ text: "👥 View All Subscribers", callback_data: "cmd_users" }],
+      ],
+    };
+
+    for (const adminId of adminTargets) {
+      if (adminId !== idStr) {
+        await sendTelegramHttpRequest(adminNotifyText, undefined, adminId, approvalKeyboard, "HTML");
+      }
+    }
+  }
+}
+
+// Universal handler for ADMIN commands and inline buttons
 async function executeTelegramAction(
   action: string,
   chatId: string | number,
   replyToMessageId?: number,
   fromUser?: string,
-  rawArgs?: string[]
+  rawArgs?: string[],
+  firstName?: string
 ): Promise<void> {
-  const normAction = action.toLowerCase().replace(/^\//, '').replace(/^cmd_/, '');
+  const idStr = String(chatId).trim();
+  const normAction = action.toLowerCase().replace(/^\//, "").replace(/^cmd_/, "");
+
+  // 1. Check if user is trying to authenticate as Admin via /admin or /setchat or claim_owner_admin
+  const hasAnyAdmin = getAllAdmins().length > 0 || Boolean(getDynamicTelegramChatId());
+  if (normAction === "claim_owner_admin" && !hasAnyAdmin) {
+    registerAdminChat(idStr, fromUser, firstName);
+    setDynamicTelegramChatId(idStr);
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (token) registerBotCommands(token, idStr).catch(() => {});
+    setTimeout(() => {
+      triggerOutboxProcessing();
+      processCommandOutbox().catch(() => {});
+    }, 200);
+  } else if (normAction === "admin" || normAction === "setchat" || normAction === "register" || normAction === "setchannel") {
+    if (!rawArgs || rawArgs.length < 2) {
+      const usageText = [
+        "🔐 <b>ADMIN TERMINAL LOGIN</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "Apne Telegram par Master Admin Panel activate karne ke liye yeh command bhejein:",
+        "",
+        "<code>/admin Gmcf7 9663059aaAA@@</code>",
+      ].join("\n");
+      await sendTelegramHttpRequest(usageText, replyToMessageId, chatId, undefined, "HTML");
+      return;
+    }
+    const usernameInput = rawArgs[0];
+    const passwordInput = rawArgs[1];
+    const userValid = verifyAdminUsername(usernameInput);
+    const passValid = verifyAdminPassword(passwordInput);
+    if (!userValid || !passValid) {
+      await sendTelegramHttpRequest(
+        "❌ <b>INVALID ADMIN CREDENTIALS</b>\nUsername ya password ghalat hai.",
+        replyToMessageId,
+        chatId,
+        undefined,
+        "HTML"
+      );
+      return;
+    }
+    registerAdminChat(idStr, fromUser, firstName);
+    setDynamicTelegramChatId(idStr);
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (token) registerBotCommands(token, idStr).catch(() => {});
+    setTimeout(() => {
+      triggerOutboxProcessing();
+      processCommandOutbox().catch(() => {});
+    }, 200);
+
+    const successText = [
+      "👑 <b>MASTER ADMIN REGISTERED SUCCESSFULLY!</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `✅ <b>Admin Chat ID:</b> <code>${idStr}</code> (@${fromUser || "admin"})`,
+      "🚀 <b>Tamam pending aur live trades ab aapke Telegram par foran aayengi!</b>",
+      "👥 <b>User Approval System:</b> Jab bhi koi naya user bot start karega, aapko Approve/Block ka button milega.",
+      "",
+      "👇 <b>Master Control Panel (Without Opening Website):</b>",
+    ].join("\n");
+    await sendTelegramHttpRequest(successText, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
+    return;
+  }
+
+  // 2. Enforce strict Admin vs User check!
+  const isAdmin = isChatAdmin(idStr) || (getDynamicTelegramChatId() === idStr);
+  if (!isAdmin) {
+    // If normal user sent a command other than /start, tell them it is Admin-only
+    if (normAction !== "start" && normAction !== "user_check_status") {
+      const sub = getSubscriber(idStr);
+      if (sub && sub.status === "APPROVED") {
+        await sendTelegramHttpRequest(
+          "🔒 <b>Admin Access Only</b>\nAapka VIP Signal Feed active hai — aapko tamam live signals automatically milenge.",
+          replyToMessageId,
+          chatId,
+          undefined,
+          "HTML"
+        );
+        return;
+      }
+    }
+    await handleRegularUserInteraction(chatId, replyToMessageId, fromUser, firstName, normAction);
+    return;
+  }
+
+  // Ensure Admin is saved in telegramSubscribers & dynamicChatId
+  registerAdminChat(idStr, fromUser, firstName);
+  if (!getDynamicTelegramChatId()) {
+    setDynamicTelegramChatId(idStr);
+  }
+
   const managerState = getFullManagerState();
   const settings = getCurrentSettings();
   const dryRun = getIsDryRun();
 
-  console.log(`[TELEGRAM ADMIN] Executing action "${normAction}" for Chat ID ${chatId} (${fromUser || 'admin'})`);
+  console.log(`[TELEGRAM ADMIN] Executing action "${normAction}" for Admin Chat ID ${chatId} (${fromUser || "admin"})`);
 
-  if (normAction === 'start' || normAction === 'menu' || normAction === 'bind' || normAction === 'register') {
-    setDynamicTelegramChatId(String(chatId));
+  // Handle 1-tap User Approval / Block callbacks from Admin
+  if (normAction.startsWith("adm_approve_")) {
+    const targetUserId = normAction.replace("adm_approve_", "").trim();
+    const updated = setSubscriberStatus(targetUserId, "APPROVED");
+    // Notify the approved user immediately!
+    const userWelcome = [
+      "✅ <b>VIP ACCESS APPROVED!</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      "Aapka account Admin ne <b>Approve</b> kar diya hai! 🎉",
+      "",
+      "📡 <b>Active Feeds:</b> XAU/USD Gold & BTC/USD Live",
+      "Ab jab bhi koi trade setup trigger hoga, aapko yahan automatic Live Trade Signal, Entry, Stop Loss, aur TP1–TP4 updates milengi!",
+    ].join("\n");
+    await sendTelegramHttpRequest(userWelcome, undefined, targetUserId, undefined, "HTML");
 
-    const text = [
-      '🔱 <b>SARRAF COMMAND TERMINAL</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `✅ <b>CHAT REGISTERED SUCCESSFULLY!</b>`,
-      `📡 <b>Target Chat ID:</b> <code>${chatId}</code>`,
-      `⚙️ <b>Execution Mode:</b> ${dryRun ? '🟡 DRY RUN (SIMULATION)' : '🟢 LIVE DISPATCH'}`,
-      `⚡ <b>Scanner State:</b> ${managerState.isPaused ? '⏸️ PAUSED' : managerState.state}`,
-      `📊 <b>Daily Signals:</b> ${managerState.dailySignalsCount} sent today | <b>Max:</b> Unlimited`,
-      `⏱️ <b>Cooldown:</b> ${managerState.cooldownEndsAt ? '⏳ Active Cooldown' : '✅ Active Scanning'}`,
-      '',
-      '🚀 <b>Live automatic gold trades are activated for this chat!</b>',
-      '<i>Har automatic trade setup yahan instant alert k sath phonchay ga!</i>',
-      '',
-      '👇 <b>Quick Control Panel (Tap any button below):</b>',
-    ].join('\n');
-
-    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+    await sendTelegramHttpRequest(
+      `✅ <b>USER APPROVED!</b>\nSubscriber <code>${targetUserId}</code> (@${updated?.username || "user"}) ko VIP Signals ke liye approve kar diya gaya hai aur unko confirmation message bhej diya gaya hai.`,
+      replyToMessageId,
+      chatId,
+      getMainControlKeyboard(),
+      "HTML"
+    );
     return;
   }
 
-  if (normAction === 'status') {
+  if (normAction.startsWith("adm_block_")) {
+    const targetUserId = normAction.replace("adm_block_", "").trim();
+    const updated = setSubscriberStatus(targetUserId, "BLOCKED");
+    await sendTelegramHttpRequest(
+      `🚫 <b>USER BLOCKED / REMOVED</b>\nUser <code>${targetUserId}</code> (@${updated?.username || "user"}) ka signal access disable kar diya gaya hai.`,
+      replyToMessageId,
+      chatId,
+      getMainControlKeyboard(),
+      "HTML"
+    );
+    return;
+  }
+
+  if (normAction === "start" || normAction === "menu" || normAction === "bind") {
+    setDynamicTelegramChatId(idStr);
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (token) registerBotCommands(token, idStr).catch(() => {});
+    setTimeout(() => {
+      triggerOutboxProcessing();
+      processCommandOutbox().catch(() => {});
+    }, 200);
+
+    const allSubs = getAllSubscribersList();
+    const approvedCount = allSubs.filter((s) => s.status === "APPROVED").length;
+    const pendingCount = allSubs.filter((s) => s.status === "PENDING").length;
+
+    const text = [
+      "👑 <b>SARRAF MASTER ADMIN TERMINAL</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `✅ <b>Admin Chat ID:</b> <code>${chatId}</code>`,
+      `⚙️ <b>Dispatch Mode:</b> ${dryRun ? "🟡 DRY RUN" : "🟢 LIVE DISPATCH"}`,
+      `⚡ <b>Gold Scanner:</b> ${managerState.isPaused ? "⏸️ PAUSED" : managerState.state}`,
+      `👥 <b>Subscribers:</b> ${approvedCount} Approved | ${pendingCount} Pending Approval`,
+      `📊 <b>Signals Today:</b> ${managerState.dailySignalsCount} sent`,
+      "",
+      "🚀 <b>Full Remote Control Active (No Website Needed):</b>",
+      "<i>Neeche buttons se aap Live Signals, BTC Tide, Atlas Zones, Risk Settings, aur Users ko approve/remove kar sakte hain:</i>",
+    ].join("\n");
+
+    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
+    return;
+  }
+
+  if (normAction === "flush") {
+    // Re-queue any failed or held items and trigger both outboxes immediately
+    const ob = readOutbox();
+    let requeued = 0;
+    for (const item of ob) {
+      if (item.status !== "SENT") {
+        item.status = "PENDING_DELIVERY";
+        item.retryCount = 0;
+        item.lastError = undefined;
+        requeued++;
+      }
+    }
+    if (requeued > 0) writeOutbox(ob);
+    await triggerOutboxProcessing();
+    const cmdRes = await processCommandOutbox();
+    const text = [
+      "🔄 <b>OUTBOX FLUSH COMPLETE</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `• <b>Gold Outbox Re-triggered:</b> ${requeued} pending items processed`,
+      `• <b>BTC / Command Outbox Delivered:</b> ${cmdRes.delivered} messages sent`,
+    ].join("\n");
+    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
+    return;
+  }
+
+  if (normAction === "btc" || normAction === "btctide") {
+    const btc = getBackendSnapshot();
+    const imb = btc.depth.imbalancePct !== null ? `${btc.depth.imbalancePct > 0 ? "+" : ""}${btc.depth.imbalancePct}%` : "--";
+    const lines = [
+      "₿ <b>BTC TIDE LIVE ORDERFLOW & SIGNAL</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `💲 <b>BTC/USDT Price:</b> $${btc.currentPrice ? btc.currentPrice.toLocaleString("en-US", { minimumFractionDigits: 2 }) : "N/A"} (${btc.activeSource})`,
+      `📊 <b>Feed Status:</b> ${btc.status} (Spot Age: ${btc.feedAges?.spot ?? 0}ms)`,
+      `⚖️ <b>Book Imbalance (±0.1% 5s):</b> ${imb}`,
+      `📈 <b>Perp Funding Rate:</b> ${btc.perp.fundingRate !== null ? `${(btc.perp.fundingRate * 100).toFixed(4)}%` : "--"}`,
+      `🏛️ <b>Open Interest:</b> ${btc.perp.openInterest ? `${Math.round(btc.perp.openInterest).toLocaleString()} BTC` : "--"} (1h Δ: ${btc.perp.oiChange1hPct !== null ? `${btc.perp.oiChange1hPct > 0 ? "+" : ""}${btc.perp.oiChange1hPct}%` : "--"})`,
+      `🎯 <b>Decision Score:</b> ${btc.decision.netScore > 0 ? "+" : ""}${btc.decision.netScore} (${btc.decision.dominantSide} — Conf: ${btc.decision.confidence}%)`,
+    ];
+    if (btc.activeTrade) {
+      const t = btc.activeTrade;
+      lines.push(
+        "",
+        `🔥 <b>Active BTC Signal (${t.side}):</b>`,
+        `• Entry: $${t.entryPrice.toFixed(2)} | SL: $${t.slPrice.toFixed(2)}`,
+        `• TP1: $${t.tp1Price.toFixed(2)} | TP2: $${t.tp2Price.toFixed(2)} | TP3: $${t.tp3Price.toFixed(2)}`,
+        `• Current R: ${t.currentR > 0 ? "+" : ""}${t.currentR}R`
+      );
+    } else {
+      lines.push("", `⏳ <b>Active BTC Trade:</b> None (${btc.decision.statusReason})`);
+    }
+    await sendTelegramHttpRequest(lines.join("\n"), replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
+    return;
+  }
+
+  if (normAction === "atlas") {
+    const atlas = getAtlasState();
+    const p = atlas.pivots;
+    const lines = [
+      "🏛️ <b>SARRAF ATLAS DAILY ZONES & BIAS</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `📅 <b>Session Date:</b> ${atlas.date} (Next Rollover: 22:00 UTC)`,
+      `🧭 <b>Overall HTF Bias:</b> <b>${atlas.bias.overall}</b> (${atlas.bias.strategyLabel})`,
+      "",
+      "🎯 <b>Today Locked Institutional Zones:</b>",
+      `• 🔴 <b>R3 Supply:</b> $${p.R3.toFixed(2)}`,
+      `• 🔴 <b>R2 Supply:</b> $${p.R2.toFixed(2)}`,
+      `• 🔴 <b>R1 Supply:</b> $${p.R1.toFixed(2)}`,
+      `• 🟡 <b>SARRAF ZONE (PP):</b> <b>$${p.PP.toFixed(2)}</b>`,
+      `• 🟢 <b>S1 Demand:</b> $${p.S1.toFixed(2)}`,
+      `• 🟢 <b>S2 Demand:</b> $${p.S2.toFixed(2)}`,
+      `• 🟢 <b>S3 Demand:</b> $${p.S3.toFixed(2)}`,
+      "",
+      `📌 <b>Primary Plan:</b> ${atlas.scenarios.main.title} — ${atlas.scenarios.main.triggerZone}`,
+    ];
+    await sendTelegramHttpRequest(lines.join("\n"), replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
+    return;
+  }
+
+  if (normAction === "status") {
     const engineStatus = getEngineStatus();
     const newsStatus = getNewsFeedStatus();
     const workerStatus = getTelegramWorkerStatus();
     const candleStore = getCandleStore();
     const latestM15 = candleStore.M15[candleStore.M15.length - 1];
-    const currentPrice = latestM15 ? latestM15.close.toFixed(2) : 'N/A';
+    const currentPrice = latestM15 ? latestM15.close.toFixed(2) : "N/A";
+    const btc = getBackendSnapshot();
 
     const cdMins = managerState.cooldownEndsAt
       ? Math.max(0, Math.round((new Date(managerState.cooldownEndsAt).getTime() - Date.now()) / 60000))
       : 0;
 
     const text = [
-      '📊 <b>SARRAF REAL-TIME TERMINAL AUDIT</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      "📊 <b>SARRAF REAL-TIME TERMINAL AUDIT</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
       `💰 <b>XAU/USD Gold:</b> $${currentPrice}`,
-      `⚡ <b>Engine Health:</b> ${engineStatus.engineState} (${engineStatus.usable.h1} H1 / ${engineStatus.usable.m15} M15 bars)`,
-      `🎯 <b>Scanner State:</b> ${managerState.isPaused ? '⏸️ PAUSED' : managerState.state}`,
-      `🚀 <b>Mode:</b> ${dryRun ? '🟡 DRY RUN (Simulation)' : '🟢 LIVE DISPATCH'}`,
+      `₿ <b>BTC/USDT Spot:</b> $${btc.currentPrice ? btc.currentPrice.toFixed(2) : "N/A"} (${btc.activeSource})`,
+      `⚡ <b>Gold Engine:</b> ${engineStatus.engineState} (${engineStatus.usable.h1} H1 / ${engineStatus.usable.m15} M15 bars)`,
+      `🎯 <b>Scanner State:</b> ${managerState.isPaused ? "⏸️ PAUSED" : managerState.state}`,
+      `🚀 <b>Mode:</b> ${dryRun ? "🟡 DRY RUN (Simulation)" : "🟢 LIVE DISPATCH"}`,
       `📈 <b>Daily Signals Sent:</b> ${managerState.dailySignalsCount}`,
-      `⏱️ <b>Cooldown:</b> ${cdMins > 0 ? `⏳ ${cdMins} min remaining` : '✅ Inactive (Scanning)'}`,
-      `📰 <b>News Lock:</b> ${newsStatus.isLockActive ? `🔴 LOCKED (${newsStatus.activeLockEvent?.title})` : '🟢 Unlocked'}`,
-      `📡 <b>Outbox Deliveries:</b> Sent: ${workerStatus.sentCount} | Pending: ${workerStatus.pendingCount} | Failed: ${workerStatus.failedCount}`,
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-    ].join('\n');
+      `⏱️ <b>Cooldown:</b> ${cdMins > 0 ? `⏳ ${cdMins} min remaining` : "✅ Active Scanning"}`,
+      `📰 <b>News Lock:</b> ${newsStatus.isLockActive ? `🔴 LOCKED (${newsStatus.activeLockEvent?.title})` : "🟢 Unlocked"}`,
+      `📡 <b>Outbox Deliveries:</b> Sent: ${workerStatus.sentCount} | Pending: ${workerStatus.pendingCount}`,
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+    ].join("\n");
 
-    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     return;
   }
 
-  if (normAction === 'test' || normAction === 'testsignal' || normAction === 'signal_test') {
+  if (normAction === "test" || normAction === "testsignal" || normAction === "signal_test") {
     const candleStore = getCandleStore();
     const latest = candleStore.M15[candleStore.M15.length - 1];
-    const basePrice = latest ? latest.close : 2650.50;
+    const basePrice = latest ? latest.close : 4185.5;
     const entry = Number(basePrice.toFixed(2));
     const sl = Number((entry - (settings.slDollars || 10.0)).toFixed(2));
     const tp1 = Number((entry + (settings.tp1Dollars || 5.0)).toFixed(2));
@@ -697,78 +1074,75 @@ async function executeTelegramAction(
     const tp4 = Number((entry + (settings.tp4Dollars || 12.0)).toFixed(2));
 
     const testSignalMsg = [
-      '🔱 <b>SARRAF TRADE ALERT</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      '<b>Instrument:</b> XAUUSD (Gold)',
-      '<b>Action:</b> BUY 🟢',
-      `<b>Entry:</b> $${entry.toFixed(2)}`,
-      `<b>SL:</b> $${sl.toFixed(2)} ($${settings.slDollars.toFixed(2)} risk)`,
-      '',
-      '<b>🎯 Targets:</b>',
-      `• TP1: $${tp1.toFixed(2)} (+0.5R)`,
-      `• TP2: $${tp2.toFixed(2)} (+0.8R)`,
-      `• TP3: $${tp3.toFixed(2)} (+1.0R)`,
-      `• TP4: $${tp4.toFixed(2)} (+1.2R)`,
-      '',
-      '<b>📊 Signal Confluence:</b>',
-      '• Confluence Score: <b>94/100</b>',
-      '• Structure: M15 Order Block + H1 Liquidity Sweep',
-      '• Risk/Reward: 1:1.20',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `⚡ [LIVE TEST SIGNAL] Delivered at ${new Date().toLocaleTimeString()} UTC. Telegram live alerts verified ✅`,
-    ].join('\n');
+      "🔱 <b>SARRAF TRADE ALERT (LIVE TEST)</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      "📊 <b>Asset:</b> XAU/USD (Spot Gold)",
+      "🟢 <b>Action:</b> <b>BUY LIMIT / MARKET</b>",
+      `🎯 <b>Entry Zone:</b> <b>$${entry.toFixed(2)}</b>`,
+      `🛑 <b>Stop Loss:</b> <b>$${sl.toFixed(2)}</b> (-$${(settings.slDollars || 10).toFixed(2)})`,
+      "",
+      "💰 <b>Take Profit Targets:</b>",
+      `• <b>TP1:</b> $${tp1.toFixed(2)} (Move SL to Breakeven)`,
+      `• <b>TP2:</b> $${tp2.toFixed(2)}`,
+      `• <b>TP3:</b> $${tp3.toFixed(2)}`,
+      `• <b>TP4:</b> $${tp4.toFixed(2)} (Final Runner)`,
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `✅ <b>Verified Delivery to Admin & Approved Subscribers!</b>`,
+    ].join("\n");
 
-    await sendTelegramHttpRequest(testSignalMsg, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
-    return;
-  }
-
-  if (normAction === 'toggle_dryrun' || normAction === 'dryrun') {
-    let nextMode = !dryRun;
-    if (rawArgs && rawArgs.length > 0) {
-      const arg = rawArgs[0].toLowerCase();
-      if (arg === 'on' || arg === 'true' || arg === 'simulate') nextMode = true;
-      if (arg === 'off' || arg === 'false' || arg === 'live') nextMode = false;
+    const recipients = getAllApprovedRecipients(idStr);
+    for (const rChat of recipients) {
+      await sendTelegramHttpRequest(
+        testSignalMsg,
+        rChat === idStr ? replyToMessageId : undefined,
+        rChat,
+        rChat === idStr ? getMainControlKeyboard() : undefined,
+        "HTML"
+      );
     }
-
-    updateSettings({ dryRun: nextMode }, `telegram_${fromUser || chatId}`);
-    const statusEmoji = nextMode ? '🟡 DRY RUN (SIMULATION)' : '🟢 LIVE DISPATCH';
-    const text = [
-      '⚙️ <b>SARRAF EXECUTION MODE UPDATED</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `New Mode: <b>${statusEmoji}</b>`,
-      '',
-      nextMode
-        ? 'Signals will now be safely simulated and logged without broadcasting live trade executions.'
-        : '⚠️ <b>LIVE DISPATCH ACTIVATED:</b> New high-confluence setups will be dispatched live to Telegram and connected desks immediately!',
-    ].join('\n');
-
-    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
     return;
   }
 
-  if (normAction === 'toggle_pause' || normAction === 'pause' || normAction === 'resume') {
-    if (normAction === 'pause' || (!managerState.isPaused && normAction === 'toggle_pause')) {
+  if (normAction === "toggle_dryrun" || normAction === "dryrun" || normAction === "live") {
+    const nextMode = normAction === "live" ? false : !dryRun;
+    updateSettings({ dryRun: nextMode }, `TelegramAdmin:${fromUser || chatId}`);
+    const statusEmoji = nextMode ? "🟡 DRY RUN (SIMULATION)" : "🟢 LIVE DISPATCH";
+    const text = [
+      "🔄 <b>DISPATCH MODE UPDATED</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `New Mode: <b>${statusEmoji}</b>`,
+      "",
+      nextMode
+        ? "Signals will now be simulated without broadcasting live trade executions."
+        : "⚠️ <b>LIVE DISPATCH ACTIVATED:</b> Tamam signals ab Admin aur Approved Subscribers ko live send honge!",
+    ].join("\n");
+    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
+    return;
+  }
+
+  if (normAction === "toggle_pause" || normAction === "pause" || normAction === "resume") {
+    if (normAction === "pause" || (!managerState.isPaused && normAction === "toggle_pause")) {
       pauseSignalManager();
       const text = [
-        '⏸️ <b>SARRAF SCANNER PAUSED</b>',
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        'Automated signal generation has been halted by administrative desk command.',
-        'Tap <b>Resume Engine</b> or run <code>/resume</code> to re-activate.',
-      ].join('\n');
-      await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+        "⏸️ <b>SARRAF SCANNER PAUSED</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "Automated signal generation pause kar diya gaya hai.",
+        "Dobara start karne ke liye <b>Resume Engine</b> dabayein.",
+      ].join("\n");
+      await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     } else {
       resumeSignalManager();
       const text = [
-        '▶️ <b>SARRAF SCANNER RESUMED</b>',
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        'High-probability setups will be evaluated in real-time.',
-      ].join('\n');
-      await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+        "▶️ <b>SARRAF SCANNER RESUMED</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "Live market scanning wapis active ho chuki hai.",
+      ].join("\n");
+      await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     }
     return;
   }
 
-  if (normAction === 'signals' || normAction === 'last') {
+  if (normAction === "signals" || normAction === "last") {
     const store = getCandleStore();
     const latestBar = store.M15[store.M15.length - 1];
     const livePrice = latestBar ? latestBar.close : null;
@@ -776,245 +1150,290 @@ async function executeTelegramAction(
     const history = managerState.history || [];
 
     const lines = [
-      '📈 <b>SARRAF ACTIVE & RECENT TRADE SIGNALS</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      "📈 <b>SARRAF ACTIVE & RECENT TRADE SIGNALS</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
     ];
 
     if (dash.activeSignal) {
       const s = dash.activeSignal;
       lines.push(
-        '🔥 <b>CURRENT ACTIVE TRADE:</b>',
-        `• ID: <code>${s.id}</code> (${s.direction} ${s.direction === 'BUY' ? '🟢' : '🔴'})`,
+        "🔥 <b>CURRENT ACTIVE GOLD TRADE:</b>",
+        `• ID: <code>${s.id}</code> (${s.direction} ${s.direction === "BUY" ? "🟢" : "🔴"})`,
         `• Entry: $${s.entry.toFixed(2)} | Live SL: $${s.sl.toFixed(2)}`,
-        `• Floating PnL: ${s.livePnLDollars >= 0 ? '+' : ''}$${s.livePnLDollars.toFixed(2)} (${s.livePnLR >= 0 ? '+' : ''}${s.livePnLR}R)`,
-        `• Highest TP Hit: <b>${s.highestTP}</b> | BE Active: ${s.isBreakeven ? 'YES ✅' : 'NO ❌'}`,
-        `• Next Target: $${s.nextTarget.toFixed(2)} (${s.targetProgressPercent}% progress)`,
-        ''
+        `• Floating PnL: ${s.livePnLDollars >= 0 ? "+" : ""}$${s.livePnLDollars.toFixed(2)} (${s.livePnLR >= 0 ? "+" : ""}${s.livePnLR}R)`,
+        `• Highest TP Hit: <b>${s.highestTP}</b> | BE Active: ${s.isBreakeven ? "YES ✅" : "NO ❌"}`,
+        ""
       );
     } else {
-      lines.push('🎯 <b>Active Trade:</b> No setup currently in progress (Scanning desk active).', '');
+      lines.push("🎯 <b>Active Gold Trade:</b> No setup currently in progress (Scanning active).", "");
     }
 
-    lines.push('📜 <b>Recent Signal History:</b>');
+    lines.push("📜 <b>Recent Signal History:</b>");
     if (history.length === 0) {
-      lines.push('• No closed signals recorded in current session.');
+      lines.push("• No closed signals recorded in current session.");
     } else {
       history.slice(0, 5).forEach((h, idx) => {
-        const icon = h.resultClass === 'WIN' ? '✅' : h.resultClass === 'LOSS' ? '❌' : '⚪';
-        const sign = h.realizedR >= 0 ? '+' : '';
-        lines.push(`${idx + 1}. <code>${h.id}</code> (${h.direction}) → ${icon} <b>${h.resultClass}</b> (${sign}${h.realizedR.toFixed(2)}R) [${h.closeReason || 'CLOSED'}]`);
+        const icon = h.resultClass === "WIN" ? "✅" : h.resultClass === "LOSS" ? "❌" : "⚪";
+        const sign = h.realizedR >= 0 ? "+" : "";
+        lines.push(`${idx + 1}. <code>${h.id}</code> (${h.direction}) → ${icon} <b>${h.resultClass}</b> (${sign}${h.realizedR.toFixed(2)}R) [${h.closeReason || "CLOSED"}]`);
       });
     }
 
-    await sendTelegramHttpRequest(lines.join('\n'), replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+    await sendTelegramHttpRequest(lines.join("\n"), replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     return;
   }
 
-  if (normAction === 'price' || normAction === 'gold') {
+  if (normAction === "price" || normAction === "gold") {
     const store = getCandleStore();
     const latest = store.M15[store.M15.length - 1];
-    const m15 = getClosedCandles('M15');
-    const h1 = getClosedCandles('H1');
-    const h4 = getClosedCandles('H4');
-    const d1 = getClosedCandles('D1');
+    const h1 = getClosedCandles("H1");
+    const h4 = getClosedCandles("H4");
+    const d1 = getClosedCandles("D1");
 
     const h1Bias = evaluateStructureBias(h1);
     const h4Bias = evaluateStructureBias(h4);
     const d1Bias = evaluateStructureBias(d1);
 
     const text = [
-      '💰 <b>XAU/USD GOLD REAL-TIME QUOTE & BIAS</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `💲 <b>Live Price:</b> $${latest ? latest.close.toFixed(2) : 'N/A'}`,
-      `📊 <b>Bar Range:</b> Low: $${latest ? latest.low.toFixed(2) : 'N/A'} | High: $${latest ? latest.high.toFixed(2) : 'N/A'}`,
-      '',
-      '🧠 <b>Multi-Timeframe Structure Biases:</b>',
+      "💰 <b>XAU/USD GOLD REAL-TIME QUOTE & BIAS</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `💲 <b>Live Price:</b> $${latest ? latest.close.toFixed(2) : "N/A"}`,
+      `📊 <b>Bar Range:</b> Low: $${latest ? latest.low.toFixed(2) : "N/A"} | High: $${latest ? latest.high.toFixed(2) : "N/A"}`,
+      "",
+      "🧠 <b>Multi-Timeframe Structure Biases:</b>",
       `• <b>H1 Bias:</b> ${h1Bias.bias} (${h1Bias.lastBOS})`,
       `• <b>H4 Bias:</b> ${h4Bias.bias} (${h4Bias.lastBOS})`,
       `• <b>D1 Bias:</b> ${d1Bias.bias} (${d1Bias.lastBOS})`,
-      '',
-      `📦 <b>Candle Accumulation:</b> M15: ${store.M15.length} | M30: ${store.M30.length} | H1: ${store.H1.length} | H4: ${store.H4.length} | D1: ${store.D1.length}`,
-    ].join('\n');
+    ].join("\n");
 
-    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     return;
   }
 
-  if (normAction === 'news') {
+  if (normAction === "news") {
     const feed = getNewsFeedStatus();
     const lines = [
-      '📰 <b>SARRAF MACROECONOMIC & NEWS LOCK AUDIT</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `🔒 <b>News Lock State:</b> ${feed.isLockActive ? `🔴 <b>LOCKED</b> (${feed.activeLockEvent?.title})` : '🟢 <b>UNLOCKED (Trading Allowed)</b>'}`,
+      "📰 <b>SARRAF MACROECONOMIC & NEWS LOCK AUDIT</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `🔒 <b>News Lock State:</b> ${feed.isLockActive ? `🔴 <b>LOCKED</b> (${feed.activeLockEvent?.title})` : "🟢 <b>UNLOCKED (Trading Allowed)</b>"}`,
       `⏱️ <b>Tier 1 Window:</b> -${settings.tier1PreMinutes}m pre / +${settings.tier1PostMinutes}m post`,
-      `⏱️ <b>Tier 2 Window:</b> -${settings.tier2PreMinutes}m pre / +${settings.tier2PostMinutes}m post`,
-      '',
-      '📅 <b>Upcoming High-Impact USD Events:</b>',
+      "",
+      "📅 <b>Upcoming High-Impact USD Events:</b>",
     ];
 
     if (feed.nextEvent) {
       lines.push(
         `• <b>${feed.nextEvent.title}</b>`,
-        `  Time: ${feed.nextEvent.displayTime || feed.nextEvent.timeUtc} (${feed.nextEvent.minutesUntil >= 0 ? `in ${feed.nextEvent.minutesUntil}m` : `${Math.abs(feed.nextEvent.minutesUntil)}m ago`})`,
-        `  Forecast: ${feed.nextEvent.forecastStr || 'N/A'} | Previous: ${feed.nextEvent.previousStr || 'N/A'}`
+        `  Time: ${feed.nextEvent.displayTime || feed.nextEvent.timeUtc} (${feed.nextEvent.minutesUntil >= 0 ? `in ${feed.nextEvent.minutesUntil}m` : `${Math.abs(feed.nextEvent.minutesUntil)}m ago`})`
       );
     } else {
-      lines.push('• No impending high-impact USD events within immediate radar.');
+      lines.push("• No impending high-impact USD events within immediate radar.");
     }
 
-    await sendTelegramHttpRequest(lines.join('\n'), replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+    await sendTelegramHttpRequest(lines.join("\n"), replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     return;
   }
 
-  if (normAction === 'stats') {
+  if (normAction === "stats") {
     const stats = getSignalStats();
     const total = stats.wins + stats.losses + stats.breakevens;
     const winRate = total > 0 ? Math.round((stats.wins / total) * 100) : 0;
 
     const text = [
-      '🏆 <b>SARRAF PERFORMANCE & WIN RATE AUDIT</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
+      "🏆 <b>SARRAF PERFORMANCE & WIN RATE AUDIT</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
       `📊 <b>Total Completed Trades:</b> ${total}`,
       `🎯 <b>Record:</b> ${stats.wins} Wins | ${stats.losses} Losses | ${stats.breakevens} Breakevens`,
       `📈 <b>Win Rate:</b> <b>${winRate}%</b>`,
-      `💰 <b>Net Accumulated Gain:</b> <b>${stats.totalR >= 0 ? '+' : ''}${stats.totalR.toFixed(2)}R</b>`,
-      `🛑 <b>Consecutive Losses Today:</b> ${managerState.consecutiveLossesToday} (Limit: 2)`,
-      `⚡ <b>Daily Limit Reached:</b> ${managerState.dailyLossLimitReached ? 'YES ⛔' : 'NO ✅'}`,
-    ].join('\n');
+      `💰 <b>Net Accumulated Gain:</b> <b>${stats.totalR >= 0 ? "+" : ""}${stats.totalR.toFixed(2)}R</b>`,
+    ].join("\n");
 
-    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     return;
   }
 
-  if (normAction === 'risk') {
+  if (normAction === "setsl" && rawArgs && rawArgs.length >= 1) {
+    const val = parseFloat(rawArgs[0]);
+    if (Number.isFinite(val) && val >= 2 && val <= 50) {
+      updateSettings({ slDollars: val }, `TelegramAdmin:${fromUser || chatId}`);
+      await sendTelegramHttpRequest(`✅ <b>Stop Loss Updated:</b> $${val.toFixed(2)}`, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
+      return;
+    }
+  }
+
+  if (normAction === "setscore" && rawArgs && rawArgs.length >= 1) {
+    const val = parseInt(rawArgs[0], 10);
+    if (Number.isFinite(val) && val >= 50 && val <= 98) {
+      updateSettings({ minScore: val }, `TelegramAdmin:${fromUser || chatId}`);
+      await sendTelegramHttpRequest(`✅ <b>Min Confluence Score Updated:</b> ${val}/100`, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
+      return;
+    }
+  }
+
+  if (normAction === "risk") {
     const text = [
-      '⚙️ <b>SARRAF RISK & TARGET CONFIGURATION</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `🛑 <b>Stop Loss (SL):</b> $${settings.slDollars.toFixed(2)}`,
-      '🎯 <b>Take Profit Targets:</b>',
+      "⚙️ <b>SARRAF RISK & TARGET CONFIGURATION</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `🛑 <b>Stop Loss (SL):</b> $${settings.slDollars.toFixed(2)} (Edit: <code>/setsl 10</code>)`,
+      "🎯 <b>Take Profit Targets:</b>",
       `• TP1: $${settings.tp1Dollars.toFixed(2)} (+${(settings.tp1Dollars / settings.slDollars).toFixed(2)}R)`,
       `• TP2: $${settings.tp2Dollars.toFixed(2)} (+${(settings.tp2Dollars / settings.slDollars).toFixed(2)}R)`,
       `• TP3: $${settings.tp3Dollars.toFixed(2)} (+${(settings.tp3Dollars / settings.slDollars).toFixed(2)}R)`,
       `• TP4: $${settings.tp4Dollars.toFixed(2)} (+${(settings.tp4Dollars / settings.slDollars).toFixed(2)}R)`,
-      '',
-      `⏱️ <b>Post-Trade Cooldown:</b> ${settings.cooldownMinMinutes}m - ${settings.cooldownMaxMinutes}m`,
-      `💯 <b>Minimum Confluence Score:</b> ${settings.minScore}/100`,
-      `📊 <b>Max Signals Per Day:</b> Unlimited (Sequential)`,
+      `💯 <b>Minimum Confluence Score:</b> ${settings.minScore}/100 (Edit: <code>/setscore 80</code>)`,
       `🛡️ <b>Spread Limit:</b> $${settings.spreadLimit.toFixed(2)}`,
-    ].join('\n');
+    ].join("\n");
 
-    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     return;
   }
 
-  if (normAction === 'users') {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const targetChat = process.env.TELEGRAM_CHAT_ID;
-    const googleChatWebhook = process.env.GOOGLE_CHAT_WEBHOOK_URL;
-
-    const text = [
-      '👥 <b>CONNECTED CHANNELS & SUBSCRIBER STATUS</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `🤖 <b>Telegram Bot Status:</b> ${token ? 'Connected & Polling ✅' : 'Disconnected ❌'}`,
-      `📡 <b>Default Target Chat ID:</b> <code>${targetChat || 'Not configured'}</code>`,
-      `💬 <b>Current Chat ID:</b> <code>${chatId}</code>`,
-      `🔗 <b>Google Chat Space:</b> ${googleChatWebhook ? 'Active Webhook Configured ✅' : 'Not Connected'}`,
-      `👤 <b>Admin Authentication:</b> Protected & Verified`,
-    ].join('\n');
-
-    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+  if (normAction === "approve" && rawArgs && rawArgs.length >= 1) {
+    const targetId = rawArgs[0].trim();
+    setSubscriberStatus(targetId, "APPROVED");
+    await sendTelegramHttpRequest(
+      "✅ <b>VIP ACCESS APPROVED!</b>\nAapka account Admin ne approve kar diya hai. Ab aapko automatic live signals milenge!",
+      undefined,
+      targetId,
+      undefined,
+      "HTML"
+    );
+    await sendTelegramHttpRequest(`✅ Approved user <code>${targetId}</code>`, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     return;
   }
 
-  if (normAction === 'setchat' || normAction === 'register' || normAction === 'setchannel') {
-    if (!rawArgs || rawArgs.length < 2) {
-      const usageText = [
-        '⚠️ <b>INVALID CREDENTIALS FOR CHAT REGISTRATION</b>',
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        'Please provide your administrative credentials to register this chat:',
-        '',
-        '<code>/setchat [admin_username] [admin_password]</code>',
-        '',
-        '💡 <i>Example:</i> <code>/setchat admin password</code>',
-        '',
-        'This secures the terminal and prevents unauthorized configuration.',
-      ].join('\n');
-      await sendTelegramHttpRequest(usageText, replyToMessageId, chatId, undefined, 'HTML');
-      return;
+  if (normAction === "block" && rawArgs && rawArgs.length >= 1) {
+    const targetId = rawArgs[0].trim();
+    setSubscriberStatus(targetId, "BLOCKED");
+    await sendTelegramHttpRequest(`🚫 Blocked user <code>${targetId}</code>`, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
+    return;
+  }
+
+  if (normAction === "broadcast" && rawArgs && rawArgs.length >= 1) {
+    const msgBody = rawArgs.join(" ");
+    const recipients = getAllApprovedRecipients(idStr);
+    const bcastText = [
+      "📢 <b>SARRAF DESK ANNOUNCEMENT</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      msgBody,
+    ].join("\n");
+    let sent = 0;
+    for (const rId of recipients) {
+      const r = await sendTelegramHttpRequest(bcastText, undefined, rId, undefined, "HTML");
+      if (r.success) sent++;
+    }
+    await sendTelegramHttpRequest(`✅ <b>Broadcast Sent</b> to ${sent} approved subscriber(s).`, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
+    return;
+  }
+
+  if (normAction === "users") {
+    const subs = getAllSubscribersList();
+    const pending = subs.filter((s) => s.status === "PENDING");
+    const approved = subs.filter((s) => s.status === "APPROVED");
+    const blocked = subs.filter((s) => s.status === "BLOCKED");
+
+    const lines = [
+      "👥 <b>SUBSCRIBER & USER APPROVAL MANAGER</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      `👑 <b>Admins:</b> ${approved.filter((s) => s.role === "ADMIN").length} | ✅ <b>Approved Users:</b> ${approved.filter((s) => s.role === "USER").length}`,
+      `⏳ <b>Pending Requests:</b> ${pending.length} | 🚫 <b>Blocked:</b> ${blocked.length}`,
+      "",
+    ];
+
+    const inlineButtons: any[][] = [];
+
+    if (pending.length > 0) {
+      lines.push("🔔 <b>PENDING APPROVAL REQUESTS:</b>");
+      for (const p of pending.slice(0, 8)) {
+        const label = p.firstName || p.username || p.chatId;
+        lines.push(`• <b>${label}</b> ${p.username ? `(@${p.username})` : ""} — ID: <code>${p.chatId}</code>`);
+        inlineButtons.push([
+          { text: `✅ Approve ${label}`, callback_data: `adm_approve_${p.chatId}` },
+          { text: `❌ Block ${label}`, callback_data: `adm_block_${p.chatId}` },
+        ]);
+      }
+      lines.push("");
     }
 
-    const usernameInput = rawArgs[0];
-    const passwordInput = rawArgs[1];
-
-    const userValid = verifyAdminUsername(usernameInput);
-    const passValid = verifyAdminPassword(passwordInput);
-
-    if (!userValid || !passValid) {
-      const failText = [
-        '❌ <b>AUTHENTICATION FAILED</b>',
-        '━━━━━━━━━━━━━━━━━━━━━━━━━',
-        'The admin username or password provided is incorrect.',
-        'Please verify your credentials and try again.',
-      ].join('\n');
-      await sendTelegramHttpRequest(failText, replyToMessageId, chatId, undefined, 'HTML');
-      return;
+    const regularApproved = approved.filter((s) => s.role === "USER");
+    if (regularApproved.length > 0) {
+      lines.push("✅ <b>APPROVED VIP SUBSCRIBERS:</b>");
+      for (const a of regularApproved.slice(0, 10)) {
+        const label = a.firstName || a.username || a.chatId;
+        lines.push(`• <b>${label}</b> ${a.username ? `(@${a.username})` : ""} — ID: <code>${a.chatId}</code>`);
+        inlineButtons.push([
+          { text: `🚫 Remove Access: ${label}`, callback_data: `adm_block_${a.chatId}` },
+        ]);
+      }
+      lines.push("");
+    } else {
+      lines.push("• <i>Abhi koi external user approved list mein nahi hai. Jab koi user bot ko /start karega toh yahan Approve button aa jayega.</i>", "");
     }
 
-    // Dynamic Chat ID registration
-    setDynamicTelegramChatId(String(chatId));
+    lines.push(
+      "💡 <b>Manual Commands:</b>",
+      "• <code>/approve [chat_id]</code> — Pre-approve any user or group ID",
+      "• <code>/block [chat_id]</code> — Remove user access",
+      "• <code>/broadcast [message]</code> — Send message to all approved users"
+    );
 
-    const successText = [
-      '✅ <b>TELEGRAM CHAT REGISTERED SUCCESSFULLY</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      `This chat (ID: <code>${chatId}</code>) is now registered as the active target for all setups, market summaries, and system notifications.`,
-      '',
-      '⚙️ <b>Live automatic trades will start dispatching here immediately!</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      '<i>Ab is chat par automatic signals, summaries, aur alerts send kiye jayein ge!</i> 🚀',
-    ].join('\n');
+    inlineButtons.push([{ text: "🔙 Back to Main Admin Panel", callback_data: "cmd_menu" }]);
 
-    await sendTelegramHttpRequest(successText, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+    await sendTelegramHttpRequest(
+      lines.join("\n"),
+      replyToMessageId,
+      chatId,
+      { inline_keyboard: inlineButtons },
+      "HTML"
+    );
     return;
   }
 
-  if (normAction === 'help') {
+  if (normAction === "help") {
     const text = [
-      '❓ <b>SARRAF TELEGRAM REMOTE CONTROL GUIDE</b>',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      'You can control all operations entirely within Telegram:',
-      '',
-      '• <code>/start</code> or <code>/menu</code> — Open interactive button dashboard',
-      '• <code>/status</code> — Live engine, price, cooldown & outbox status',
-      '• <code>/testsignal</code> — Dispatch live realistic test gold signal',
-      '• <code>/signals</code> — View active trade progress & recent history',
-      '• <code>/dryrun</code> — Toggle simulation (Dry Run) vs live dispatch',
-      '• <code>/price</code> — Real-time XAU/USD price & MTF biases',
-      '• <code>/news</code> — High-impact USD news & lock windows',
-      '• <code>/stats</code> — Win rate & R-multiple gains',
-      '• <code>/risk</code> — Stop loss & take profit target rules',
-      '• <code>/pause</code> — Pause signal manager',
-      '• <code>/resume</code> — Resume signal manager',
-      '• <code>/users</code> — Connected channel and chat status',
-      '━━━━━━━━━━━━━━━━━━━━━━━━━',
-      '⚡ All changes persist safely across server reboots.',
-    ].join('\n');
+      "👑 <b>SARRAF ADMIN REMOTE CONTROL MANUAL</b>",
+      "━━━━━━━━━━━━━━━━━━━━━━━━━",
+      "Aap website khole baghair Telegram se pura system chala sakte hain:",
+      "",
+      "<b>1. Core Controls:</b>",
+      "• <code>/menu</code> — Open Master Admin Button Dashboard",
+      "• <code>/status</code> — Live Gold, BTC, Engine & Outbox status",
+      "• <code>/testsignal</code> — Send live verification signal",
+      "• <code>/flush</code> — Force send any queued signals in outbox",
+      "",
+      "<b>2. Markets & Intelligence:</b>",
+      "• <code>/btc</code> — Live BTC Tide Orderflow, Imbalance & Signal",
+      "• <code>/atlas</code> — Today Sarraf Atlas Zones (PP, R1-R3, S1-S3)",
+      "• <code>/price</code> — Live Gold XAU/USD price & MTF bias",
+      "• <code>/signals</code> — Active trade & recent history",
+      "",
+      "<b>3. User Approval & Broadcasts:</b>",
+      "• <code>/users</code> — View, Approve (✅) or Block (❌) users",
+      "• <code>/approve [chatId]</code> — Approve user/channel by ID",
+      "• <code>/block [chatId]</code> — Block/remove user by ID",
+      "• <code>/broadcast [msg]</code> — Send announcement to all users",
+      "",
+      "<b>4. Risk & Scanner Settings:</b>",
+      "• <code>/setsl [dollars]</code> — Change Gold SL (e.g. <code>/setsl 10</code>)",
+      "• <code>/setscore [50-95]</code> — Change Min Score (e.g. <code>/setscore 80</code>)",
+      "• <code>/pause</code> & <code>/resume</code> — Pause or Resume scanner",
+    ].join("\n");
 
-    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), 'HTML');
+    await sendTelegramHttpRequest(text, replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     return;
   }
 
-  // Fallback for unrecognized action
-  const fallback = `Unrecognized command. Use /menu or /help for the complete control center.`;
+  const fallback = "Unrecognized command. Tap a button below or use /menu.";
   await sendTelegramHttpRequest(fallback, replyToMessageId, chatId, getMainControlKeyboard());
 }
 
-// Poll Telegram Commands and Interactive Buttons via getUpdates
+// Poll Telegram Commands and Interactive Buttons via getUpdates (Non-blocking timeout=0)
 async function pollTelegramCommands() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token || token === '123456789:ABCdefGhIJKlmNoPQRstuVWXyz') return;
+  if (!token || token === "123456789:ABCdefGhIJKlmNoPQRstuVWXyz") return;
 
   try {
-    const url = `https://api.telegram.org/bot${token}/getUpdates?offset=${updatePollingOffset}&timeout=2`;
+    const url = `https://api.telegram.org/bot${token}/getUpdates?offset=${updatePollingOffset}&timeout=0`;
     const res = await fetch(url);
     if (!res.ok) return;
 
@@ -1030,20 +1449,14 @@ async function pollTelegramCommands() {
         const callbackId = cq.id;
         const callbackData = cq.data;
         const chatId = cq.message?.chat?.id;
-        const fromUser = cq.from?.username || cq.from?.first_name || 'admin';
+        const fromUser = cq.from?.username || "user";
+        const firstName = cq.from?.first_name || "Trader";
 
         console.log(`[TELEGRAM BUTTON] Pressed "${callbackData}" by @${fromUser} (Chat: ${chatId})`);
-
-        // Auto-register chat on any interaction
-        if (chatId) {
-          setDynamicTelegramChatId(String(chatId));
-        }
-
-        // Acknowledge tap immediately
-        await answerTelegramCallbackQuery(callbackId, 'Processing request...');
+        await answerTelegramCallbackQuery(callbackId, "Processing...");
 
         if (chatId && callbackData) {
-          await executeTelegramAction(callbackData, chatId, cq.message?.message_id, fromUser);
+          await executeTelegramAction(callbackData, chatId, cq.message?.message_id, fromUser, [], firstName);
         }
         continue;
       }
@@ -1053,45 +1466,26 @@ async function pollTelegramCommands() {
       if (!msg) continue;
 
       const incomingChatId = msg.chat?.id;
-      const isPrivateChat = msg.chat?.type === 'private';
-      const text = (msg.text || '').trim();
-      const fromUser = msg.from?.username || msg.from?.first_name || 'admin';
+      const text = (msg.text || "").trim();
+      const fromUser = msg.from?.username || "user";
+      const firstName = msg.from?.first_name || "Trader";
 
-      // Auto-register any incoming message in private chat
-      if (incomingChatId && isPrivateChat) {
-        setDynamicTelegramChatId(String(incomingChatId));
-      }
+      if (!incomingChatId) continue;
 
-      if (!text.startsWith('/')) {
-        if (incomingChatId && isPrivateChat) {
-          const welcome = [
-            '🔱 <b>SARRAF GOLD TERMINAL</b>',
-            '━━━━━━━━━━━━━━━━━━━━━━━━━',
-            `✅ <b>CHAT REGISTERED SUCCESSFULLY!</b>`,
-            `📡 <b>Target Chat ID:</b> <code>${incomingChatId}</code> (@${fromUser})`,
-            '',
-            '🚀 <b>Live automatic XAU/USD gold trade alerts are now active for this chat!</b>',
-            'Jab bhi high-probability setup trigger ho ga, trade signal alerts foran yahan send hongay.',
-            '',
-            '👇 <b>Tap below to test or control the system:</b>',
-          ].join('\n');
-          await sendTelegramHttpRequest(welcome, msg.message_id, incomingChatId, getMainControlKeyboard(), 'HTML');
-        }
+      if (!text.startsWith("/")) {
+        // If Admin sends non-command text, show Admin menu; if regular user, show their subscriber status
+        await executeTelegramAction("start", incomingChatId, msg.message_id, fromUser, [], firstName);
         continue;
       }
 
-      const parts = text.split(' ');
-      const rawCmd = parts[0].replace(/@\w+$/, ''); // Remove bot username mention if any (e.g. /status@SarrafBot)
+      const parts = text.split(" ").filter(Boolean);
+      const rawCmd = parts[0].replace(/@\w+$/, "");
       const args = parts.slice(1);
 
       console.log(`[TELEGRAM COMMAND] "${text}" from Chat ID: ${incomingChatId} (@${fromUser})`);
-
-      if (incomingChatId) {
-        setDynamicTelegramChatId(String(incomingChatId));
-        await executeTelegramAction(rawCmd, incomingChatId, msg.message_id, fromUser, args);
-      }
+      await executeTelegramAction(rawCmd, incomingChatId, msg.message_id, fromUser, args, firstName);
     }
-  } catch (err: any) {
+  } catch {
     // Silently continue polling loop
   }
 }
