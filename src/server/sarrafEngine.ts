@@ -628,13 +628,23 @@ export function runSarrafAnalysis(livePrice?: number, liveSpread?: number): Engi
   // Check liquidity sweep on recent M15/M30
   const sweepEval = checkLiquiditySweep(m15Candles, h1Struct.bias === 'BULLISH' ? 'BULLISH' : 'BEARISH');
 
-  for (const zone of matchingZones) {
-    const isBull = zone.type === 'BULLISH_OB';
-    const entryPrice = zone.mid50;
+  // Sort candidate zones by proximity to livePrice so we always evaluate the nearest active zone first
+  const sortedZones = [...matchingZones].sort(
+    (a, b) => Math.abs(a.mid50 - livePrice) - Math.abs(b.mid50 - livePrice)
+  );
+  const cfg = getCurrentSettings();
 
-    // Premium/Discount rule: Buys in discount (< 50%), Sells in premium (> 50%) on BOTH H1 and H4
-    const inDiscount = entryPrice < h1Equilibrium && entryPrice < h4Equilibrium;
-    const inPremium = entryPrice > h1Equilibrium && entryPrice > h4Equilibrium;
+  for (const zone of sortedZones) {
+    const isBull = zone.type === 'BULLISH_OB';
+    // Only trigger live execution when live price is within $18 of the institutional zone (never use stale far-away zones)
+    if (Math.abs(livePrice - zone.mid50) > 18.0) continue;
+
+    // Always open setup in LIVE mode anchored to current live market price
+    const entryPrice = Number(livePrice.toFixed(2));
+
+    // Premium/Discount rule: Buys in discount (< 50%), Sells in premium (> 50%) on H1 or H4 or near institutional zone
+    const inDiscount = entryPrice < h1Equilibrium || entryPrice < h4Equilibrium || Math.abs(livePrice - zone.mid50) <= 10.0;
+    const inPremium = entryPrice > h1Equilibrium || entryPrice > h4Equilibrium || Math.abs(livePrice - zone.mid50) <= 10.0;
     const pdValid = isBull ? inDiscount : inPremium;
     if (!pdValid) continue;
 
@@ -692,13 +702,20 @@ export function runSarrafAnalysis(livePrice?: number, liveSpread?: number): Engi
 
     bestScoreBreakdown = breakdown;
 
-    // Candidate qualifies if Score >= 80
-    if (totalScore >= 80) {
-      const sl = isBull ? Number((entryPrice - 10.0).toFixed(2)) : Number((entryPrice + 10.0).toFixed(2));
-      const tp1 = isBull ? Number((entryPrice + 5.0).toFixed(2)) : Number((entryPrice - 5.0).toFixed(2));
-      const tp2 = isBull ? Number((entryPrice + 8.0).toFixed(2)) : Number((entryPrice - 8.0).toFixed(2));
-      const tp3 = isBull ? Number((entryPrice + 10.0).toFixed(2)) : Number((entryPrice - 10.0).toFixed(2));
-      const tp4 = isBull ? Number((entryPrice + 12.0).toFixed(2)) : Number((entryPrice - 12.0).toFixed(2));
+    // Candidate qualifies if Score >= configured minScore (default 80)
+    const minScoreReq = cfg.minScore || 80;
+    if (totalScore >= minScoreReq) {
+      const slDist = cfg.slDollars || 10.0;
+      const tp1Dist = cfg.tp1Dollars || 5.0;
+      const tp2Dist = cfg.tp2Dollars || 8.0;
+      const tp3Dist = cfg.tp3Dollars || 10.0;
+      const tp4Dist = cfg.tp4Dollars || 12.0;
+
+      const sl = isBull ? Number((entryPrice - slDist).toFixed(2)) : Number((entryPrice + slDist).toFixed(2));
+      const tp1 = isBull ? Number((entryPrice + tp1Dist).toFixed(2)) : Number((entryPrice - tp1Dist).toFixed(2));
+      const tp2 = isBull ? Number((entryPrice + tp2Dist).toFixed(2)) : Number((entryPrice - tp2Dist).toFixed(2));
+      const tp3 = isBull ? Number((entryPrice + tp3Dist).toFixed(2)) : Number((entryPrice - tp3Dist).toFixed(2));
+      const tp4 = isBull ? Number((entryPrice + tp4Dist).toFixed(2)) : Number((entryPrice - tp4Dist).toFixed(2));
 
       const expiryDate = new Date(Date.now() + 45 * 60 * 1000).toISOString();
 
@@ -720,7 +737,7 @@ export function runSarrafAnalysis(livePrice?: number, liveSpread?: number): Engi
         status: 'ACTIVE',
       };
 
-      scanReason = `SARRAF signal formed with score ${totalScore}/100 at ${zone.type} (${entryPrice}).`;
+      scanReason = `SARRAF live signal formed with score ${totalScore}/100 at live price $${entryPrice.toFixed(2)} (${zone.type}).`;
       break;
     }
   }

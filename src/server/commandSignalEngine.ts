@@ -479,8 +479,7 @@ function issueNewSignal(side: SignalSide, entryPrice: number, isTest = false) {
   saveCommandSignalsToDisk();
 
   // Telegram notification for real signals only (never send test signals to public Telegram chat)
-  const isFeedActive = lastFeedStatus === 'LIVE' || lastFeedStatus === 'LIVE (POLLING)';
-  if (!isTest && isFeedActive) {
+  if (!isTest) {
     notifyNewSignal(newSignal).catch(() => {});
   }
 }
@@ -554,19 +553,22 @@ function finalizeClosedSignal(reason: SignalCloseReason, closePrice: number) {
 /**
  * Manual Close active signal at current market price
  */
-export function manualCloseCommandSignal(marketPrice: number): { success: boolean; message: string } {
+export function manualCloseCommandSignal(marketPrice?: number): { success: boolean; message: string } {
   if (lifecycle !== 'ACTIVE' || !activeSignal) {
     return { success: false, message: 'No active signal to close.' };
   }
 
+  const effectivePrice = typeof marketPrice === 'number' && Number.isFinite(marketPrice) && marketPrice > 0
+    ? marketPrice
+    : activeSignal.entry;
   const isBuy = activeSignal.side === 'BUY';
-  const pnl = isBuy ? marketPrice - activeSignal.entry : activeSignal.entry - marketPrice;
+  const pnl = isBuy ? effectivePrice - activeSignal.entry : activeSignal.entry - effectivePrice;
   const reason: SignalCloseReason = 'MANUAL';
 
-  finalizeClosedSignal(reason, marketPrice);
+  finalizeClosedSignal(reason, effectivePrice);
   return {
     success: true,
-    message: `Active signal manually closed @ $${marketPrice.toFixed(2)} (PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}). 30-min cooldown started.`,
+    message: `Active signal manually closed @ $${effectivePrice.toFixed(2)} (PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}). 30-min cooldown started.`,
   };
 }
 
@@ -593,6 +595,15 @@ export function triggerSimulatedCommandSignal(side: SignalSide = 'BUY', customPr
   const price = customPrice && customPrice > 0 ? customPrice : 4118.50;
   issueNewSignal(side, price, true); // isTest = true
   return { success: true, signal: activeSignal || undefined, message: `Issued ${side} test signal @ $${price}.` };
+}
+
+/**
+ * Trigger LIVE XAUUSD signal directly from Telegram Admin Panel at live price
+ */
+export function triggerLiveCommandSignalFromTelegram(side: SignalSide, livePrice: number): CommandSignal | null {
+  const px = livePrice && livePrice > 0 ? livePrice : 4140.77;
+  issueNewSignal(side, px, false);
+  return activeSignal;
 }
 
 /**

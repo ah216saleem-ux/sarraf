@@ -2761,7 +2761,7 @@ function runBackendSignalEngineStep() {
     } else {
       saveTradeToSqlite(updatedTrade, currentPrice);
     }
-  } else if (!currentActiveTrade && currentDecision.canFire && currentPrice !== null) {
+  } else if (!currentActiveTrade && !btcTidePaused && currentDecision.canFire && currentPrice !== null) {
     const newTrade = createTradePlan(
       currentDecision.favoredSide as 'LONG' | 'SHORT',
       currentPrice,
@@ -2805,6 +2805,72 @@ function startBackendWatchdog() {
 // ---------------------------------------------------------------------------
 // 8. Public Snapshots & Health
 // ---------------------------------------------------------------------------
+
+export function isBtcTidePaused(): boolean {
+  return btcTidePaused;
+}
+
+export function setBtcTidePaused(paused: boolean): boolean {
+  btcTidePaused = paused;
+  scheduleBroadcast();
+  return btcTidePaused;
+}
+
+export function resetBtcTideCooldown(): void {
+  lastSignalTime = null;
+  scheduleBroadcast();
+}
+
+export function manualCloseBtcTideTrade(): BtcTideTradeRecord | null {
+  if (!currentActiveTrade) return null;
+  const closePx = currentPrice || currentActiveTrade.entryPrice;
+  const closed: BtcTideTradeRecord = {
+    ...currentActiveTrade,
+    status: "CLOSED",
+    outcome: currentActiveTrade.tp2Hit
+      ? "TP2"
+      : currentActiveTrade.tp1Hit
+      ? "TP1+BE"
+      : "EXPIRED",
+    realizedR: currentActiveTrade.currentR,
+    closedAt: Date.now(),
+    closePrice: closePx,
+  };
+  currentActiveTrade = null;
+  currentClosedTrades = [closed, ...currentClosedTrades.filter((t) => t.id !== closed.id)].slice(0, 300);
+  saveTradeToSqlite(closed, closePx);
+  notifyBtcTideExpiry(closed, closePx);
+  scheduleBroadcast();
+  return closed;
+}
+
+export function triggerLiveBtcTideSignalFromTelegram(
+  forcedSide?: "LONG" | "SHORT"
+): BtcTideTradeRecord | null {
+  const px = currentPrice || 82000;
+  const sortedBins = Array.from(binsMap.values()).sort((a, b) => a.sec - b.sec);
+  const side: "LONG" | "SHORT" =
+    forcedSide ||
+    (currentDecision.favoredSide === "SHORT" ? "SHORT" : "LONG");
+  const conf = Math.max(72, currentDecision.confidence || 75);
+  const lead = Math.max(35, currentDecision.lead || 42);
+  const newTrade = createTradePlan(
+    side,
+    px,
+    sortedBins,
+    conf,
+    lead,
+    `LIVE TELEGRAM SIGNAL (${side})`,
+    currentAtr1h
+  );
+  currentActiveTrade = newTrade;
+  lastSignalTime = newTrade.entryTime;
+  saveTradeToSqlite(newTrade, px);
+  notifyNewBtcTideSignal(newTrade, currentDecision);
+  scheduleBroadcast();
+  return newTrade;
+}
+
 export function getBackendSnapshot(): BtcTideBackendState {
   const sortedBins = Array.from(binsMap.values()).sort((a, b) => a.sec - b.sec);
   const now = Date.now();

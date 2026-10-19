@@ -874,16 +874,31 @@ export function processSignalManagerTick(
           saveSignalsToDisk();
           console.log(`[SIGNAL MANAGER] Setup ${signalId} entered PENDING_REVIEW (holds lock, expires in ${timeoutMins}m).`);
         } else {
+          const liveEntry = Number(livePrice.toFixed(2));
+          const isBull = setup.direction === 'BUY';
+          const cfg = getCurrentSettings();
+          const slDist = cfg.slDollars || 10.0;
+          const tp1Dist = cfg.tp1Dollars || 5.0;
+          const tp2Dist = cfg.tp2Dollars || 8.0;
+          const tp3Dist = cfg.tp3Dollars || 10.0;
+          const tp4Dist = cfg.tp4Dollars || 12.0;
+
+          const slTarget = Number((isBull ? liveEntry - slDist : liveEntry + slDist).toFixed(2));
+          const tp1Target = Number((isBull ? liveEntry + tp1Dist : liveEntry - tp1Dist).toFixed(2));
+          const tp2Target = Number((isBull ? liveEntry + tp2Dist : liveEntry - tp2Dist).toFixed(2));
+          const tp3Target = Number((isBull ? liveEntry + tp3Dist : liveEntry - tp3Dist).toFixed(2));
+          const tp4Target = Number((isBull ? liveEntry + tp4Dist : liveEntry - tp4Dist).toFixed(2));
+
           const newRecord: SignalRecord = {
             id: signalId,
             version: 1,
             direction: setup.direction,
-            entryTarget: setup.entry,
-            slTarget: setup.sl,
-            tp1Target: setup.tp1,
-            tp2Target: setup.tp2,
-            tp3Target: setup.tp3,
-            tp4Target: setup.tp4,
+            entryTarget: liveEntry,
+            slTarget,
+            tp1Target,
+            tp2Target,
+            tp3Target,
+            tp4Target,
             score: setup.score,
             timeframe: setup.timeframe,
             zone: {
@@ -895,9 +910,12 @@ export function processSignalManagerTick(
             },
             createdAt: nowIso,
             pendingExpiresAt: expiresAt,
-            status: 'PENDING',
+            activatedAt: nowIso,
+            entryFillPrice: liveEntry,
+            entryFillTime: nowIso,
+            status: 'ACTIVE',
             highestTPReached: 'NONE',
-            currentSL: setup.sl,
+            currentSL: slTarget,
             isBreakevenActive: false,
             mfeDollars: 0,
             maeDollars: 0,
@@ -909,7 +927,7 @@ export function processSignalManagerTick(
           };
 
           managerState.currentSignal = newRecord;
-          managerState.state = 'PENDING';
+          managerState.state = 'ACTIVE';
           managerState.dailySignalsCount += 1;
 
           queueOutboxEvent(newRecord.id, 'SIGNAL_CREATED', {
@@ -926,7 +944,7 @@ export function processSignalManagerTick(
           });
 
           saveSignalsToDisk();
-          console.log(`[SIGNAL MANAGER] Generated new signal ${signalId} (${newRecord.direction} @ ${newRecord.entryTarget})`);
+          console.log(`[SIGNAL MANAGER] Generated LIVE ACTIVE signal ${signalId} (${newRecord.direction} @ ${newRecord.entryTarget})`);
         }
       }
     } finally {
@@ -1377,3 +1395,84 @@ export function getSignalHistory() {
 export function getFullManagerState() {
   return managerState;
 }
+
+export function resetXauSignalManagerCooldown(livePrice?: number) {
+  if (managerState.currentSignal) {
+    const sig = managerState.currentSignal;
+    const px = livePrice || sig.entryFillPrice || sig.entryTarget;
+    closeActiveSignal(sig, 'MANUAL_CLOSE', 'BREAKEVEN', px, 0, false, 'Closed manually by Admin from Telegram.');
+  }
+  managerState.cooldownEndsAt = null;
+  managerState.isPaused = false;
+  managerState.state = 'SCANNING';
+  saveSignalsToDisk();
+}
+
+export function triggerLiveXauSignalFromTelegram(
+  direction: 'BUY' | 'SELL',
+  livePrice: number
+): SignalRecord {
+  const signalId = generateSignalId();
+  const nowIso = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 45 * 60 * 1000).toISOString();
+  const entry = Number(livePrice.toFixed(2));
+  const isBull = direction === 'BUY';
+  const cfg = getCurrentSettings();
+  const slDist = cfg.slDollars || 10.0;
+  const tp1Dist = cfg.tp1Dollars || 5.0;
+  const tp2Dist = cfg.tp2Dollars || 8.0;
+  const tp3Dist = cfg.tp3Dollars || 10.0;
+  const tp4Dist = cfg.tp4Dollars || 12.0;
+
+  const slTarget = Number((isBull ? entry - slDist : entry + slDist).toFixed(2));
+  const tp1Target = Number((isBull ? entry + tp1Dist : entry - tp1Dist).toFixed(2));
+  const tp2Target = Number((isBull ? entry + tp2Dist : entry - tp2Dist).toFixed(2));
+  const tp3Target = Number((isBull ? entry + tp3Dist : entry - tp3Dist).toFixed(2));
+  const tp4Target = Number((isBull ? entry + tp4Dist : entry - tp4Dist).toFixed(2));
+
+  const newRecord: SignalRecord = {
+    id: signalId,
+    version: 1,
+    direction,
+    entryTarget: entry,
+    slTarget,
+    tp1Target,
+    tp2Target,
+    tp3Target,
+    tp4Target,
+    score: 88,
+    timeframe: 'M30_M15',
+    zone: {
+      id: `LIVE-${Date.now()}`,
+      type: isBull ? 'BULLISH_OB' : 'BEARISH_OB',
+      high: Number((entry + 1.5).toFixed(2)),
+      low: Number((entry - 1.5).toFixed(2)),
+      mid50: entry,
+    },
+    createdAt: nowIso,
+    pendingExpiresAt: expiresAt,
+    activatedAt: nowIso,
+    entryFillPrice: entry,
+    entryFillTime: nowIso,
+    status: 'ACTIVE',
+    highestTPReached: 'NONE',
+    currentSL: slTarget,
+    isBreakevenActive: false,
+    mfeDollars: 0,
+    maeDollars: 0,
+    realizedDollars: 0,
+    realizedR: 0,
+    durationSeconds: 0,
+    newsLockActive: false,
+    events: [],
+  };
+
+  managerState.currentSignal = newRecord;
+  managerState.state = 'ACTIVE';
+  managerState.isPaused = false;
+  managerState.cooldownEndsAt = null;
+  managerState.dailySignalsCount += 1;
+  saveSignalsToDisk();
+  return newRecord;
+}
+

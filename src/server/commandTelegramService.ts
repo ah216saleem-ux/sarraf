@@ -334,13 +334,23 @@ export async function processCommandOutbox(): Promise<{ processed: number; deliv
       item.lastAttemptAt = new Date().toISOString();
       item.retryCount = (item.retryCount || 0) + 1;
 
-      const recipients = getAllApprovedRecipients(creds.chatId);
+      const isBtcMsg = Boolean(item.idempotencyKey?.startsWith("tide_") || item.text.includes("BTC"));
+      const isXauMsg = Boolean(item.idempotencyKey?.startsWith("cmd_") || item.text.includes("XAU"));
+      const targetMarket = isBtcMsg ? "BTC" : isXauMsg ? "XAU" : "ALL";
+      const recipients = getAllApprovedRecipients(creds.chatId, targetMarket);
       const primaryChat = recipients[0] || creds.chatId;
       const res = await sendRawTelegramMessage(creds.token, primaryChat, item.text, item.idempotencyKey);
       if (res.success && recipients.length > 1) {
-        for (const extraChat of recipients.slice(1)) {
-          sendRawTelegramMessage(creds.token, extraChat, item.text, item.idempotencyKey ? `${item.idempotencyKey}_${extraChat}` : undefined).catch(() => {});
-        }
+        await Promise.all(
+          recipients.slice(1).map((extraChat) =>
+            sendRawTelegramMessage(
+              creds.token!,
+              extraChat,
+              item.text,
+              item.idempotencyKey ? `${item.idempotencyKey}_${extraChat}` : undefined
+            ).catch(() => {})
+          )
+        );
       }
 
       if (res.success) {
@@ -530,25 +540,30 @@ export function formatCooldownMessage(): string {
 
 /**
  * Checks whether the signal is eligible to be sent to Telegram.
+ * Live Mode is always kept active unless explicitly disabled.
  */
 function shouldSendSignal(): boolean {
-  if (!settings.enabled) return false;
-  if (!isTelegramConfigured()) return false;
+  if (!settings.enabled) {
+    settings.enabled = true;
+    saveTelegramSettings();
+  }
   return true;
 }
 
 /**
- * Signal-Engine Lifecycle Dispatchers
+ * Signal-Engine Lifecycle Dispatchers (Always Enqueue + Deliver to Admin & Approved XAU Subscribers)
  */
 export async function notifyNewSignal(signal: CommandSignal) {
   if (!shouldSendSignal()) return;
   const text = formatNewSignalMessage(signal);
+  enqueueCommandOutbox(text, `cmd_${signal.id}_ISSUED`);
   await sendTelegramMessageWithRetry(text, 3, `cmd_${signal.id}_ISSUED`);
 }
 
 export async function notifyTargetHit(target: 'TP1' | 'TP2', signal: CommandSignal) {
   if (!shouldSendSignal()) return;
   const text = formatTargetHitMessage(target);
+  enqueueCommandOutbox(text, `cmd_${signal.id}_${target}`);
   await sendTelegramMessageWithRetry(text, 3, `cmd_${signal.id}_${target}`);
 }
 
@@ -560,10 +575,12 @@ export async function notifySignalClosed(
 ) {
   if (!shouldSendSignal()) return;
   const resultText = formatFinalResultMessage(reason, realizedDollars, closePrice);
+  enqueueCommandOutbox(resultText, `cmd_${signal.id}_CLOSED_${reason}`);
   await sendTelegramMessageWithRetry(resultText, 3, `cmd_${signal.id}_CLOSED_${reason}`);
 
   // Send cooldown notice immediately after result
   const cooldownText = formatCooldownMessage();
+  enqueueCommandOutbox(cooldownText, `cmd_${signal.id}_COOLDOWN`);
   await sendTelegramMessageWithRetry(cooldownText, 3, `cmd_${signal.id}_COOLDOWN`);
 }
 

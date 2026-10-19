@@ -6,6 +6,7 @@ const SUBSCRIBERS_FILE = path.resolve(DATA_DIR, 'telegram_subscribers.json');
 
 export type SubscriberRole = 'ADMIN' | 'USER';
 export type SubscriberStatus = 'APPROVED' | 'PENDING' | 'BLOCKED';
+export type SubscriberMarketAccess = 'XAU' | 'BTC' | 'BOTH';
 
 export interface TelegramSubscriber {
   chatId: string;
@@ -13,6 +14,7 @@ export interface TelegramSubscriber {
   firstName?: string;
   role: SubscriberRole;
   status: SubscriberStatus;
+  markets: SubscriberMarketAccess; // 'XAU' | 'BTC' | 'BOTH'
   createdAt: string;
   updatedAt: string;
 }
@@ -32,6 +34,11 @@ function ensureLoaded() {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed.subscribers === 'object') {
         state = parsed;
+        for (const k of Object.keys(state.subscribers)) {
+          if (!state.subscribers[k].markets) {
+            state.subscribers[k].markets = 'BOTH';
+          }
+        }
       }
     }
   } catch (err: any) {
@@ -84,14 +91,31 @@ export function getAllAdmins(): TelegramSubscriber[] {
   );
 }
 
-export function getAllApprovedRecipients(fallbackAdminChatId?: string | null): string[] {
+/**
+ * Returns all approved chat IDs (Admin + Approved Subscribers) filtered by market:
+ * - market = 'XAU': Admin + subscribers with markets === 'XAU' or 'BOTH'
+ * - market = 'BTC': Admin + subscribers with markets === 'BTC' or 'BOTH'
+ * - market = 'ALL': Admin + all approved subscribers
+ */
+export function getAllApprovedRecipients(
+  fallbackAdminChatId?: string | null,
+  market: 'XAU' | 'BTC' | 'ALL' = 'ALL'
+): string[] {
   ensureLoaded();
   const set = new Set<string>();
   if (fallbackAdminChatId && !fallbackAdminChatId.startsWith('@')) {
     set.add(String(fallbackAdminChatId).trim());
   }
   for (const sub of Object.values(state.subscribers)) {
-    if (sub.status === 'APPROVED' && sub.chatId && !sub.chatId.startsWith('@')) {
+    if (sub.status !== 'APPROVED' || !sub.chatId || sub.chatId.startsWith('@')) {
+      continue;
+    }
+    if (sub.role === 'ADMIN') {
+      set.add(sub.chatId);
+      continue;
+    }
+    const m = sub.markets || 'BOTH';
+    if (market === 'ALL' || m === 'BOTH' || m === market) {
       set.add(sub.chatId);
     }
   }
@@ -120,6 +144,7 @@ export function registerAdminChat(
     firstName: firstName || existing?.firstName || 'Admin',
     role: 'ADMIN',
     status: 'APPROVED',
+    markets: 'BOTH',
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   };
@@ -138,11 +163,10 @@ export function upsertUserRequest(
   const now = new Date().toISOString();
   const existing = state.subscribers[id];
 
-  // If no admin exists at all yet and this is the very first private chat ever,
-  // still require /admin or auto-promote if matching dynamicChatId
   if (existing) {
     if (username) existing.username = username;
     if (firstName) existing.firstName = firstName;
+    if (!existing.markets) existing.markets = 'BOTH';
     existing.updatedAt = now;
     saveState();
     return { subscriber: existing, isNewPending: false };
@@ -154,6 +178,7 @@ export function upsertUserRequest(
     firstName: firstName || 'Trader',
     role: 'USER',
     status: 'PENDING',
+    markets: 'BOTH',
     createdAt: now,
     updatedAt: now,
   };
@@ -164,7 +189,8 @@ export function upsertUserRequest(
 
 export function setSubscriberStatus(
   chatId: string | number,
-  status: SubscriberStatus
+  status: SubscriberStatus,
+  markets?: SubscriberMarketAccess
 ): TelegramSubscriber | null {
   ensureLoaded();
   const id = String(chatId).trim();
@@ -177,12 +203,16 @@ export function setSubscriberStatus(
       firstName: 'Subscriber',
       role: 'USER',
       status,
+      markets: markets || 'BOTH',
       createdAt: now,
       updatedAt: now,
     };
     state.subscribers[id] = sub;
   } else {
     sub.status = status;
+    if (markets) {
+      sub.markets = markets;
+    }
     sub.updatedAt = now;
   }
   saveState();
