@@ -68,5 +68,26 @@
     "idempotencyKey": "tide_new_btctide_1792360226809_long",
     "lastAttemptAt": "2026-10-18T21:50:26.902Z",
     "sentAt": "2026-10-18T21:50:27.064Z"
+  },
+  {
+    "id": "cmd_out_1792406955355_nkb0c",
+    "text": "❌ BTC Stop Loss Hit — Trade Closed",
+    "createdAt": "2026-10-19T10:49:15.355Z",
+    "status": "SENT",
+    "retryCount": 1,
+    "idempotencyKey": "tide_exp_btctide_1792365027764_long",
+    "lastAttemptAt": "2026-10-19T10:49:15.355Z",
+    "sentAt": "2026-10-19T10:49:15.440Z",
+    "telegramMessageId": 1417
+  },
+  {
+    "id": "cmd_out_1792407369099_n2ug1",
+    "text": "Proof Test 1792407369098",
+    "createdAt": "2026-10-19T10:56:09.099Z",
+    "status": "SENT",
+    "retryCount": 1,
+    "lastAttemptAt": "2026-10-19T10:56:09.100Z",
+    "sentAt": "2026-10-19T10:56:09.347Z",
+    "telegramMessageId": 1427
   }
 ]

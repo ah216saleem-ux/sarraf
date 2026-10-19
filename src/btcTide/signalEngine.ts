@@ -118,9 +118,37 @@ export function computeAtr1h(
 export function computeAtr90s(
   bins: SecondBin[],
   currentPrice: number,
-  explicitAtr1h?: number | null
+  explicitAtr?: number | null
 ): number {
-  return computeAtr1h(bins, currentPrice, explicitAtr1h);
+  if (explicitAtr && Number.isFinite(explicitAtr) && explicitAtr > 0) {
+    return Number(clamp(explicitAtr, 10, 5000).toFixed(2));
+  }
+  const baseline90sAtr = Math.max(30, currentPrice * 0.001); // e.g. ~$82 at $82,000 BTC
+  if (!bins || bins.length < 5) return Number(baseline90sAtr.toFixed(2));
+
+  const latestSec = bins[bins.length - 1].sec;
+  const startWindow = latestSec - 89;
+  const recentBins = bins.filter((b) => b.sec >= startWindow);
+  if (recentBins.length < 5) return Number(baseline90sAtr.toFixed(2));
+
+  let trSum = 0;
+  let count = 0;
+  let prevClose = recentBins[0].openPrice;
+  for (const b of recentBins) {
+    const tr = Math.max(
+      b.highPrice - b.lowPrice,
+      Math.abs(b.highPrice - prevClose),
+      Math.abs(b.lowPrice - prevClose)
+    );
+    trSum += tr;
+    count++;
+    prevClose = b.lastPrice;
+  }
+  const avgTr1s = count > 0 ? trSum / count : 1.5;
+  const scaled90s = avgTr1s * Math.sqrt(90);
+  const minAtr = Math.max(20, currentPrice * 0.0004);
+  const maxAtr = Math.max(350, currentPrice * 0.006);
+  return Number(clamp(scaled90s, minAtr, maxAtr).toFixed(2));
 }
 
 /**
@@ -694,10 +722,13 @@ export function evaluateDecisionEngine(
 /**
  * Creates a new Trade Plan computed strictly from real prices and 1H ATR:
  * - SL: 1.5 × ATR
- * - TP1: 1 × ATR
- * - TP2: 2 × ATR
- * - TP3: 3 × ATR
- * - SL moves to breakeven after TP1.
+/**
+ * Creates a new Trade Plan strictly according to the specification:
+ * - ATR: 90s short-term ATR (computeAtr90s)
+ * - Swing Level: 90s swing low (for LONG) / 90s swing high (for SHORT)
+ * - SL: beyond the 90s swing +/- 0.4 ATR (short-term ATR), clamped 1.2 - 3.2 ATR
+ * - TP1/2/3: exactly 1R / 2R / 3R of that SL distance
+ * - TP1 + breakeven: realizes +0.50R
  */
 export function createTradePlan(
   side: 'LONG' | 'SHORT',
@@ -706,31 +737,46 @@ export function createTradePlan(
   confidence: number,
   lead: number,
   triggerReason: string,
-  explicitAtr1h?: number | null
+  explicitAtrShort?: number | null
 ): BtcTideTradeRecord {
-  const atr = computeAtr1h(secondBins, entryPrice, explicitAtr1h);
-  const oneR = Number(atr.toFixed(2)); // 1 × 1H ATR
-  const slDist = Number((1.5 * atr).toFixed(2)); // 1.5 × 1H ATR
-  const tp1Dist = Number((1.0 * atr).toFixed(2)); // 1.0 × 1H ATR
-  const tp2Dist = Number((2.0 * atr).toFixed(2)); // 2.0 × 1H ATR
-  const tp3Dist = Number((3.0 * atr).toFixed(2)); // 3.0 × 1H ATR
+  const atrShort = computeAtr90s(secondBins, entryPrice, explicitAtrShort);
 
+  // 90s swing detection
+  let swingLow = entryPrice;
+  let swingHigh = entryPrice;
+  if (secondBins && secondBins.length > 0) {
+    const latestSec = secondBins[secondBins.length - 1].sec;
+    const startWindow = latestSec - 89;
+    const recent = secondBins.filter((b) => b.sec >= startWindow);
+    if (recent.length > 0) {
+      swingLow = Math.min(...recent.map((b) => b.lowPrice));
+      swingHigh = Math.max(...recent.map((b) => b.highPrice));
+    }
+  }
+
+  let slDist = 0;
   let slPrice = 0;
   let tp1Price = 0;
   let tp2Price = 0;
   let tp3Price = 0;
 
   if (side === 'LONG') {
+    const unclamped = (entryPrice - swingLow) + 0.4 * atrShort;
+    slDist = Number(clamp(unclamped, 1.2 * atrShort, 3.2 * atrShort).toFixed(2));
     slPrice = Number((entryPrice - slDist).toFixed(2));
-    tp1Price = Number((entryPrice + tp1Dist).toFixed(2));
-    tp2Price = Number((entryPrice + tp2Dist).toFixed(2));
-    tp3Price = Number((entryPrice + tp3Dist).toFixed(2));
+    tp1Price = Number((entryPrice + 1.0 * slDist).toFixed(2));
+    tp2Price = Number((entryPrice + 2.0 * slDist).toFixed(2));
+    tp3Price = Number((entryPrice + 3.0 * slDist).toFixed(2));
   } else {
+    const unclamped = (swingHigh - entryPrice) + 0.4 * atrShort;
+    slDist = Number(clamp(unclamped, 1.2 * atrShort, 3.2 * atrShort).toFixed(2));
     slPrice = Number((entryPrice + slDist).toFixed(2));
-    tp1Price = Number((entryPrice - tp1Dist).toFixed(2));
-    tp2Price = Number((entryPrice - tp2Dist).toFixed(2));
-    tp3Price = Number((entryPrice - tp3Dist).toFixed(2));
+    tp1Price = Number((entryPrice - 1.0 * slDist).toFixed(2));
+    tp2Price = Number((entryPrice - 2.0 * slDist).toFixed(2));
+    tp3Price = Number((entryPrice - 3.0 * slDist).toFixed(2));
   }
+
+  const oneR = slDist; // 1R is the exact SL distance
 
   const now = Date.now();
   const trade: BtcTideTradeRecord = {

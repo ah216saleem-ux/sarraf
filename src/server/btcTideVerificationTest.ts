@@ -59,7 +59,7 @@ export async function runBtcTideVerificationTests() {
     assert(initialStats.winRate === null, 'Win rate is null (shows --) when < 10 closed trades');
     assert(initialStats.avgR === null, 'Avg R is null (shows --) when < 10 closed trades');
 
-    // Test 2: Trade Plan Creation (1H ATR-Based Signal: SL = 1.5x ATR, TP1 = 1x ATR, TP2 = 2x ATR, TP3 = 3x ATR)
+    // Test 2: Trade Plan Creation (Short-term ATR 90s swing +/- 0.4 ATR clamped 1.2-3.2 ATR; TP1/2/3 = 1R/2R/3R)
     const mockBins: SecondBin[] = [];
     const basePrice = 81000;
     for (let i = 0; i < 185; i++) {
@@ -79,14 +79,15 @@ export async function runBtcTideVerificationTests() {
       });
     }
 
-    const firePrice = mockBins[mockBins.length - 1].lastPrice;
-    const trade = createTradePlan('LONG', firePrice, mockBins, 75, 30, 'Strong buyer flow', 500);
+    const firePrice = mockBins[mockBins.length - 1].lastPrice; // 81280.00
+    // Test with short-term 90s ATR = $100; 90s swing low = 81134.50
+    const trade = createTradePlan('LONG', firePrice, mockBins, 75, 30, 'Strong buyer flow', 100);
     assert(trade.side === 'LONG', 'Trade side is LONG');
     assert(trade.entryPrice === firePrice, 'Trade entry price matches live price at fire time');
     assert(trade.slPrice < trade.entryPrice, 'Long SL is below entry');
     assert(
-      Math.abs(trade.entryPrice - trade.slPrice - 750) < 0.02,
-      'When 1H ATR = $500, SL distance is 1.5 × ATR = $750'
+      Math.abs((trade.entryPrice - trade.slPrice) - 185.5) < 0.05,
+      'SL is beyond 90s swing - 0.4 ATR (short-term ATR), clamped 1.2-3.2 ATR'
     );
     assert(
       trade.tp1Price > trade.entryPrice &&
@@ -95,16 +96,16 @@ export async function runBtcTideVerificationTests() {
       'TP targets are ascending'
     );
     assert(
-      Math.abs(trade.tp1Price - trade.entryPrice - 500) < 0.02,
-      'When 1H ATR = $500, TP1 is 1 × ATR = $500'
+      Math.abs((trade.tp1Price - trade.entryPrice) - trade.oneR) < 0.05,
+      'TP1 distance is exactly 1R of SL distance'
     );
     assert(
-      Math.abs(trade.tp2Price - trade.entryPrice - 1000) < 0.02,
-      'When 1H ATR = $500, TP2 is 2 × ATR = $1,000'
+      Math.abs((trade.tp2Price - trade.entryPrice) - 2 * trade.oneR) < 0.05,
+      'TP2 distance is exactly 2R of SL distance'
     );
     assert(
-      Math.abs(trade.tp3Price - trade.entryPrice - 1500) < 0.02,
-      'When 1H ATR = $500, TP3 is 3 × ATR = $1,500'
+      Math.abs((trade.tp3Price - trade.entryPrice) - 3 * trade.oneR) < 0.05,
+      'TP3 distance is exactly 3R of SL distance'
     );
 
     // Test 3: TP1 Hit moves stop to breakeven

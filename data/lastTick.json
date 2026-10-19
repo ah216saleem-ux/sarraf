@@ -1,17 +1,17 @@
 {
   "symbol": "XAUUSD",
-  "price": 4164.27,
-  "bid": 4164.18,
-  "ask": 4164.36,
+  "price": 4169.52,
+  "bid": 4169.44,
+  "ask": 4169.61,
   "high": 4207.52,
   "low": 4073.32,
   "open": 4165,
-  "previousClose": 4156.25,
-  "spread": 0.18,
-  "dayDiffPercent": 0.19,
+  "previousClose": 4184.82,
+  "spread": 0.17,
+  "dayDiffPercent": -0.37,
   "direction": "DOWN",
-  "timestamp": "2026-10-16T20:57:40Z",
-  "lastReceivedAt": 1792328516633,
+  "timestamp": "2026-10-19T10:59:12Z",
+  "lastReceivedAt": 1792407552749,
   "source": "MetaTrader 5 (Broker 1)",
-  "marketState": "closed"
+  "marketState": "open"
 }
