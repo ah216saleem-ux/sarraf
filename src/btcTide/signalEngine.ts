@@ -117,24 +117,26 @@ export function computeAtr1h(
 
 export function computeAtr90s(
   bins: SecondBin[],
-  currentPrice: number,
+  _currentPrice: number,
   explicitAtr?: number | null
 ): number {
   if (explicitAtr && Number.isFinite(explicitAtr) && explicitAtr > 0) {
-    return Number(clamp(explicitAtr, 10, 5000).toFixed(2));
+    return Number(clamp(explicitAtr, 5, 5000).toFixed(2));
   }
-  const baseline90sAtr = Math.max(30, currentPrice * 0.001); // e.g. ~$82 at $82,000 BTC
-  if (!bins || bins.length < 5) return Number(baseline90sAtr.toFixed(2));
+  if (!bins || bins.length === 0) return 0;
 
   const latestSec = bins[bins.length - 1].sec;
   const startWindow = latestSec - 89;
   const recentBins = bins.filter((b) => b.sec >= startWindow);
-  if (recentBins.length < 5) return Number(baseline90sAtr.toFixed(2));
+  const activeBins = recentBins.length >= 2 ? recentBins : bins.slice(-90);
 
   let trSum = 0;
   let count = 0;
-  let prevClose = recentBins[0].openPrice;
-  for (const b of recentBins) {
+  let prevClose = activeBins[0].openPrice;
+  let highest = activeBins[0].highPrice;
+  let lowest = activeBins[0].lowPrice;
+
+  for (const b of activeBins) {
     const tr = Math.max(
       b.highPrice - b.lowPrice,
       Math.abs(b.highPrice - prevClose),
@@ -143,12 +145,15 @@ export function computeAtr90s(
     trSum += tr;
     count++;
     prevClose = b.lastPrice;
+    if (b.highPrice > highest) highest = b.highPrice;
+    if (b.lowPrice < lowest) lowest = b.lowPrice;
   }
-  const avgTr1s = count > 0 ? trSum / count : 1.5;
+
+  const avgTr1s = count > 0 ? trSum / count : 0;
   const scaled90s = avgTr1s * Math.sqrt(90);
-  const minAtr = Math.max(20, currentPrice * 0.0004);
-  const maxAtr = Math.max(350, currentPrice * 0.006);
-  return Number(clamp(scaled90s, minAtr, maxAtr).toFixed(2));
+  const realizedRange = highest - lowest;
+  const rawAtr = scaled90s > 0 ? scaled90s * 0.65 + realizedRange * 0.35 : realizedRange;
+  return Number(Math.max(1, rawAtr).toFixed(2));
 }
 
 /**
@@ -343,7 +348,7 @@ export function evaluateDecisionEngine(
             rawImbalance >= 0 ? 'Bid Skew' : 'Ask Skew'
           }`
         : '--',
-    explanation: 'Bid vs Ask USD notional imbalance across top 10 book levels',
+    explanation: 'Bid vs Ask USD notional depth imbalance within +/-0.1% of mid (5s smoothed)',
     excluded: false,
   };
 
@@ -760,16 +765,20 @@ export function createTradePlan(
   let tp2Price = 0;
   let tp3Price = 0;
 
+  const minSlFloor = entryPrice * 0.0008; // Minimum SL distance of 0.08% of price
+  const minClamp = Math.max(1.2 * atrShort, minSlFloor);
+  const maxClamp = Math.max(minClamp, 3.2 * atrShort);
+
   if (side === 'LONG') {
     const unclamped = (entryPrice - swingLow) + 0.4 * atrShort;
-    slDist = Number(clamp(unclamped, 1.2 * atrShort, 3.2 * atrShort).toFixed(2));
+    slDist = Number(clamp(unclamped, minClamp, maxClamp).toFixed(2));
     slPrice = Number((entryPrice - slDist).toFixed(2));
     tp1Price = Number((entryPrice + 1.0 * slDist).toFixed(2));
     tp2Price = Number((entryPrice + 2.0 * slDist).toFixed(2));
     tp3Price = Number((entryPrice + 3.0 * slDist).toFixed(2));
   } else {
     const unclamped = (swingHigh - entryPrice) + 0.4 * atrShort;
-    slDist = Number(clamp(unclamped, 1.2 * atrShort, 3.2 * atrShort).toFixed(2));
+    slDist = Number(clamp(unclamped, minClamp, maxClamp).toFixed(2));
     slPrice = Number((entryPrice + slDist).toFixed(2));
     tp1Price = Number((entryPrice - 1.0 * slDist).toFixed(2));
     tp2Price = Number((entryPrice - 2.0 * slDist).toFixed(2));
@@ -805,6 +814,7 @@ export function createTradePlan(
     confidence,
     lead,
     triggerReason,
+    engine_version: 'v6.0',
   };
 
   return trade;

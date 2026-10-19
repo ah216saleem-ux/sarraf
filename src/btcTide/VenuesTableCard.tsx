@@ -189,7 +189,9 @@ export const VenuesTableCard: React.FC<VenuesTableCardProps> = React.memo(
                               <span className="text-[9px] text-neutral-500 font-normal">(PERP)</span>
                             )}
                             {v.venue === 'Coinbase' && (
-                              <span className="text-[9px] text-neutral-500 font-normal">(USD)</span>
+                              <span className="text-[9px] text-amber-300/90 font-semibold px-1 py-0.2 rounded bg-amber-950/50 border border-amber-500/30" title="Coinbase BTC-USD pair is excluded from USDT median and spread">
+                                USD PAIR (EXCL. MEDIAN)
+                              </span>
                             )}
                             {v.isOutlier && (
                               <span
@@ -272,7 +274,7 @@ export const VenuesTableCard: React.FC<VenuesTableCardProps> = React.memo(
                               }`}
                               title={v.errorReason || undefined}
                             >
-                              {v.status}
+                              {v.status === 'OFFLINE' && v.errorReason ? `OFFLINE (${v.errorReason})` : v.status}
                             </span>
                           )}
                         </td>

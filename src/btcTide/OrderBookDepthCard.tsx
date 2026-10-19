@@ -31,6 +31,7 @@ export const OrderBookDepthCard: React.FC<OrderBookDepthCardProps> = React.memo(
       bidUsd10 = 0,
       askUsd10 = 0,
       imbalancePct,
+      bands,
       avgLevelSizeBtc = 0,
       walls = [],
       spread,
@@ -140,10 +141,10 @@ export const OrderBookDepthCard: React.FC<OrderBookDepthCardProps> = React.memo(
             <div className="flex flex-wrap items-center justify-between gap-1 mb-1.5">
               <div className="text-[11px]">
                 <span className="text-teal-400 font-bold">
-                  BID 10L: {hasData ? formatUsdCompact(bidUsd10) : '--'}
+                  BID ±0.1%: {bands ? formatUsdCompact(bands.band010.bidUsd) : hasData ? formatUsdCompact(bidUsd10) : '--'}
                 </span>
                 <span className="text-neutral-500 text-[10px] ml-1">
-                  ({hasData ? `${bidTotal.toFixed(3)}₿` : '--'})
+                  (5s Smoothed)
                 </span>
               </div>
 
@@ -168,10 +169,10 @@ export const OrderBookDepthCard: React.FC<OrderBookDepthCardProps> = React.memo(
 
               <div className="text-[11px] text-right">
                 <span className="text-rose-400 font-bold">
-                  ASK 10L: {hasData ? formatUsdCompact(askUsd10) : '--'}
+                  ASK ±0.1%: {bands ? formatUsdCompact(bands.band010.askUsd) : hasData ? formatUsdCompact(askUsd10) : '--'}
                 </span>
                 <span className="text-neutral-500 text-[10px] ml-1">
-                  ({hasData ? `${askTotal.toFixed(3)}₿` : '--'})
+                  (Signal Band)
                 </span>
               </div>
             </div>
@@ -214,6 +215,39 @@ export const OrderBookDepthCard: React.FC<OrderBookDepthCardProps> = React.memo(
               <span>0 (BALANCED)</span>
               <span>+100 (100% BID)</span>
             </div>
+            {bands && (
+              <div className="grid grid-cols-3 gap-1.5 mt-2 pt-2 border-t border-white/5 text-[10px] font-mono">
+                {[
+                  { label: "±0.05% BAND", data: bands.band005, isSignal: false },
+                  { label: "±0.10% (SIGNAL)", data: bands.band010, isSignal: true },
+                  { label: "±0.25% BAND", data: bands.band025, isSignal: false },
+                ].map((b) => {
+                  const imb = b.data.smoothedImbalancePct;
+                  const pos = imb >= 0;
+                  return (
+                    <div
+                      key={b.label}
+                      className={`rounded px-2 py-1 border ${
+                        b.isSignal
+                          ? "bg-[#E8B84A]/10 border-[#E8B84A]/40"
+                          : "bg-black/40 border-white/5"
+                      }`}
+                    >
+                      <div className="text-[9px] text-neutral-400 font-bold flex items-center justify-between">
+                        <span>{b.label}</span>
+                        <span className={pos ? "text-teal-400" : "text-rose-400"}>
+                          {pos ? "+" : ""}{imb.toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="text-[9px] text-neutral-500 flex justify-between mt-0.5">
+                        <span className="text-teal-300/80">B:{formatUsdCompact(b.data.bidUsd)}</span>
+                        <span className="text-rose-300/80">A:{formatUsdCompact(b.data.askUsd)}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Walls Line (> 5x average level size) */}
             <div className="mt-2 pt-1.5 border-t border-white/5 flex flex-wrap items-center justify-between gap-1 text-[10px]">

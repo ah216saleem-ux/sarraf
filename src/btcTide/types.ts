@@ -39,6 +39,19 @@ export interface OrderBookWall {
   multipleOfAvg: number;
 }
 
+export interface OrderBookBandMetric {
+  bidUsd: number;
+  askUsd: number;
+  rawImbalancePct: number;
+  smoothedImbalancePct: number;
+}
+
+export interface OrderBookBands {
+  band005: OrderBookBandMetric;
+  band010: OrderBookBandMetric;
+  band025: OrderBookBandMetric;
+}
+
 export interface OrderBookDepth {
   bids: DepthLevel[]; // Top 8 levels
   asks: DepthLevel[]; // Top 8 levels
@@ -49,7 +62,8 @@ export interface OrderBookDepth {
   askTotal: number;
   bidUsd10?: number;
   askUsd10?: number;
-  imbalancePct: number | null; // ((bidUSD - askUSD) / (bidUSD + askUSD)) * 100 over top 10 levels
+  imbalancePct: number | null; // +/-0.1% band USD depth imbalance smoothed over 5s
+  bands?: OrderBookBands;
   avgLevelSizeBtc?: number;
   walls?: OrderBookWall[];
   spread: number | null;

@@ -9,7 +9,7 @@
     "createdAt": "2026-10-19T18:50:32.007Z",
     "status": "PENDING_DELIVERY",
     "messageText": "⚠️ Bot restarted",
-    "lastAttemptAt": "2026-10-19T18:55:56.627Z",
+    "lastAttemptAt": "2026-10-19T19:40:46.240Z",
     "lastError": "Waiting for target Telegram chat registration. Open @Sarraftelegrambot and send /start or enter Chat ID in dashboard Settings."
   },
   {
@@ -22,7 +22,33 @@
     "createdAt": "2026-10-19T18:51:13.032Z",
     "status": "PENDING_DELIVERY",
     "messageText": "⚠️ Bot restarted",
-    "lastAttemptAt": "2026-10-19T18:55:56.628Z",
+    "lastAttemptAt": "2026-10-19T19:40:46.241Z",
+    "lastError": "Waiting for target Telegram chat registration. Open @Sarraftelegrambot and send /start or enter Chat ID in dashboard Settings."
+  },
+  {
+    "eventId": "ALERT-BOT_RESTARTED-1792438215500",
+    "signalId": "ALERT-BOT_RESTARTED-1792438215500",
+    "type": "ADMIN_ALERT",
+    "payload": {
+      "alertType": "BOT_RESTARTED"
+    },
+    "createdAt": "2026-10-19T19:30:15.500Z",
+    "status": "PENDING_DELIVERY",
+    "messageText": "⚠️ Bot restarted",
+    "lastAttemptAt": "2026-10-19T19:40:46.241Z",
+    "lastError": "Waiting for target Telegram chat registration. Open @Sarraftelegrambot and send /start or enter Chat ID in dashboard Settings."
+  },
+  {
+    "eventId": "ALERT-BOT_RESTARTED-1792438581517",
+    "signalId": "ALERT-BOT_RESTARTED-1792438581517",
+    "type": "ADMIN_ALERT",
+    "payload": {
+      "alertType": "BOT_RESTARTED"
+    },
+    "createdAt": "2026-10-19T19:36:21.517Z",
+    "status": "PENDING_DELIVERY",
+    "messageText": "⚠️ Bot restarted",
+    "lastAttemptAt": "2026-10-19T19:40:46.241Z",
     "lastError": "Waiting for target Telegram chat registration. Open @Sarraftelegrambot and send /start or enter Chat ID in dashboard Settings."
   }
 ]

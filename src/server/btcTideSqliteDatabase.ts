@@ -137,7 +137,8 @@ export function persistSqliteToDisk(): void {
     const buffer = Buffer.from(binaryArray);
     const targetPath = currentSqliteDbPath;
     // Atomic write to avoid partial writes
-    const tempPath = `${targetPath}.tmp_${Date.now()}`;
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    const tempPath = `${targetPath}.tmp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     fs.writeFileSync(tempPath, buffer);
     fs.renameSync(tempPath, targetPath);
   } catch (err: any) {

@@ -3,6 +3,7 @@ import {
   SecondBin,
   AggTrade,
   OrderBookDepth,
+  OrderBookBands,
   OrderBookWall,
   PerpPositioning,
   PerpFieldSources,
@@ -29,6 +30,7 @@ import {
   getLastSignalTimeFromSqlite,
   persistSqliteToDisk,
   recordAndComputeOiHistory,
+  getBtcTideSqlitePath,
 } from './btcTideSqliteDatabase.ts';
 import {
   notifyNewBtcTideSignal,
@@ -192,6 +194,15 @@ let allLiquidationsList: LiquidationItem[] = [];
 const heatmapRingBuffer: HeatmapColumn[] = [];
 let latestHeatmapColumn: HeatmapColumn | null = null;
 let wideBookHeatmapTimer: NodeJS.Timeout | null = null;
+interface BandSample {
+  ts: number;
+  imb005: number;
+  imb010: number;
+  imb025: number;
+}
+const imbalance5sHistory: BandSample[] = [];
+let latestSmoothedImbalance010: number | null = null;
+let latestBookBands: OrderBookBands | null = null;
 
 let activeSourceId: SpotSourceId = 'binance_primary';
 let activeSourceLabel = 'Binance';
@@ -1030,8 +1041,9 @@ function replaceOrderBookFromDepth20Snapshot(
   const bidUsd10 = top10Bids.reduce((s, l) => s + l.usd, 0);
   const askUsd10 = top10Asks.reduce((s, l) => s + l.usd, 0);
   const totalUsd10 = bidUsd10 + askUsd10;
-  const imbalancePct =
+  const fallbackTop10Imb =
     totalUsd10 > 0 ? Number((((bidUsd10 - askUsd10) / totalUsd10) * 100).toFixed(1)) : 0;
+  const imbalancePct = latestSmoothedImbalance010 !== null ? latestSmoothedImbalance010 : fallbackTop10Imb;
 
   // 4. Build Top 8 rows per side with cumulative BTC size and depth bar %
   let bidCum = 0;
@@ -1107,6 +1119,7 @@ function replaceOrderBookFromDepth20Snapshot(
     bidUsd10: Math.round(bidUsd10),
     askUsd10: Math.round(askUsd10),
     imbalancePct,
+    bands: latestBookBands || undefined,
     avgLevelSizeBtc: Number(avgLevelSizeBtc.toFixed(4)),
     walls: walls.slice(0, 6),
     spread,
@@ -1560,7 +1573,7 @@ export function evaluateFailoverHysteresis() {
   for (const s of SPOT_SOURCES) {
     const st = sourceStates.get(s.id)!;
     const silence = st.lastTradeTime ? now - st.lastTradeTime : 999999;
-    if (silence >= 8000 || st.isGeoBlocked) {
+    if (silence >= 3000 || st.isGeoBlocked) {
       st.healthySince = null;
     }
   }
@@ -1570,13 +1583,13 @@ export function evaluateFailoverHysteresis() {
 
   const currentSilenceMs = currentState.lastTradeTime ? now - currentState.lastTradeTime : 999999;
 
-  if (currentSilenceMs >= 8000 || currentState.isGeoBlocked) {
+  if (currentSilenceMs >= 3000 || currentState.isGeoBlocked) {
     const candidate = SPOT_SOURCES.find((s) => {
       if (s.id === activeSourceId) return false;
       const st = sourceStates.get(s.id)!;
       if (st.isGeoBlocked) return false;
       const silence = st.lastTradeTime ? now - st.lastTradeTime : 999999;
-      return silence < 8000;
+      return silence < 3000;
     });
 
     if (candidate) {
@@ -1584,7 +1597,7 @@ export function evaluateFailoverHysteresis() {
         candidate.id,
         currentState.isGeoBlocked
           ? 'Current source is geo-blocked'
-          : `Silence >= 8s (${(currentSilenceMs / 1000).toFixed(1)}s)`
+          : `Silence >= 3s (${(currentSilenceMs / 1000).toFixed(1)}s)`
       );
       return;
     }
@@ -2567,23 +2580,99 @@ export async function pollWideBookAndHeatmap(): Promise<void> {
 
   const bucketMap = new Map<number, { p: number; b: number; a: number }>();
 
+  // Compute USD depth inside +/-0.05%, +/-0.10%, and +/-0.25% of mid
+  let bidUsd005 = 0;
+  let bidUsd010 = 0;
+  let bidUsd025 = 0;
+  let askUsd005 = 0;
+  let askUsd010 = 0;
+  let askUsd025 = 0;
+
+  const min005 = mid * (1 - 0.0005);
+  const max005 = mid * (1 + 0.0005);
+  const min010 = mid * (1 - 0.0010);
+  const max010 = mid * (1 + 0.0010);
+  const min025 = mid * (1 - 0.0025);
+  const max025 = mid * (1 + 0.0025);
+
   for (const [pStr, qStr] of rawBids) {
     const p = parseFloat(pStr);
+    const q = parseFloat(qStr);
+    if (!Number.isFinite(p) || !Number.isFinite(q) || q <= 0) continue;
+    const usd = p * q;
+    if (p >= min005) bidUsd005 += usd;
+    if (p >= min010) bidUsd010 += usd;
+    if (p >= min025) bidUsd025 += usd;
+
     if (p < minP || p > maxP) continue;
     const bucket = Math.floor(p / bSize) * bSize;
     const cur = bucketMap.get(bucket) || { p: bucket, b: 0, a: 0 };
-    cur.b = Number((cur.b + parseFloat(qStr)).toFixed(4));
+    cur.b = Number((cur.b + q).toFixed(4));
     bucketMap.set(bucket, cur);
   }
 
   for (const [pStr, qStr] of rawAsks) {
     const p = parseFloat(pStr);
+    const q = parseFloat(qStr);
+    if (!Number.isFinite(p) || !Number.isFinite(q) || q <= 0) continue;
+    const usd = p * q;
+    if (p <= max005) askUsd005 += usd;
+    if (p <= max010) askUsd010 += usd;
+    if (p <= max025) askUsd025 += usd;
+
     if (p < minP || p > maxP) continue;
     const bucket = Math.floor(p / bSize) * bSize;
     const cur = bucketMap.get(bucket) || { p: bucket, b: 0, a: 0 };
-    cur.a = Number((cur.a + parseFloat(qStr)).toFixed(4));
+    cur.a = Number((cur.a + q).toFixed(4));
     bucketMap.set(bucket, cur);
   }
+
+  const calcBandImb = (bUsd: number, aUsd: number) =>
+    bUsd + aUsd > 0 ? Number((((bUsd - aUsd) / (bUsd + aUsd)) * 100).toFixed(1)) : 0;
+
+  const rawImb005 = calcBandImb(bidUsd005, askUsd005);
+  const rawImb010 = calcBandImb(bidUsd010, askUsd010);
+  const rawImb025 = calcBandImb(bidUsd025, askUsd025);
+
+  imbalance5sHistory.push({ ts: now, imb005: rawImb005, imb010: rawImb010, imb025: rawImb025 });
+  while (imbalance5sHistory.length > 0 && now - imbalance5sHistory[0].ts > 5000) {
+    imbalance5sHistory.shift();
+  }
+
+  const nSamples = Math.max(1, imbalance5sHistory.length);
+  const smoothed005 = Number(
+    (imbalance5sHistory.reduce((s, x) => s + x.imb005, 0) / nSamples).toFixed(1)
+  );
+  const smoothed010 = Number(
+    (imbalance5sHistory.reduce((s, x) => s + x.imb010, 0) / nSamples).toFixed(1)
+  );
+  const smoothed025 = Number(
+    (imbalance5sHistory.reduce((s, x) => s + x.imb025, 0) / nSamples).toFixed(1)
+  );
+
+  latestSmoothedImbalance010 = smoothed010;
+  latestBookBands = {
+    band005: {
+      bidUsd: Math.round(bidUsd005),
+      askUsd: Math.round(askUsd005),
+      rawImbalancePct: rawImb005,
+      smoothedImbalancePct: smoothed005,
+    },
+    band010: {
+      bidUsd: Math.round(bidUsd010),
+      askUsd: Math.round(askUsd010),
+      rawImbalancePct: rawImb010,
+      smoothedImbalancePct: smoothed010,
+    },
+    band025: {
+      bidUsd: Math.round(bidUsd025),
+      askUsd: Math.round(askUsd025),
+      rawImbalancePct: rawImb025,
+      smoothedImbalancePct: smoothed025,
+    },
+  };
+  depth.imbalancePct = smoothed010;
+  depth.bands = latestBookBands;
 
   const buckets: HeatmapBucket[] = Array.from(bucketMap.values()).sort((a, b) => a.p - b.p);
 
@@ -2920,6 +3009,7 @@ export function getBackendHealthReport() {
     reconcile: lastReconcileResult,
     fieldDiagnostics,
     upstreams: upstreamsList,
+    sqliteDbPath: getBtcTideSqlitePath(),
     sqliteStats: stats,
     activeTrade: snap.activeTrade
       ? {
