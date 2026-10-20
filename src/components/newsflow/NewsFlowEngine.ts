@@ -115,7 +115,15 @@ export class NewsFlowEngine {
       : this.ev.find((e) => e.ts + 15 * 60000 > wall) || null;
     const msLeft = next ? next.ts - wall : 0;
     const locked = this.lockedOverride !== null ? this.lockedOverride : !!next && msLeft <= 30 * 60000 && msLeft >= -15 * 60000;
-    const hubC = locked ? AMBER : GOLD;
+    const hubC = locked
+      ? AMBER
+      : next
+      ? next.lean === 'bull'
+        ? GREEN
+        : next.lean === 'bear'
+        ? RED
+        : GOLD
+      : GOLD;
 
     // streams: 3 strands per event, like a ribbon bundle
     this.ev.forEach((e, i) => {
@@ -165,8 +173,17 @@ export class NewsFlowEngine {
     g.fillStyle = rgb(hubC, 0.95); g.beginPath(); g.arc(hx, hy, 5, 0, 6.283); g.fill();
     g.textAlign = 'center'; g.textBaseline = 'middle';
     g.font = '700 9.5px ui-monospace,Menlo,monospace'; g.fillStyle = rgb(hubC, 0.95);
+    const defaultUpcoming = this.ev.find((e) => e.ts + 15 * 60000 > wall) || null;
+    const isCustomSelected = !!this.nextId && (!defaultUpcoming || this.nextId !== defaultUpcoming.id);
     const hasNextTarget = !!this.nextId || !!next;
-    g.fillText(locked ? 'SIGNALS PAUSED' : hasNextTarget ? 'NEXT NEWS' : 'NO NEWS', hx, hy - 30);
+    const hubLabel = locked
+      ? 'SIGNALS PAUSED'
+      : isCustomSelected
+      ? 'SELECTED NEWS'
+      : hasNextTarget
+      ? 'NEXT NEWS'
+      : 'NO NEWS';
+    g.fillText(hubLabel, hx, hy - 30);
     g.font = '700 13px ui-monospace,Menlo,monospace'; g.fillStyle = '#f8fafc';
     const displayedCountdown = this.countdownText || (next ? fmtLeft(msLeft) : '—');
     g.fillText(hasNextTarget ? displayedCountdown : '—', hx, hy + 30);

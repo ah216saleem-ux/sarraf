@@ -18,6 +18,8 @@ import {
 import { useMarketAuth } from '../context/MarketContext';
 import { NewsFlow, NFEvent } from './newsflow/NewsFlow';
 import { DateSelectorStrip, DateDayItem } from './DateSelectorStrip';
+import { DecisionCard } from './news/DecisionCard';
+import { computeUnifiedDecision, LiveMacroInput } from './news/unifiedDecisionEngine';
 
 interface BriefData {
   headline: string;
@@ -228,6 +230,8 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
   const [events, setEvents] = useState<NewsEventItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [macroData, setMacroData] = useState<LiveMacroInput | null>(null);
 
   // Selected date filter: 'UPCOMING' | 'TODAY' | 'ALL' | 'PAST' | 'YYYY-MM-DD'
   const [selectedDateFilter, setSelectedDateFilter] = useState<string>('UPCOMING');
@@ -259,6 +263,9 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
         const json = await res.json();
         setFeedStatus(json.feed);
         setEvents(json.events || []);
+        if (json.macro) {
+          setMacroData(json.macro);
+        }
         if (json.accuracy) {
           setDecisionAccuracy(json.accuracy);
         }
@@ -490,6 +497,21 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
     return feedStatus?.nextEvent || null;
   }, [events, feedStatus?.nextEvent]);
 
+  // Active selected event: either explicit selection from timeline/flow or nextKeyCatalyst
+  const activeSelectedEvent = useMemo<NewsEventItem | null>(() => {
+    if (selectedEventId) {
+      const found = events.find((e) => e.id === selectedEventId);
+      if (found) return found;
+    }
+    return nextKeyCatalyst || events[0] || null;
+  }, [selectedEventId, events, nextKeyCatalyst]);
+
+  // Unified decision for active selected event (single source of truth for dial and card)
+  const activeDecision = useMemo(() => {
+    if (!activeSelectedEvent) return null;
+    return computeUnifiedDecision(activeSelectedEvent, macroData);
+  }, [activeSelectedEvent, macroData]);
+
   // Respect prefers-reduced-motion for NewsFlow Lite mode
   const prefersReducedMotion = useMemo(() => {
     if (typeof window !== 'undefined') {
@@ -604,48 +626,23 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
       );
     }
 
-    const finalEvents = selected.slice(0, 6);
+    let finalEvents = selected.slice(0, 6);
+    if (activeSelectedEvent && !finalEvents.some((e) => e.id === activeSelectedEvent.id)) {
+      finalEvents = [activeSelectedEvent, ...finalEvents.slice(0, 5)];
+    }
 
     return finalEvents.map((e) => {
-      // Single deterministic source from final decision if present, else deterministic preNewsLean
+      // Single unified decision is the single source of truth
+      const dec = computeUnifiedDecision(e, macroData);
       let lean: 'bull' | 'bear' | 'wait' = 'wait';
-      if (e.decision && e.decision.final) {
-        if (e.decision.final === 'BULLISH') lean = 'bull';
-        else if (e.decision.final === 'BEARISH') lean = 'bear';
-        else lean = 'wait';
-      } else {
-        const hasNoForecast =
-          e.forecastNum === null ||
-          !e.forecastStr ||
-          e.forecastStr.trim() === '' ||
-          e.forecastStr === '--' ||
-          e.forecastStr === 'N/A' ||
-          e.forecastStr === 'Tentative';
+      if (dec.verdict === 'BULLISH') lean = 'bull';
+      else if (dec.verdict === 'BEARISH') lean = 'bear';
+      else lean = 'wait';
 
-        if (!hasNoForecast) {
-          const preLean = getPreNewsLean(e);
-          if (preLean.lean === 'BULLISH') lean = 'bull';
-          else if (preLean.lean === 'BEARISH') lean = 'bear';
-          else lean = 'wait';
-        }
-      }
-
-      const lowerTitle = e.title.toLowerCase();
-      const isReversed = lowerTitle.includes('claim') || lowerTitle.includes('unemploy');
-      const isSpeech = e.isSpeech || lowerTitle.includes('speaks') || lowerTitle.includes('speech') || lowerTitle.includes('testifies');
-
-      let footerNote: string;
-      if (lean === 'bull') {
-        footerNote = 'leans bullish if as forecast';
-      } else if (lean === 'bear') {
-        footerNote = 'leans bearish if as forecast';
-      } else if (isSpeech) {
-        footerNote = 'guidance & market tone steer reaction';
-      } else if (isReversed) {
-        footerNote = 'Higher -> BULLISH · Lower -> BEARISH';
-      } else {
-        footerNote = 'Higher -> BEARISH · Lower -> BULLISH';
-      }
+      const footerNote =
+        dec.verdict === 'SKIP'
+          ? 'Low impact · SKIP'
+          : `${dec.verdict} (${dec.confidence}%) · ${dec.stage}`;
 
       return {
         id: e.id,
@@ -656,7 +653,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
         footerNote,
       };
     });
-  }, [events]);
+  }, [events, macroData, activeSelectedEvent]);
 
   // Handle selection from NewsFlow canvas: scroll smoothly and expand
   const handleNewsFlowSelect = useCallback((id: string) => {
@@ -790,6 +787,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
   }, [timelineGroups, selectedDateFilter, todayKey]);
 
   const toggleEventExpand = (evt: NewsEventItem) => {
+    setSelectedEventId(evt.id);
     if (expandedEventId === evt.id) {
       setExpandedEventId(null);
     } else {
@@ -801,6 +799,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
   };
 
   const handleSelectWeekCard = (evt: NewsEventItem) => {
+    setSelectedEventId(evt.id);
     setExpandedEventId(evt.id);
     if (!briefs[evt.id]) {
       fetchBriefForEvent(evt.id);
@@ -844,52 +843,35 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
     );
   };
 
-  // Section 2: SINGLE DETERMINISTIC SOURCE FOR THE LEAN CHIP
-  // Identical in all 3 places: Week Ahead strip, Next Key Catalyst card, and Timeline rows
-  const renderLeanOrResultChip = (evt: NewsEventItem) => {
-    const isUnverifiedOrPending =
-      !evt.actualStr ||
-      evt.actualStr.trim().toUpperCase() === 'PENDING' ||
-      evt.actualSource === 'UNVERIFIED';
+  // Section 2: Unified Decision Tag (Single Source of Truth)
+  // Each row tag shows the same verdict, e.g. "BEARISH 66%" or "BULLISH 65%" or "WAIT 50%" or "SKIP"
+  const renderUnifiedDecisionTag = (evt: NewsEventItem) => {
+    const dec = computeUnifiedDecision(evt, macroData);
+    const tagText = dec.verdict === 'SKIP' ? 'SKIP' : `${dec.verdict} ${dec.confidence}%`;
 
-    // 1. Post-release with verified actual value: show real result chip
-    if (evt.isReleased && !isUnverifiedOrPending && evt.scenarios?.surpriseChip) {
-      const { sentiment, size, diffPct } = evt.scenarios.surpriseChip;
-      const isBull = sentiment === 'BULLISH';
-      const isBear = sentiment === 'BEARISH';
-      const badgeStyle = isBull
-        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
-        : isBear
-        ? 'bg-rose-500/20 text-rose-300 border-rose-500/50'
-        : 'bg-neutral-800 text-neutral-300 border-neutral-600';
+    const badgeStyle =
+      dec.verdict === 'BULLISH'
+        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+        : dec.verdict === 'BEARISH'
+        ? 'bg-rose-500/15 border-rose-500/40 text-rose-300'
+        : dec.verdict === 'WAIT'
+        ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+        : 'bg-white/5 border-white/10 text-neutral-400';
 
-      return (
-        <span
-          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border ${badgeStyle} shrink-0 whitespace-nowrap`}
-          title={`Actual release surprise: ${sentiment} (${size} · Δ${diffPct}%)`}
-        >
-          {isBull ? <TrendingUp className="w-3 h-3 shrink-0" /> : isBear ? <TrendingDown className="w-3 h-3 shrink-0" /> : null}
-          <span>
-            {sentiment} {size ? `(${size})` : ''}
-          </span>
-        </span>
-      );
-    }
+    return (
+      <span
+        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${badgeStyle} shrink-0 whitespace-nowrap`}
+        title={`Unified Decision: ${dec.verdict} (${dec.confidence}% confidence) · Stage: ${dec.stage}`}
+      >
+        {dec.verdict === 'BULLISH' && <TrendingUp className="w-2.5 h-2.5 shrink-0" />}
+        {dec.verdict === 'BEARISH' && <TrendingDown className="w-2.5 h-2.5 shrink-0" />}
+        <span>{tagText}</span>
+      </span>
+    );
+  };
 
-    // 2. Post-release awaiting verified actual -> show PENDING (never guess or revert to pre-news lean)
-    if (evt.isReleased && isUnverifiedOrPending) {
-      return (
-        <span
-          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border bg-amber-500/10 border-amber-500/30 text-amber-300 shrink-0 whitespace-nowrap"
-          title="Release time reached. Official actual value is not yet verified — showing PENDING."
-        >
-          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping shrink-0" />
-          <span>PENDING</span>
-        </span>
-      );
-    }
-
-    // 3. Before release: check if forecast is missing
+  const _oldUnusedChip = (evt: NewsEventItem) => {
+    const isUnverifiedOrPending = false;
     const hasNoForecast =
       evt.forecastNum === null ||
       !evt.forecastStr ||
@@ -1356,10 +1338,23 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
         events={newsFlowEvents}
         lite={prefersReducedMotion}
         locked={feedStatus?.isLockActive !== undefined ? feedStatus.isLockActive : null}
-        nextId={nextKeyCatalyst?.id}
-        countdownText={nextKeyCatalyst ? formatCountdown(nextKeyCatalyst.minutesUntil) : undefined}
+        nextId={activeSelectedEvent?.id || nextKeyCatalyst?.id}
+        countdownText={activeSelectedEvent ? formatCountdown(activeSelectedEvent.minutesUntil) : undefined}
         onSelect={handleNewsFlowSelect}
       />
+
+      {/* ONE COMPACT DECISION CARD (Single Source of Truth) */}
+      {activeDecision && (
+        <DecisionCard
+          decision={activeDecision}
+          isNextEvent={!selectedEventId || selectedEventId === nextKeyCatalyst?.id}
+          onSelectNextNews={() => {
+            setSelectedEventId(nextKeyCatalyst?.id || null);
+            setExpandedEventId(nextKeyCatalyst?.id || null);
+          }}
+          countdownText={activeSelectedEvent ? formatCountdown(activeSelectedEvent.minutesUntil) : undefined}
+        />
+      )}
 
       {/* Section 1: WEEK AHEAD STRIP (Horizontal scroll strip of all tier 1 and tier 2 events in next 7 days) */}
       {weekAheadEvents.length > 0 && (
@@ -1399,7 +1394,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
                   </div>
 
                   <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between gap-1">
-                    {renderLeanOrResultChip(wEvt)}
+                    {renderUnifiedDecisionTag(wEvt)}
                     <span className="text-[10px] font-bold text-[#FFD97A] shrink-0 font-mono">
                       {formatCountdown(wEvt.minutesUntil)}
                     </span>
@@ -1427,8 +1422,8 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
-              {/* Exact identical lean chip on Next Key Catalyst Card */}
-              {renderLeanOrResultChip(nextKeyCatalyst)}
+              {/* Exact identical unified decision tag */}
+              {renderUnifiedDecisionTag(nextKeyCatalyst)}
               <div className="flex items-center gap-1 text-[#FFD97A]">
                 <Clock className="w-3.5 h-3.5" />
                 <span className="text-base sm:text-lg font-bold font-mono">
@@ -1482,62 +1477,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
             </div>
           </div>
 
-          {/* PRE-NEWS DECISION LOCK BOX */}
-          {nextKeyCatalyst.decision && (
-            <div className="p-3 rounded-xl bg-black/60 border border-[#E8B84A]/30 space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-[#FFD97A] flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-[#E8B84A] animate-pulse" />
-                  PRE-NEWS DECISION: {nextKeyCatalyst.decision.final} · {nextKeyCatalyst.decision.label}
-                </span>
-                <span
-                  className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                    nextKeyCatalyst.decision.isLocked
-                      ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
-                      : 'bg-neutral-800 border-neutral-700 text-neutral-400'
-                  }`}
-                >
-                  {nextKeyCatalyst.decision.isLocked
-                    ? `LOCKED (${formatEventTimes(nextKeyCatalyst.decision.lockedAt)})`
-                    : 'PREVIEW (Locks at T-60m)'}
-                </span>
-              </div>
 
-              <div className="text-[11px] text-neutral-300 flex flex-wrap items-center justify-between gap-1 pt-1 border-t border-white/5">
-                <span>
-                  System: <strong className="text-white">{nextKeyCatalyst.decision.systemVote}</strong> · AHMED AI:{' '}
-                  <strong className="text-white">
-                    {nextKeyCatalyst.decision.aiVote}
-                    {nextKeyCatalyst.decision.aiVote !== 'UNAVAILABLE'
-                      ? ` (${nextKeyCatalyst.decision.aiConfidence}%)`
-                      : ''}
-                  </strong>
-                </span>
-                {nextKeyCatalyst.decision.resultStatus && nextKeyCatalyst.decision.resultStatus !== 'PENDING' && (
-                  <span
-                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                      nextKeyCatalyst.decision.resultStatus === 'HIT'
-                        ? 'bg-emerald-500/20 text-emerald-300'
-                        : nextKeyCatalyst.decision.resultStatus === 'MISS'
-                        ? 'bg-rose-500/20 text-rose-300'
-                        : 'bg-neutral-800 text-neutral-400'
-                    }`}
-                  >
-                    RESULT: {nextKeyCatalyst.decision.resultStatus}
-                    {nextKeyCatalyst.decision.goldMove15m !== undefined
-                      ? ` (${nextKeyCatalyst.decision.goldMove15m > 0 ? '+' : ''}${nextKeyCatalyst.decision.goldMove15m} 15m)`
-                      : ''}
-                  </span>
-                )}
-              </div>
-
-              {nextKeyCatalyst.decision.aiReason && (
-                <p className="text-[10px] text-neutral-400 italic">
-                  "{nextKeyCatalyst.decision.aiReason}"
-                </p>
-              )}
-            </div>
-          )}
 
           {/* Short Playbook with Scenarios and AHMED AI Brief */}
           {renderBriefPlaybookCard(nextKeyCatalyst)}
@@ -1658,7 +1598,11 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
                     <div
                       key={evt.id}
                       id={`news-event-${evt.id}`}
-                      className="rounded-xl border border-white/10 bg-black/40 hover:bg-black/60 transition-colors overflow-hidden"
+                      className={`rounded-xl border transition-all overflow-hidden ${
+                        (selectedEventId === evt.id || (!selectedEventId && activeSelectedEvent?.id === evt.id))
+                          ? 'border-[#E8B84A]/60 bg-[#E8B84A]/10 shadow-[0_0_16px_rgba(232,184,74,0.15)]'
+                          : 'border-white/10 bg-black/40 hover:bg-black/60'
+                      }`}
                     >
                       {/* Clickable Header Row: 2-LINE MOBILE-OPTIMIZED LAYOUT (360-430px) */}
                       <div
@@ -1707,7 +1651,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
                           </span>
 
                           <div className="shrink-0">
-                            {renderLeanOrResultChip(evt)}
+                            {renderUnifiedDecisionTag(evt)}
                           </div>
                         </div>
                       </div>
@@ -1790,7 +1734,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
                                   Tone-dependent, low reliability
                                 </span>
                                 <div className="shrink-0">
-                                  {renderLeanOrResultChip(sp)}
+                                  {renderUnifiedDecisionTag(sp)}
                                 </div>
                               </div>
                             </div>

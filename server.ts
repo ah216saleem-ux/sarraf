@@ -113,7 +113,14 @@ import {
   lookupActualValueWithGemini,
   evaluateNewsDecisions,
   getNewsDecisionAccuracy,
+  newsDecision,
+  getCalibrationTable30d,
 } from './src/server/newsEngine.ts';
+import {
+  fetchLiveMacroData,
+  getCachedMacroData,
+  startMacroFeedLoop,
+} from './src/server/macroFeedEngine.ts';
 import {
   getOrGenerateAhmedAiBrief,
   buildRuleBasedBrief,
@@ -2251,7 +2258,22 @@ app.get('/api/google-chat/tests', requireAdminAuth, (_req, res) => {
 // -------------------------------------------------------------
 
 // GET /api/news - Live Forex Factory calendar, feed status, countdowns, pregeneration trigger, and decision lock
-app.get('/api/news', (_req, res) => {
+app.get('/api/news', async (_req, res) => {
+  // Refresh live macro feeds first (US10Y, Dollar Proxy EUR/JPY/GBP, Kalshi/Polymarket, Gold BiQuote)
+  let macro = getCachedMacroData();
+  if (!macro.dollarProxy || !macro.us10y || macro.dollarProxy.isStale || macro.us10y.isStale) {
+    try {
+      macro = await Promise.race([
+        fetchLiveMacroData(true),
+        new Promise<any>((r) => setTimeout(() => r(getCachedMacroData()), 1800)),
+      ]);
+    } catch {
+      macro = getCachedMacroData();
+    }
+  } else {
+    fetchLiveMacroData().catch(() => {});
+  }
+
   const status = getNewsFeedStatus();
   const events = getNewsEventsForUI();
   const ahmedAiStatus = getAhmedAiServerStatus();
@@ -2269,9 +2291,26 @@ app.get('/api/news', (_req, res) => {
     status: 'SUCCESS',
     feed: status,
     events,
+    macro,
     ahmedAiStatus,
     ahmedAiOnline: ahmedAiStatus === 'ON',
     accuracy,
+    calibrationTable: accuracy.calibrationTable,
+  });
+});
+
+// GET /api/news/decision/:id - Direct server-side newsDecision(event) endpoint
+app.get('/api/news/decision/:id', (req, res) => {
+  const events = getNewsEventsForUI();
+  const evt = events.find((e) => e.id === req.params.id) || events[0];
+  if (!evt) {
+    return res.status(404).json({ status: 'ERROR', message: 'Event not found' });
+  }
+  const decision = evt.newsDecision || newsDecision(evt);
+  return res.json({
+    status: 'SUCCESS',
+    decision,
+    calibrationTable: getCalibrationTable30d(),
   });
 });
 
@@ -2912,6 +2951,15 @@ async function startServer() {
 
   // 10c. Initialize 24/7 BTC Tide Node.js Backend & SQLite Database
   await initBtcTideBackend();
+
+  // 10d. Start continuous live macro feed loop (20s FX/Yields + Kalshi/Polymarket discovery) & 30s newsDecision lifecycle worker
+  startMacroFeedLoop();
+  setInterval(() => {
+    try {
+      const uiEvents = getNewsEventsForUI();
+      evaluateNewsDecisions(uiEvents).catch(() => {});
+    } catch {}
+  }, 30_000);
 
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');

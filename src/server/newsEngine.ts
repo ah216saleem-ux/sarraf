@@ -28,8 +28,18 @@ import {
   StructuredEventPayload,
   isNoConsensusEvent,
 } from './ahmedAiNews.ts';
+import {
+  newsDecision,
+  NewsDecisionObject,
+  loadStoredDecisionRecords,
+  saveStoredDecisionRecords,
+  getCalibrationTable30d,
+  CalibrationBucketRow,
+} from './newsDecision.ts';
+import { getCachedMacroData } from './macroFeedEngine.ts';
+import { sendTelegramHttpRequest } from './telegramWorker.ts';
 
-export { isNoConsensusEvent };
+export { isNoConsensusEvent, newsDecision, getCalibrationTable30d };
 
 export type NewsImpact = 'High' | 'Medium' | 'Low' | 'Holiday';
 export type NewsTier = 'TIER_1' | 'TIER_2' | 'NONE';
@@ -81,6 +91,12 @@ export interface NewsEvent {
   isReleased: boolean;
   isInsideLockWindow: boolean;
   lockType?: 'PRE_RELEASE' | 'POST_RELEASE' | 'VOLATILITY_SETTLE' | null;
+  history?: {
+    label: string;
+    sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    sampleSize: number;
+  } | null;
+  newsDecision?: NewsDecisionObject | null;
 }
 
 export interface NewsFeedStatus {
@@ -554,45 +570,35 @@ export function evaluateTieredLock(
   }
 
   const mins = event.minutesUntil;
+  const isCatalystTier =
+    event.tier === 'TIER_1' ||
+    event.tier === 'TIER_2' ||
+    event.ahmedTier === 1 ||
+    event.ahmedTier === 2;
 
-  if (event.tier === 'TIER_1') {
-    const preMins = settings.tier1PreMinutes ?? 45;
-    const postMins = settings.tier1PostMinutes ?? 30;
+  // Timeline Rule: pause signals -30m to +15m around high/medium catalyst releases
+  if (isCatalystTier) {
+    const preMins = event.tier === 'TIER_1' ? Math.max(30, settings.tier1PreMinutes ?? 30) : 30;
+    const postMins = event.tier === 'TIER_1' ? Math.max(15, settings.tier1PostMinutes ?? 15) : 15;
 
-    // 1. Pre-release lock window
     if (mins >= 0 && mins <= preMins) {
       return { isLocked: true, lockType: 'PRE_RELEASE' };
     }
-
-    // 2. Post-release window
     if (mins < 0 && mins >= -postMins) {
       return { isLocked: true, lockType: 'POST_RELEASE' };
     }
 
-    // 3. Volatility Settle check (between postMins and postMins + 60)
-    if (mins < -postMins && mins >= -(postMins + 60)) {
+    if (event.tier === 'TIER_1' && mins < -postMins && mins >= -(postMins + 60)) {
       const m15Candles = getClosedCandles('M15');
       if (m15Candles.length >= 20) {
-        // Compute last 20-bar average range and recent bar range
         const last20 = m15Candles.slice(-20);
         const avgRange = last20.reduce((acc, c) => acc + (c.high - c.low), 0) / 20;
         const currentBar = m15Candles[m15Candles.length - 1];
         const currentRange = currentBar.high - currentBar.low;
-
         if (currentRange > 1.5 * avgRange) {
           return { isLocked: true, lockType: 'VOLATILITY_SETTLE' };
         }
       }
-    }
-  } else if (event.tier === 'TIER_2') {
-    const preMins = settings.tier2PreMinutes ?? 30;
-    const postMins = settings.tier2PostMinutes ?? 15;
-
-    if (mins >= 0 && mins <= preMins) {
-      return { isLocked: true, lockType: 'PRE_RELEASE' };
-    }
-    if (mins < 0 && mins >= -postMins) {
-      return { isLocked: true, lockType: 'POST_RELEASE' };
     }
   }
 
@@ -750,11 +756,53 @@ export function getNewsEventsForUI(): NewsEvent[] {
     const isSpeech = evt.isSpeech ?? isSpeechEvent(evt.title);
     const scenarios = buildGoldDirectionScenarios(evt.title, evt.forecastNum, evt.previousNum, actualNum, isReleased);
     const preNewsLean = computePreNewsLean(evt.title, evt.forecastNum, evt.previousNum, isSpeech);
-    const playbook = getEventPlaybook(evt.title, isSpeech);
     const decisionsStore = loadNewsDecisions();
     const decision = decisionsStore[evt.id] || null;
 
-    return {
+    // Calculate authentic historical performance for same-type releases
+    const archive = load30DayArchive();
+    const cleanTitle = evt.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const sameTypePastEvents = archive.filter((past) => {
+      if (!past.isReleased || past.actualNum === null || past.forecastNum === null) return false;
+      const pastClean = past.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return pastClean.includes(cleanTitle.slice(0, 10)) || cleanTitle.includes(pastClean.slice(0, 10));
+    });
+
+    let history: NewsEvent['history'] = null;
+    if (sameTypePastEvents.length > 0) {
+      let bullCount = 0;
+      let bearCount = 0;
+      const isReversed =
+        evt.title.toLowerCase().includes('unemployment') ||
+        evt.title.toLowerCase().includes('jobless claims');
+      for (const p of sameTypePastEvents) {
+        const diff = p.actualNum! - p.forecastNum!;
+        if (Math.abs(diff) > 0.0001) {
+          if (isReversed) {
+            if (diff > 0) bullCount++;
+            else bearCount++;
+          } else {
+            if (diff < 0) bullCount++;
+            else bearCount++;
+          }
+        }
+      }
+      const total = bullCount + bearCount;
+      if (total > 0) {
+        const sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL' =
+          bullCount > bearCount ? 'BULLISH' : bearCount > bullCount ? 'BEARISH' : 'NEUTRAL';
+        const favored = sentiment === 'BULLISH' ? bullCount : sentiment === 'BEARISH' ? bearCount : bullCount;
+        const pct = Math.round((favored / total) * 100);
+        history = {
+          label: `History: ${pct}% ${sentiment === 'BULLISH' ? 'Bull' : sentiment === 'BEARISH' ? 'Bear' : 'Mixed'} (${total}p)`,
+          sentiment,
+          sampleSize: total,
+        };
+      }
+    }
+
+    const playbook = getEventPlaybook(evt.title, isSpeech);
+    const enrichedEventBase = {
       ...evt,
       ahmedTier,
       isSpeech,
@@ -762,6 +810,7 @@ export function getNewsEventsForUI(): NewsEvent[] {
       preNewsLean,
       playbook,
       decision,
+      history,
       minutesUntil,
       isReleased,
       isInsideLockWindow: lockEval.isLocked,
@@ -771,6 +820,16 @@ export function getNewsEventsForUI(): NewsEvent[] {
       actualSource,
       goldImpact,
       goldImpactExplanation,
+    };
+
+    const nd = newsDecision(enrichedEventBase, {
+      macro: getCachedMacroData(),
+      archive,
+    });
+
+    return {
+      ...enrichedEventBase,
+      newsDecision: nd,
     };
   });
 }
@@ -994,7 +1053,7 @@ export function decideLean(
 
 let isEvaluatingDecisions = false;
 
-// Evaluate decisions for all events, locking at T-60m and evaluating HIT/MISS post-release
+// Evaluate decisions for all events, locking at T-60m, confirming at +5m, and evaluating HIT/MISS at +15m
 export async function evaluateNewsDecisions(events: NewsEvent[]): Promise<Record<string, LockedDecision>> {
   if (isEvaluatingDecisions) {
     return loadNewsDecisions();
@@ -1007,7 +1066,7 @@ export async function evaluateNewsDecisions(events: NewsEvent[]): Promise<Record
     let modified = false;
 
     const archive = load30DayArchive();
-    const m15Candles = getClosedCandles('M15', true);
+    const macro = getCachedMacroData();
 
     for (const evt of events) {
       const isUsd = evt.country === 'USD';
@@ -1017,165 +1076,191 @@ export async function evaluateNewsDecisions(events: NewsEvent[]): Promise<Record
 
       const eventTimeMs = new Date(evt.timeUtc).getTime();
       const minutesUntil = Math.round((eventTimeMs - now) / 60000);
-      const hasForecast = evt.forecastNum !== null && evt.forecastStr && evt.forecastStr !== '--' && evt.forecastStr !== 'N/A';
 
-      // 1. If already locked, check if released and actual arrived to calculate HIT/MISS
-      if (store[evt.id] && store[evt.id].isLocked) {
-        const current = store[evt.id];
-        if (
-          evt.isReleased &&
-          evt.actualNum !== null &&
-          evt.forecastNum !== null &&
-          (!current.resultStatus || current.resultStatus === 'PENDING')
-        ) {
-          // Measure real price move 15 min after release from candles
-          let goldMove15m: number | undefined = undefined;
-          if (m15Candles.length > 0) {
-            const preCandle = m15Candles.find((c) => {
-              const cTime = new Date(c.openTime).getTime();
-              return cTime >= eventTimeMs - 15 * 60000 && cTime <= eventTimeMs;
-            });
-            const postCandle = m15Candles.find((c) => {
-              const cTime = new Date(c.openTime).getTime();
-              return cTime >= eventTimeMs + 10 * 60000 && cTime <= eventTimeMs + 25 * 60000;
-            });
-            if (preCandle && postCandle) {
-              goldMove15m = Number((postCandle.close - preCandle.open).toFixed(2));
-            }
-          }
-
-          const reversed = isReversedGoldEvent(evt.title);
-          const diff = evt.actualNum - evt.forecastNum;
-          const actualBetterForGold = reversed ? diff > 0 : diff < 0; // cooler inflation / higher unemployment = better for gold (BULLISH)
-          const actualDirection: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = Math.abs(diff) <= Math.abs(evt.forecastNum) * 0.0001
-            ? 'NEUTRAL'
-            : actualBetterForGold ? 'BULLISH' : 'BEARISH';
-
-          if (goldMove15m !== undefined && Math.abs(goldMove15m) < 1.0) {
-            current.resultStatus = 'NEUTRAL';
-            current.goldMove15m = goldMove15m;
-            modified = true;
-          } else if (goldMove15m !== undefined) {
-            const goldMovedUp = goldMove15m > 0;
-            const goldRealDirection = goldMovedUp ? 'BULLISH' : 'BEARISH';
-            const isHit = current.final === goldRealDirection && actualDirection === goldRealDirection;
-            current.resultStatus = isHit ? 'HIT' : 'MISS';
-            current.goldMove15m = goldMove15m;
-            modified = true;
-          } else if (current.final !== 'WAIT' && current.final !== 'WAITING') {
-            // If candle not yet archived, check actual direction alone tentatively or wait
-            if (actualDirection === current.final) {
-              current.resultStatus = 'HIT';
-            } else if (actualDirection !== 'NEUTRAL') {
-              current.resultStatus = 'MISS';
-            } else {
-              current.resultStatus = 'NEUTRAL';
-            }
-            modified = true;
-          }
-        }
-        continue;
-      }
-
-      // 2. Event is not locked yet. Determine if it has already been released
-      if (evt.isReleased) {
-        // If event was released while server was down, do not store backdated decision
-        continue;
-      }
-
-      if (!hasForecast) {
-        continue;
-      }
-
-      // Determine System Vote
-      const preLean = computePreNewsLean(evt.title, evt.forecastNum, evt.previousNum, evt.isSpeech ?? false);
-      const systemVote: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = preLean.lean === 'BULLISH'
-        ? 'BULLISH'
-        : preLean.lean === 'BEARISH'
-        ? 'BEARISH'
-        : 'NEUTRAL';
-
-      // Check if within next 24h for AI call budget (max 1 AI call per event)
+      // 1. Obtain or reuse AHMED AI vote if within 24h pre-news
       const isWithin24h = minutesUntil >= 0 && minutesUntil <= 1440;
-      let aiVote: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'UNAVAILABLE' = 'UNAVAILABLE';
-      let aiConfidence = 0;
-      let aiReason = '';
+      let aiVote: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'UNAVAILABLE' =
+        store[evt.id]?.aiVote || 'UNAVAILABLE';
+      let aiConfidence = store[evt.id]?.aiConfidence || 0;
+      let aiReason = store[evt.id]?.aiReason || '';
 
-      // Check if we already have a generated decision or AI vote for this event!
-      if (store[evt.id] && store[evt.id].aiVote && store[evt.id].aiVote !== 'UNAVAILABLE') {
-        aiVote = store[evt.id].aiVote;
-        aiConfidence = store[evt.id].aiConfidence;
-        aiReason = store[evt.id].aiReason || '';
-      } else {
-        // If T <= 60 minutes or preview requested within 24h:
-        const shouldQueryAi = isWithin24h && (process.env.AI_API_KEY || (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'));
+      const preLean = computePreNewsLean(evt.title, evt.forecastNum, evt.previousNum, evt.isSpeech ?? false);
+      const systemVote: 'BULLISH' | 'BEARISH' | 'NEUTRAL' =
+        preLean.lean === 'BULLISH'
+          ? 'BULLISH'
+          : preLean.lean === 'BEARISH'
+          ? 'BEARISH'
+          : 'NEUTRAL';
 
-        if (shouldQueryAi) {
-          // Find last 6 released events of same type from stored archive
-          const sameTypeHistory = archive
-            .filter((e) => e.title.toLowerCase().includes(evt.title.toLowerCase().slice(0, 8)) && e.isReleased && e.actualStr)
-            .slice(0, 6)
-            .map((e) => ({
-              title: e.title,
-              actual: e.actualStr || '--',
-              forecast: e.forecastStr || '--',
-              diff: e.actualNum !== null && e.forecastNum !== null ? (e.actualNum - e.forecastNum).toFixed(2) : '--',
-            }));
+      if (
+        aiVote === 'UNAVAILABLE' &&
+        isWithin24h &&
+        (process.env.AI_API_KEY ||
+          (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY'))
+      ) {
+        const sameTypeHistory = archive
+          .filter((e) => e.title.toLowerCase().includes(evt.title.toLowerCase().slice(0, 8)) && e.isReleased && e.actualStr)
+          .slice(0, 6)
+          .map((e) => ({
+            title: e.title,
+            actual: e.actualStr || '--',
+            forecast: e.forecastStr || '--',
+            diff: e.actualNum !== null && e.forecastNum !== null ? (e.actualNum - e.forecastNum).toFixed(2) : '--',
+          }));
 
-          const otherHighEvents24h = events
-            .filter((e) => e.id !== evt.id && e.ahmedTier === 1 && e.minutesUntil >= 0 && e.minutesUntil <= 1440)
-            .map((e) => e.title);
+        const otherHighEvents24h = events
+          .filter((e) => e.id !== evt.id && e.ahmedTier === 1 && e.minutesUntil >= 0 && e.minutesUntil <= 1440)
+          .map((e) => e.title);
 
-          try {
-            const aiRes = await getAhmedAiVoteForEvent({
-              eventName: evt.title,
-              tier: evt.ahmedTier || 2,
-              forecast: evt.forecastStr,
-              previous: evt.previousStr,
-              recentHistory: sameTypeHistory,
-              systemVote,
-              otherHighEvents24h,
-            });
-
-            aiVote = aiRes.vote;
-            aiConfidence = aiRes.confidence;
-            aiReason = aiRes.reason;
-          } catch {
-            aiVote = 'UNAVAILABLE';
-          }
+        try {
+          const aiRes = await getAhmedAiVoteForEvent({
+            eventName: evt.title,
+            tier: evt.ahmedTier || 2,
+            forecast: evt.forecastStr,
+            previous: evt.previousStr,
+            recentHistory: sameTypeHistory,
+            systemVote,
+            otherHighEvents24h,
+          });
+          aiVote = aiRes.vote;
+          aiConfidence = aiRes.confidence;
+          aiReason = aiRes.reason;
+        } catch {
+          aiVote = 'UNAVAILABLE';
         }
       }
 
-      const combined = decideLean(systemVote, aiVote);
+      // 2. Evaluate unified server-side newsDecision(event)
+      const nd = newsDecision(
+        {
+          ...evt,
+          minutesUntil,
+          isReleased: now >= eventTimeMs,
+          decision: {
+            ...(store[evt.id] || {}),
+            systemVote,
+            aiVote,
+            aiConfidence,
+            aiReason,
+          },
+        },
+        { macro, archive }
+      );
 
-      // T-60m or closer -> LOCK permanently
-      const isLockTriggered = minutesUntil <= 60 && !evt.isReleased;
+      // 3. Dispatch ONE Telegram message at T-60m lock and ONE at +5m confirm
+      const v2Records = loadStoredDecisionRecords();
+      const v2Rec = v2Records[evt.id];
 
-      const decisionRecord: LockedDecision = {
+      if (
+        v2Rec &&
+        minutesUntil > 0 &&
+        minutesUntil <= 60 &&
+        nd.lockedAt &&
+        nd.word !== 'SKIP' &&
+        !v2Rec.telegramLockSentAt
+      ) {
+        v2Rec.telegramLockSentAt = new Date().toISOString();
+        saveStoredDecisionRecords(v2Records);
+
+        const inputsLine = nd.inputs
+          .map((i) => `${i.label} (${i.normalizedWeight}%)`)
+          .join(' | ');
+        const confDisp = `${nd.confidence}%${nd.confidenceStatus === 'calibrating' ? ' (calibrating)' : ''} confidence`;
+        const lockMsg = [
+          `🔒 <b>NEWS DECISION LOCKED (T-60m)</b>`,
+          `━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          `📌 <b>Event:</b> ${evt.title} (${evt.displayTime || evt.timeUtc})`,
+          `🎯 <b>Verdict:</b> <b>${nd.word}</b> · <b>${confDisp}</b> (score ${nd.score >= 0 ? '+' : ''}${nd.score})`,
+          `💬 <b>Reason:</b> ${nd.reason}`,
+          inputsLine ? `🧩 <b>Inputs:</b> ${inputsLine}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        sendTelegramHttpRequest(
+          lockMsg,
+          undefined,
+          undefined,
+          undefined,
+          'HTML',
+          `news_lock_${evt.id}`
+        ).catch(() => {});
+      }
+
+      if (
+        v2Rec &&
+        now >= eventTimeMs &&
+        minutesUntil <= -5 &&
+        (nd.phase === 'confirmed' || nd.phase === 'mixed') &&
+        nd.word !== 'SKIP' &&
+        !v2Rec.telegramConfirmSentAt &&
+        evt.actualStr &&
+        evt.actualStr !== 'PENDING'
+      ) {
+        v2Rec.telegramConfirmSentAt = new Date().toISOString();
+        saveStoredDecisionRecords(v2Records);
+
+        const inputsLine = nd.inputs
+          .map((i) => `${i.label} (${i.normalizedWeight}%)`)
+          .join(' | ');
+        const confDisp = `${nd.confidence}%${nd.confidenceStatus === 'calibrating' ? ' (calibrating)' : ''} confidence`;
+        const confirmMsg = [
+          `✅ <b>NEWS DECISION ${nd.phase.toUpperCase()} (+5m WINDOW)</b>`,
+          `━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          `📌 <b>Event:</b> ${evt.title} (Actual: <b>${evt.actualStr}</b> vs Forecast: ${evt.forecastStr || '--'})`,
+          `🎯 <b>Verdict:</b> <b>${nd.word}</b> · <b>${confDisp}</b> (score ${nd.score >= 0 ? '+' : ''}${nd.score})`,
+          `💬 <b>Reason:</b> ${nd.reason}`,
+          inputsLine ? `🧩 <b>5m Breakdown:</b> ${inputsLine}` : '',
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        sendTelegramHttpRequest(
+          confirmMsg,
+          undefined,
+          undefined,
+          undefined,
+          'HTML',
+          `news_confirm_${evt.id}`
+        ).catch(() => {});
+      }
+
+      // 4. Sync legacy LockedDecision store with newsDecision output
+      const mappedFinal: 'BULLISH' | 'BEARISH' | 'WAIT' | 'WAITING' =
+        nd.word === 'BULLISH' ? 'BULLISH' : nd.word === 'BEARISH' ? 'BEARISH' : 'WAIT';
+      const mappedStatus: 'HIT' | 'MISS' | 'NEUTRAL' | 'PENDING' =
+        nd.resultStatus === 'HIT'
+          ? 'HIT'
+          : nd.resultStatus === 'MISS'
+          ? 'MISS'
+          : nd.resultStatus === 'WAIT'
+          ? 'NEUTRAL'
+          : 'PENDING';
+
+      const prevRecord = store[evt.id];
+      const nextRecord: LockedDecision = {
         eventId: evt.id,
         systemVote,
         aiVote,
         aiConfidence,
         aiReason,
-        final: combined.final,
-        label: combined.label,
-        lockedAt: new Date().toISOString(),
-        isLocked: isLockTriggered,
-        resultStatus: 'PENDING',
+        final: mappedFinal,
+        label: nd.phase === 'confirmed' ? 'CONFIRMED' : nd.phase === 'mixed' ? 'CONFLICT' : 'RULES ONLY',
+        lockedAt: nd.lockedAt || prevRecord?.lockedAt || new Date().toISOString(),
+        isLocked: Boolean(nd.lockedAt || minutesUntil <= 60),
+        resultStatus: mappedStatus,
+        goldMove15m: nd.goldMove15m ?? prevRecord?.goldMove15m,
       };
 
-      if (isLockTriggered) {
-        store[evt.id] = decisionRecord;
+      if (
+        !prevRecord ||
+        prevRecord.final !== nextRecord.final ||
+        prevRecord.isLocked !== nextRecord.isLocked ||
+        prevRecord.resultStatus !== nextRecord.resultStatus ||
+        prevRecord.aiVote !== nextRecord.aiVote
+      ) {
+        store[evt.id] = nextRecord;
         modified = true;
-      } else {
-        // Live preview (not yet locked) - save so subsequent requests reuse it without re-querying AI
-        if (!store[evt.id] || store[evt.id].aiVote !== aiVote || store[evt.id].final !== combined.final) {
-          store[evt.id] = {
-            ...decisionRecord,
-            isLocked: false,
-          };
-          modified = true;
-        }
       }
     }
 
@@ -1189,16 +1274,37 @@ export async function evaluateNewsDecisions(events: NewsEvent[]): Promise<Record
   }
 }
 
-// Calculate 30-day accuracy statistics from locked calls
-export function getNewsDecisionAccuracy(): { hits: number; total: number; accuracyPct: number; display: string } {
+// Calculate 30-day accuracy statistics and calibration table from locked calls (WAIT is not a miss)
+export function getNewsDecisionAccuracy(): {
+  hits: number;
+  total: number;
+  accuracyPct: number;
+  display: string;
+  calibrationTable: CalibrationBucketRow[];
+} {
+  const v2Records = loadStoredDecisionRecords();
   const store = loadNewsDecisions();
   const thirtyDaysAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
 
   let hits = 0;
   let total = 0;
+  const countedIds = new Set<string>();
+
+  for (const rec of Object.values(v2Records)) {
+    const evtMs = new Date(rec.eventTimeUtc).getTime();
+    if (isNaN(evtMs) || evtMs < thirtyDaysAgoMs) continue;
+    if (rec.resultStatus === 'HIT') {
+      hits += 1;
+      total += 1;
+      countedIds.add(rec.eventId);
+    } else if (rec.resultStatus === 'MISS') {
+      total += 1;
+      countedIds.add(rec.eventId);
+    }
+  }
 
   for (const dec of Object.values(store)) {
-    if (!dec.isLocked) continue;
+    if (countedIds.has(dec.eventId) || !dec.isLocked) continue;
     const lockMs = new Date(dec.lockedAt).getTime();
     if (lockMs < thirtyDaysAgoMs) continue;
 
@@ -1210,8 +1316,10 @@ export function getNewsDecisionAccuracy(): { hits: number; total: number; accura
     }
   }
 
-  if (total < 5) {
-    return { hits, total, accuracyPct: 0, display: 'Collecting results' };
+  const calibrationTable = getCalibrationTable30d();
+
+  if (total === 0) {
+    return { hits: 0, total: 0, accuracyPct: 0, display: 'Collecting 30d calibration results', calibrationTable };
   }
 
   const accuracyPct = Math.round((hits / total) * 100);
@@ -1219,6 +1327,8 @@ export function getNewsDecisionAccuracy(): { hits: number; total: number; accura
     hits,
     total,
     accuracyPct,
-    display: `AHMED + System accuracy: ${hits} of ${total} locked calls (last 30 days) · ${accuracyPct}%`,
+    display: `30d Calibrated Hit Rate: ${hits}/${total} (${accuracyPct}%) · WAIT excluded`,
+    calibrationTable,
   };
 }
+

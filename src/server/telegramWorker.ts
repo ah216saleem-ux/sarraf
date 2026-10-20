@@ -30,7 +30,8 @@ import { getClosedCandles, getEngineStatus, getCandleStore } from './candleEngin
 import { evaluateStructureBias, isGoldMarketOpen } from './sarrafEngine.ts';
 import { evaluateMarketPriceStatus } from './marketPriceEngine.ts';
 import { getCurrentSettings, updateSettings, verifyAdminUsername, verifyAdminPassword } from './settingsEngine.ts';
-import { getNewsFeedStatus, checkNewsLockState } from './newsEngine.ts';
+import { getNewsFeedStatus, checkNewsLockState, newsDecision } from './newsEngine.ts';
+import { getCachedMacroData } from './macroFeedEngine.ts';
 
 import { DATA_DIR } from "./deploymentSafety.ts";
 import {
@@ -1424,13 +1425,23 @@ async function executeTelegramAction(
 
   if (normAction === "news") {
     const feed = getNewsFeedStatus();
+    const macro = getCachedMacroData();
     const lines = [
       "📰 <b>SARRAF MACROECONOMIC & NEWS LOCK AUDIT</b>",
       "━━━━━━━━━━━━━━━━━━━━━━━━━",
       `🔒 <b>News Lock State:</b> ${feed.isLockActive ? `🔴 <b>LOCKED</b> (${feed.activeLockEvent?.title})` : "🟢 <b>UNLOCKED (Trading Allowed)</b>"}`,
     ];
     if (feed.nextEvent) {
-      lines.push(`• Next: <b>${feed.nextEvent.title}</b> (${feed.nextEvent.displayTime || feed.nextEvent.timeUtc})`);
+      const nd = (feed.nextEvent as any).newsDecision || newsDecision(feed.nextEvent, { macro });
+      const confText = `${nd.confidence}%${nd.confidenceStatus === 'calibrating' ? ' calibrating' : ''}`;
+      lines.push(
+        `• Next: <b>${feed.nextEvent.title}</b> (${feed.nextEvent.displayTime || feed.nextEvent.timeUtc})`,
+        `🎯 <b>Verdict:</b> <b>${nd.word} (${confText})</b> · phase: ${nd.phase} (score ${nd.score >= 0 ? '+' : ''}${nd.score})`,
+        `💬 <b>Reason:</b> ${nd.reason}`
+      );
+      if (nd.inputs && nd.inputs.length > 0) {
+        lines.push(`📊 <b>Inputs:</b> ${nd.inputs.map((i: any) => `${i.label} (${i.normalizedWeight}%)`).join(" | ")}`);
+      }
     }
     await sendTelegramHttpRequest(lines.join("\n"), replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     return;
