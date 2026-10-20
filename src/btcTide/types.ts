@@ -230,6 +230,7 @@ export interface ActiveTideSignal {
 }
 
 import type { BtcTideTradeRecord, BtcTideStats } from '../server/btcTideSignalDatabase';
+export type { BtcTideTradeRecord, BtcTideStats };
 import type { DecisionEngineResult } from './signalEngine';
 
 export interface FeedDotItem {

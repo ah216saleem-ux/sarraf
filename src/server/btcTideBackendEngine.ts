@@ -14,6 +14,7 @@ import {
   ReconcileResult,
   HeatmapBucket,
   HeatmapColumn,
+  BtcTideTradeRecord,
 } from '../btcTide/types.ts';
 import {
   evaluateDecisionEngine,
@@ -218,6 +219,7 @@ let sessionLow: number | null = null;
 let ticksSeen = 0;
 let firstTickTime: number | null = null;
 let liqSeqCounter = 0;
+let btcTidePaused = false;
 
 let currentActiveTrade: any | null = null;
 let currentClosedTrades: any[] = [];
@@ -2142,11 +2144,11 @@ async function pollBackendVenues() {
         venue: 'Bybit',
         price: bybitRes.data?.result?.list?.[0]?.lastPrice
           ? parseFloat(bybitRes.data.result.list[0].lastPrice)
-          : (sourceStates.get('bybit')?.lastPrice ?? null),
+          : null,
         volume24h: bybitRes.data?.result?.list?.[0]?.volume24h
           ? parseFloat(bybitRes.data.result.list[0].volume24h)
           : null,
-        errorReason: bybitRes.error || (sourceStates.get('bybit')?.lastPrice ? null : 'HTTP 403 (Datacenter IP)'),
+        errorReason: bybitRes.error || (bybitRes.data?.result?.list?.[0] ? null : 'HTTP 403 (Datacenter IP)'),
       },
       {
         venue: 'Gate',

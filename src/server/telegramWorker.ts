@@ -1268,7 +1268,7 @@ async function executeTelegramAction(
       `⚖️ <b>Book Imbalance (±0.1% 5s):</b> ${imb}`,
       `📈 <b>Perp Funding Rate:</b> ${btc.perp.fundingRate !== null ? `${(btc.perp.fundingRate * 100).toFixed(4)}%` : "--"}`,
       `🏛️ <b>Open Interest:</b> ${btc.perp.openInterest ? `${Math.round(btc.perp.openInterest).toLocaleString()} BTC` : "--"} (1h Δ: ${btc.perp.oiChange1hPct !== null ? `${btc.perp.oiChange1hPct > 0 ? "+" : ""}${btc.perp.oiChange1hPct}%` : "--"})`,
-      `🎯 <b>Decision Score:</b> ${btc.decision.netScore > 0 ? "+" : ""}${btc.decision.netScore} (${btc.decision.dominantSide} — Conf: ${btc.decision.confidence}%)`,
+      `🎯 <b>Decision Score:</b> ${btc.decision.totalScore > 0 ? "+" : ""}${btc.decision.totalScore} (${btc.decision.favoredSide} — Conf: ${btc.decision.confidence}%)`,
     ];
     if (btc.activeTrade) {
       const t = btc.activeTrade;
@@ -1280,7 +1280,7 @@ async function executeTelegramAction(
         `• Current R: ${t.currentR > 0 ? "+" : ""}${t.currentR}R`
       );
     } else {
-      lines.push("", `⏳ <b>Active BTC Trade:</b> None (${btc.decision.statusReason})`);
+      lines.push("", `⏳ <b>Active BTC Trade:</b> None (${btc.decision.waitReason || "Monitoring"})`);
     }
     await sendTelegramHttpRequest(lines.join("\n"), replyToMessageId, chatId, getMainControlKeyboard(), "HTML");
     return;
