@@ -224,7 +224,7 @@ export function formatCommandResponse(
   switch (command) {
     case '/start':
       return [
-        '🔱 SARRAF — SARRAF Gold Intelligence',
+
         'Real-time XAUUSD algorithmic stream & signals.',
         '',
         'Available Commands:',

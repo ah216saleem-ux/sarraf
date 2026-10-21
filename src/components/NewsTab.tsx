@@ -642,7 +642,9 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
       const footerNote =
         dec.verdict === 'SKIP'
           ? 'Low impact · SKIP'
-          : `${dec.verdict} (${dec.confidence}%) · ${dec.stage}`;
+          : dec.verdict === 'WAIT'
+          ? `WAIT (-) · ${dec.stage}`
+          : `${dec.verdict} (${(dec as any).confidenceDisplay || `${dec.confidence}%`}) · ${dec.stage}`;
 
       return {
         id: e.id,
@@ -847,7 +849,12 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
   // Each row tag shows the same verdict, e.g. "BEARISH 66%" or "BULLISH 65%" or "WAIT 50%" or "SKIP"
   const renderUnifiedDecisionTag = (evt: NewsEventItem) => {
     const dec = computeUnifiedDecision(evt, macroData);
-    const tagText = dec.verdict === 'SKIP' ? 'SKIP' : `${dec.verdict} ${dec.confidence}%`;
+    const tagText =
+      dec.verdict === 'SKIP'
+        ? 'SKIP'
+        : dec.verdict === 'WAIT'
+        ? 'WAIT -'
+        : `${dec.verdict} ${(dec as any).confidenceDisplay || `${dec.confidence}%`}`;
 
     const badgeStyle =
       dec.verdict === 'BULLISH'
@@ -861,7 +868,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
     return (
       <span
         className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${badgeStyle} shrink-0 whitespace-nowrap`}
-        title={`Unified Decision: ${dec.verdict} (${dec.confidence}% confidence) · Stage: ${dec.stage}`}
+        title={`Unified Decision: ${dec.verdict} (${dec.verdict === 'WAIT' || dec.verdict === 'SKIP' ? '-' : `${dec.confidence}%`} confidence) · Stage: ${dec.stage}`}
       >
         {dec.verdict === 'BULLISH' && <TrendingUp className="w-2.5 h-2.5 shrink-0" />}
         {dec.verdict === 'BEARISH' && <TrendingDown className="w-2.5 h-2.5 shrink-0" />}
@@ -1069,72 +1076,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
 
     return (
       <div className="mt-3 p-3.5 sm:p-4 rounded-xl bg-black/75 border border-white/10 space-y-3 font-mono">
-        {/* Playbook Metadata: WHEN & SIGNALS PAUSED */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-          <div className="p-2 sm:p-2.5 rounded-lg bg-white/[0.03] border border-white/10 flex items-center justify-between">
-            <span className="text-[10px] text-neutral-400 font-bold uppercase tracking-wider flex items-center gap-1">
-              <Clock className="w-3 h-3 text-[#FFD97A]" />
-              WHEN
-            </span>
-            <span className="text-white font-mono text-[11px] font-semibold">
-              {formatEventTimes(evt.timeUtc)}
-            </span>
-          </div>
 
-          <div className="p-2 sm:p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-amber-300">
-            <span className="text-[10px] text-amber-400 font-bold uppercase tracking-wider flex items-center gap-1">
-              <ShieldAlert className="w-3 h-3" />
-              SIGNALS
-            </span>
-            <span className="font-mono text-[11px] font-bold">Paused from -30m to +15m</span>
-          </div>
-        </div>
-
-        {/* Playbook Scenarios: IF HIGHER & IF LOWER chips */}
-        <div className="space-y-1.5">
-          {evt.scenarios?.surpriseChip ? (
-            <div className="p-2.5 rounded-xl bg-black/60 border border-white/15 flex items-center justify-between">
-              <span className="text-xs font-bold text-neutral-300">RELEASE SURPRISE:</span>
-              <span
-                className={`px-2.5 py-0.5 rounded text-xs font-bold border ${
-                  evt.scenarios.surpriseChip.sentiment === 'BULLISH'
-                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
-                    : evt.scenarios.surpriseChip.sentiment === 'BEARISH'
-                    ? 'bg-rose-500/20 text-rose-300 border-rose-500/50'
-                    : 'bg-neutral-800 text-neutral-300 border-neutral-600'
-                }`}
-              >
-                {evt.scenarios.surpriseChip.sentiment} ({evt.scenarios.surpriseChip.size} • Δ
-                {evt.scenarios.surpriseChip.diffPct}%)
-              </span>
-            </div>
-          ) : evt.scenarios?.type === 'NO_FORECAST' ? (
-            <div className="p-2 rounded-xl bg-neutral-900/60 border border-neutral-800 text-center text-xs text-neutral-400">
-              {isNoConsensusEvent(evt.title, evt.isSpeech)
-                ? 'No consensus for this event'
-                : 'Forecast due ~24h before'}
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
-              <div className="p-2 rounded-lg bg-rose-950/40 border border-rose-500/40 text-rose-300 flex items-start gap-2">
-                <TrendingDown className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
-                <div>
-                  <span className="text-[9px] font-bold text-rose-400 uppercase block">IF HIGHER</span>
-                  <span>{evt.scenarios.higher}</span>
-                </div>
-              </div>
-              <div className="p-2 rounded-lg bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 flex items-start gap-2">
-                <TrendingUp className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <span className="text-[9px] font-bold text-emerald-400 uppercase block">IF LOWER</span>
-                  <span>{evt.scenarios.lower}</span>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Brief Header with AHMED AI or RULES Tag */}
         <div className="flex items-center justify-between border-t border-white/10 pt-2.5">
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-bold tracking-wider text-[#FFD97A] uppercase">
@@ -1445,11 +1387,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
               </p>
             </div>
 
-            {/* Lock chip: Signals paused: -30m to +15m */}
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[10px] font-bold text-amber-300 shrink-0">
-              <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
-              <span>Signals paused: -30m to +15m</span>
-            </div>
+
           </div>
 
           {/* Forecast / Previous / Actual Grid */}

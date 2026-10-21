@@ -91,6 +91,9 @@ export function getAhmedEventTier(title: string): AhmedEventTier {
     t.includes('ppi') ||
     t.includes('producer price') ||
     t.includes('ism') ||
+    t.includes('pmi') ||
+    t.includes('flash manufacturing') ||
+    t.includes('flash services') ||
     t.includes('jolts') ||
     t.includes('jobless claims') ||
     t.includes('unemployment claims') ||
@@ -98,7 +101,9 @@ export function getAhmedEventTier(title: string): AhmedEventTier {
     t.includes('adp') ||
     t.includes('consumer confidence') ||
     t.includes('consumer sentiment') ||
-    t.includes('michigan sentiment')
+    t.includes('michigan sentiment') ||
+    t.includes('inflation expectations') ||
+    t.includes('uom')
   ) {
     return 2;
   }

@@ -220,7 +220,7 @@ export const NewsDecisionCard: React.FC<NewsDecisionCardProps> = ({
               {verdict}
             </h2>
             <span className="text-xs font-mono text-neutral-300">
-              {isSkip ? 'No Lean' : `${confidence}% confidence`}
+              {isSkip ? 'No Lean' : isWait ? '-' : ((decision as any)?.confidenceDisplay ? (decision as any).confidenceDisplay : `${confidence}% confidence`)}
             </span>
           </div>
 
@@ -229,7 +229,7 @@ export const NewsDecisionCard: React.FC<NewsDecisionCardProps> = ({
             <div className="w-full max-w-[160px] h-[3px] bg-white/10 rounded-full overflow-hidden mt-1.5">
               <div
                 className={`h-full rounded-full transition-all duration-500 ${barColor}`}
-                style={{ width: `${confidence}%` }}
+                style={{ width: `${isWait ? 0 : confidence}%` }}
               />
             </div>
           )}

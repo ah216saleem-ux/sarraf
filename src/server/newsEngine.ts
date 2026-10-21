@@ -382,9 +382,17 @@ export function transformRawEvent(raw: RawForexFactoryEvent, existingArchive?: N
     goldImpactExplanation = manualEntry.explanation;
   }
 
-  const isHigh = isHighImpactUsdEvent(raw.country, raw.impact, raw.title);
-  const tier = categorizeEventTier(raw.country, raw.impact, raw.title);
   const ahmedTier = getAhmedEventTier(raw.title);
+  const tier: NewsTier = ahmedTier === 1 ? 'TIER_1' : ahmedTier === 2 ? 'TIER_2' : 'NONE';
+  const unifiedImpact: NewsImpact =
+    raw.impact === 'Holiday'
+      ? 'Holiday'
+      : ahmedTier === 1
+      ? 'High'
+      : ahmedTier === 2
+      ? 'Medium'
+      : 'Low';
+  const isHigh = ahmedTier === 1 || ahmedTier === 2;
   const isSpeech = isSpeechEvent(raw.title);
   const scenarios = buildGoldDirectionScenarios(raw.title, forecastNum, previousNum, actualNum, isReleased);
   const goldImpact = computeGoldImpact(raw.title, forecastNum, actualNum, isReleased);
@@ -402,7 +410,7 @@ export function transformRawEvent(raw: RawForexFactoryEvent, existingArchive?: N
     id,
     title: raw.title,
     country: raw.country,
-    impact: (raw.impact as NewsImpact) || 'Low',
+    impact: unifiedImpact,
     tier,
     ahmedTier,
     isSpeech,
@@ -674,14 +682,27 @@ export function getNewsFeedStatus(displayTz: string = 'UTC'): NewsFeedStatus {
     }
 
     const goldImpact = computeGoldImpact(evt.title, evt.forecastNum, actualNum, isReleased);
-    const lockEval = evaluateTieredLock({ ...evt, minutesUntil, isReleased }, settings);
-    const ahmedTier = evt.ahmedTier || getAhmedEventTier(evt.title);
+    const ahmedTier = getAhmedEventTier(evt.title);
+    const tier: NewsTier = ahmedTier === 1 ? 'TIER_1' : ahmedTier === 2 ? 'TIER_2' : 'NONE';
+    const unifiedImpact: NewsImpact =
+      evt.impact === 'Holiday'
+        ? 'Holiday'
+        : ahmedTier === 1
+        ? 'High'
+        : ahmedTier === 2
+        ? 'Medium'
+        : 'Low';
+    const isHighImpactUsd = ahmedTier === 1 || ahmedTier === 2;
+    const lockEval = evaluateTieredLock({ ...evt, tier, impact: unifiedImpact, isHighImpactUsd, minutesUntil, isReleased }, settings);
     const isSpeech = evt.isSpeech ?? isSpeechEvent(evt.title);
     const scenarios = buildGoldDirectionScenarios(evt.title, evt.forecastNum, evt.previousNum, actualNum, isReleased);
 
     return {
       ...evt,
+      impact: unifiedImpact,
+      tier,
       ahmedTier,
+      isHighImpactUsd,
       isSpeech,
       scenarios,
       minutesUntil,
@@ -751,8 +772,18 @@ export function getNewsEventsForUI(): NewsEvent[] {
     }
 
     const goldImpact = computeGoldImpact(evt.title, evt.forecastNum, actualNum, isReleased);
-    const lockEval = evaluateTieredLock({ ...evt, minutesUntil, isReleased });
-    const ahmedTier = evt.ahmedTier || getAhmedEventTier(evt.title);
+    const ahmedTier = getAhmedEventTier(evt.title);
+    const tier: NewsTier = ahmedTier === 1 ? 'TIER_1' : ahmedTier === 2 ? 'TIER_2' : 'NONE';
+    const unifiedImpact: NewsImpact =
+      evt.impact === 'Holiday'
+        ? 'Holiday'
+        : ahmedTier === 1
+        ? 'High'
+        : ahmedTier === 2
+        ? 'Medium'
+        : 'Low';
+    const isHighImpactUsd = ahmedTier === 1 || ahmedTier === 2;
+    const lockEval = evaluateTieredLock({ ...evt, tier, impact: unifiedImpact, isHighImpactUsd, minutesUntil, isReleased });
     const isSpeech = evt.isSpeech ?? isSpeechEvent(evt.title);
     const scenarios = buildGoldDirectionScenarios(evt.title, evt.forecastNum, evt.previousNum, actualNum, isReleased);
     const preNewsLean = computePreNewsLean(evt.title, evt.forecastNum, evt.previousNum, isSpeech);
@@ -804,7 +835,10 @@ export function getNewsEventsForUI(): NewsEvent[] {
     const playbook = getEventPlaybook(evt.title, isSpeech);
     const enrichedEventBase = {
       ...evt,
+      impact: unifiedImpact,
+      tier,
       ahmedTier,
+      isHighImpactUsd,
       isSpeech,
       scenarios,
       preNewsLean,
@@ -1156,23 +1190,19 @@ export async function evaluateNewsDecisions(events: NewsEvent[]): Promise<Record
         minutesUntil > 0 &&
         minutesUntil <= 60 &&
         nd.lockedAt &&
-        nd.word !== 'SKIP' &&
+        (nd.word as string) !== 'SKIP' &&
         !v2Rec.telegramLockSentAt
       ) {
         v2Rec.telegramLockSentAt = new Date().toISOString();
         saveStoredDecisionRecords(v2Records);
 
-        const inputsLine = nd.inputs
-          .map((i) => `${i.label} (${i.normalizedWeight}%)`)
-          .join(' | ');
-        const confDisp = `${nd.confidence}%${nd.confidenceStatus === 'calibrating' ? ' (calibrating)' : ''} confidence`;
+        // Requirement 8: Telegram sends a neutral heads-up at T-60m without a direction
         const lockMsg = [
-          `🔒 <b>NEWS DECISION LOCKED (T-60m)</b>`,
+          `🔔 <b>UPCOMING MACRO EVENT (T-60m HEADS-UP)</b>`,
           `━━━━━━━━━━━━━━━━━━━━━━━━━`,
           `📌 <b>Event:</b> ${evt.title} (${evt.displayTime || evt.timeUtc})`,
-          `🎯 <b>Verdict:</b> <b>${nd.word}</b> · <b>${confDisp}</b> (score ${nd.score >= 0 ? '+' : ''}${nd.score})`,
-          `💬 <b>Reason:</b> ${nd.reason}`,
-          inputsLine ? `🧩 <b>Inputs:</b> ${inputsLine}` : '',
+          `📊 <b>Consensus:</b> Forecast ${evt.forecastStr || '--'} | Previous ${evt.previousStr || '--'}`,
+          `ℹ️ <i>Pre-news directional call suppressed (unproven). Post-release CONFIRMED signal will be issued at T+5m upon reaction verification.</i>`,
         ]
           .filter(Boolean)
           .join('\n');
@@ -1191,8 +1221,9 @@ export async function evaluateNewsDecisions(events: NewsEvent[]): Promise<Record
         v2Rec &&
         now >= eventTimeMs &&
         minutesUntil <= -5 &&
-        (nd.phase === 'confirmed' || nd.phase === 'mixed') &&
-        nd.word !== 'SKIP' &&
+        nd.phase === 'confirmed' &&
+        nd.word !== 'WAIT' &&
+        (nd.word as string) !== 'SKIP' &&
         !v2Rec.telegramConfirmSentAt &&
         evt.actualStr &&
         evt.actualStr !== 'PENDING'
@@ -1203,9 +1234,9 @@ export async function evaluateNewsDecisions(events: NewsEvent[]): Promise<Record
         const inputsLine = nd.inputs
           .map((i) => `${i.label} (${i.normalizedWeight}%)`)
           .join(' | ');
-        const confDisp = `${nd.confidence}%${nd.confidenceStatus === 'calibrating' ? ' (calibrating)' : ''} confidence`;
+        const confDisp = `${nd.confidence}% confidence`;
         const confirmMsg = [
-          `✅ <b>NEWS DECISION ${nd.phase.toUpperCase()} (+5m WINDOW)</b>`,
+          `✅ <b>NEWS DECISION CONFIRMED (+5m WINDOW)</b>`,
           `━━━━━━━━━━━━━━━━━━━━━━━━━`,
           `📌 <b>Event:</b> ${evt.title} (Actual: <b>${evt.actualStr}</b> vs Forecast: ${evt.forecastStr || '--'})`,
           `🎯 <b>Verdict:</b> <b>${nd.word}</b> · <b>${confDisp}</b> (score ${nd.score >= 0 ? '+' : ''}${nd.score})`,
@@ -1331,4 +1362,73 @@ export function getNewsDecisionAccuracy(): {
     calibrationTable,
   };
 }
+
+/**
+ * Requirement 3 (Round 5): Event lookup must match the upcoming event by exact id
+ * and release time inside the live feed window, never by title against historical records.
+ */
+export function matchUpcomingEventByIdAndTime(
+  targetId: string,
+  releaseTimeUtc: string,
+  liveRawEvents: RawForexFactoryEvent[]
+): RawForexFactoryEvent | null {
+  for (const raw of liveRawEvents) {
+    const rawId = generateEventId(raw);
+    const rawTimeUtc = new Date(raw.date).toISOString();
+    if (rawId === targetId && Math.abs(new Date(releaseTimeUtc).getTime() - new Date(rawTimeUtc).getTime()) < 60_000) {
+      return raw;
+    }
+  }
+  return null;
+}
+
+/**
+ * Requirement 3 (Round 5): Test that the forecast and previous of every upcoming event
+ * strictly equal the live feed values, and make the audit fail loudly if they do not.
+ */
+export function validateUpcomingEventAgainstLiveFeed(
+  event: NewsEvent,
+  rawLiveEvent: RawForexFactoryEvent
+): void {
+  const feedForecast = (rawLiveEvent.forecast || '').trim();
+  const feedPrevious = (rawLiveEvent.previous || '').trim();
+  const evtForecast = (event.forecastStr || '').trim();
+  const evtPrevious = (event.previousStr || '').trim();
+
+  if (evtForecast !== feedForecast) {
+    throw new Error(
+      `[AUDIT INTEGRITY VIOLATION] Event "${event.title}" forecast mismatch! Engine has "${evtForecast}", live feed has "${feedForecast}". Audit aborted.`
+    );
+  }
+
+  if (evtPrevious !== feedPrevious) {
+    throw new Error(
+      `[AUDIT INTEGRITY VIOLATION] Event "${event.title}" previous mismatch! Engine has "${evtPrevious}", live feed has "${feedPrevious}". Audit aborted.`
+    );
+  }
+}
+
+/**
+ * Requirement 5 (Round 5): Check that flags an event whose previous value changes
+ * by more than 2% between fetches (distinguishing cross-country mapping bugs vs revisions).
+ */
+export function checkPreviousRevisionAnomaly(
+  previousVal1: number | null,
+  previousVal2: number | null,
+  eventTitle: string
+): { isAnomaly: boolean; pctChange: number; warning?: string } {
+  if (previousVal1 == null || previousVal2 == null || previousVal1 === 0) {
+    return { isAnomaly: false, pctChange: 0 };
+  }
+  const pctChange = Number((Math.abs((previousVal2 - previousVal1) / previousVal1) * 100).toFixed(2));
+  if (pctChange > 2.0) {
+    return {
+      isAnomaly: true,
+      pctChange,
+      warning: `[DATA INTEGRITY ANOMALY] "${eventTitle}" previous value shifted by ${pctChange}% (> 2% threshold) between fetches (${previousVal1} vs ${previousVal2}). Possible feed revision or cross-country title collision.`,
+    };
+  }
+  return { isAnomaly: false, pctChange };
+}
+
 

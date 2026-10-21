@@ -308,7 +308,8 @@ export function computeUnifiedDecision(
     dialAngle = 0;
   }
 
-  const tagDisplay = `${verdict} ${confidence}%`;
+  const tagDisplay =
+    (verdict as string) === 'SKIP' ? 'SKIP' : verdict === 'WAIT' ? 'WAIT -' : `${verdict} ${confidence}%`;
 
   return {
     verdict,

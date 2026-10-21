@@ -1,5 +1,10 @@
+import fs from 'fs';
+import path from 'path';
+import { DATA_DIR, writeJsonAtomic } from './deploymentSafety.ts';
 import { getCandleStore } from './candleEngine.ts';
 import { getLastValidTick } from './marketPriceEngine.ts';
+
+const MACRO_CACHE_FILE = path.resolve(DATA_DIR, 'macro_live_cache.json');
 
 export interface UsdPairQuote {
   symbol: 'EURUSD' | 'USDJPY' | 'GBPUSD' | 'DXY';
@@ -59,6 +64,7 @@ export interface GoldLiveTrend {
   isStale: boolean;
 }
 
+export type PredictionMarketImplied = DiscoveredPredictionMarket;
 export interface DiscoveredPredictionMarket {
   category: 'CPI_MOM' | 'CORE_CPI_MOM' | 'CPI_YOY' | 'CORE_CPI_YOY' | 'NFP' | 'UNEMPLOYMENT' | 'FED_RATE';
   kalshiSeriesTicker?: string;
@@ -124,6 +130,15 @@ let cachedMacro: LiveMacroData = {
   discoveredMarkets: {},
   timestamp: 0,
 };
+
+try {
+  if (fs.existsSync(MACRO_CACHE_FILE)) {
+    const parsed = JSON.parse(fs.readFileSync(MACRO_CACHE_FILE, 'utf-8'));
+    if (parsed && typeof parsed === 'object') {
+      cachedMacro = { ...cachedMacro, ...parsed };
+    }
+  }
+} catch {}
 
 let isFetchingLiveMacro = false;
 let isFetchingPredictions = false;
@@ -729,6 +744,9 @@ export async function fetchLiveMacroData(forceRefresh = false): Promise<LiveMacr
 
     updateGoldTrendAndLevels();
     cachedMacro.timestamp = fetchDoneMs;
+    try {
+      writeJsonAtomic(MACRO_CACHE_FILE, cachedMacro);
+    } catch {}
   } catch (err: any) {
     console.warn('[MACRO FEED] Macro refresh error:', err.message);
   } finally {

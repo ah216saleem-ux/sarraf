@@ -58,6 +58,10 @@ export const DecisionCard: React.FC<DecisionCardProps> = ({
         return 'bg-amber-500/15 border-amber-500/40 text-amber-300';
       case 'MIXED':
         return 'bg-rose-500/15 border-rose-500/40 text-rose-300';
+      case 'FORMING':
+        return 'bg-sky-500/15 border-sky-500/40 text-sky-300';
+      case 'PREVIEW':
+        return 'bg-neutral-800 border-neutral-700 text-neutral-400';
       case 'PRE-NEWS LEAN':
       default:
         return 'bg-white/5 border-white/10 text-neutral-400';
@@ -201,15 +205,19 @@ export const DecisionCard: React.FC<DecisionCardProps> = ({
           <div className="space-y-1 pt-0.5">
             <div className="flex items-center justify-between text-xs font-mono">
               <span className="text-neutral-400">
-                Confidence{decision.confidenceStatus === 'calibrating' ? ' (calibrating)' : ''}
+                {decision.verdict === 'WAIT' || decision.verdict === 'SKIP' ? 'Confidence' : (decision as any).confidenceDisplay?.startsWith('Lean') ? 'Strength' : 'Confidence'}{decision.verdict !== 'WAIT' && decision.verdict !== 'SKIP' && decision.confidenceStatus === 'calibrating' && !(decision as any).confidenceDisplay?.startsWith('Lean') ? ' (calibrating)' : ''}
               </span>
-              <span className="text-white font-bold">{decision.confidence}%</span>
+              <span className="text-white font-bold">
+                {decision.verdict === 'WAIT' || decision.verdict === 'SKIP' ? '-' : ((decision as any).confidenceDisplay || `${decision.confidence}%`)}
+              </span>
             </div>
 
             <div className="w-full max-w-[200px] h-[3px] bg-white/10 rounded-full overflow-hidden">
               <div
                 className={`h-full rounded-full transition-all duration-500 ${confidenceBarColor}`}
-                style={{ width: `${Math.min(100, Math.max(0, decision.confidence))}%` }}
+                style={{
+                  width: `${decision.verdict === 'WAIT' || decision.verdict === 'SKIP' ? 0 : Math.min(100, Math.max(0, decision.confidence))}%`,
+                }}
               />
             </div>
           </div>

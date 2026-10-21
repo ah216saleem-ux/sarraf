@@ -50,11 +50,11 @@ export interface DecisionEngineEventInput {
       weightedScore: number;
       value: string;
     }>;
-    phase: 'pre' | 'provisional' | 'confirmed' | 'mixed';
+    phase: 'preview' | 'forming' | 'pre' | 'provisional' | 'confirmed' | 'mixed';
     lockedAt: string | null;
     resultStatus?: 'HIT' | 'MISS' | 'WAIT' | 'PENDING';
     goldMove15m?: number | null;
-    calibrationBucket?: string;
+    calibrationBucket?: string | null;
   } | null;
 }
 
@@ -72,7 +72,9 @@ export function computeUnifiedDecision(
   // Primary Source of Truth: Server-side newsDecision(event) object
   if (evt.newsDecision && evt.newsDecision.word) {
     const nd = evt.newsDecision;
-    const stageMap: Record<'pre' | 'provisional' | 'confirmed' | 'mixed', NewsDecisionStage> = {
+    const stageMap: Record<'preview' | 'forming' | 'pre' | 'provisional' | 'confirmed' | 'mixed', NewsDecisionStage> = {
+      preview: 'PREVIEW',
+      forming: 'FORMING',
       pre: 'PRE-NEWS LEAN',
       provisional: 'PROVISIONAL',
       confirmed: 'CONFIRMED',
@@ -80,7 +82,7 @@ export function computeUnifiedDecision(
     };
     const mappedChips: ReasonChipItem[] = (nd.inputs || []).map((inp) => ({
       id: (inp.id as ReasonChipItem['id']) || 'forecast',
-      label: `${inp.label} · ${Math.round(inp.normalizedWeight)}%`,
+      label: `${inp.label} weight ${Math.round(inp.normalizedWeight)}%`,
       sentiment: inp.direction === 1 ? 'BULLISH' : inp.direction === -1 ? 'BEARISH' : 'NEUTRAL',
       weight: inp.weightedScore,
       value: inp.value,

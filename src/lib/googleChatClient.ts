@@ -158,7 +158,7 @@ export function buildSetupReviewCard(setup: SetupPreReviewPayload) {
       cardId: `setup_${setup.signalId}`,
       card: {
         header: {
-          title: `SARRAF SARRAF Setup Pre-Review: ${setup.signalId}`,
+
           subtitle: `XAUUSD Spot ${setup.direction} Setup | Score ${setup.score}/100`,
           imageUrl: 'https://fonts.gstatic.com/s/i/short-term/release/googlegsymbol/finance/default/24px.svg',
           imageType: 'CIRCLE',

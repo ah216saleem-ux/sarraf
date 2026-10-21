@@ -118,6 +118,10 @@ export function getEffectiveTelegramChatId(): string | null {
   if (envChat && !isInvalidTelegramChatId(envChat)) {
     return envChat;
   }
+  const admins = getAllAdmins();
+  if (admins.length > 0 && !isInvalidTelegramChatId(admins[0].chatId)) {
+    return admins[0].chatId;
+  }
   return null;
 }
 
@@ -152,6 +156,7 @@ export function setDynamicTelegramChatId(id: string | number) {
       JSON.stringify({ chatId: cleanId, registeredAt: new Date().toISOString() }, null, 2),
       'utf-8'
     );
+    registerAdminChat(cleanId);
     console.log(`[TELEGRAM WORKER] Dynamic target chat ID updated to: ${cleanId}`);
 
     // Auto-unblock any outbox events that failed due to self-bot or unbound chat ID
@@ -174,8 +179,11 @@ export function setDynamicTelegramChatId(id: string | number) {
       }
       if (updated) {
         writeOutbox(outbox);
-        setTimeout(() => triggerOutboxProcessing(), 300);
       }
+      setTimeout(() => {
+        triggerOutboxProcessing();
+        processCommandOutbox().catch(() => {});
+      }, 300);
     } catch {
       // ignore
     }
@@ -905,9 +913,9 @@ async function executeTelegramAction(
     updateSettings({ dryRun: false }, "AutoLiveMode");
   }
 
-  // 1. Admin Login / Owner Claim
+  // 1. Admin Login / Owner Claim (auto-bind first user when no admin is configured yet)
   const hasAnyAdmin = getAllAdmins().length > 0 || Boolean(getDynamicTelegramChatId());
-  if (normAction === "claim_owner_admin" && !hasAnyAdmin) {
+  if (!hasAnyAdmin && !isInvalidTelegramChatId(idStr)) {
     registerAdminChat(idStr, fromUser, firstName);
     setDynamicTelegramChatId(idStr);
     const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -1433,7 +1441,10 @@ async function executeTelegramAction(
     ];
     if (feed.nextEvent) {
       const nd = (feed.nextEvent as any).newsDecision || newsDecision(feed.nextEvent, { macro });
-      const confText = `${nd.confidence}%${nd.confidenceStatus === 'calibrating' ? ' calibrating' : ''}`;
+      const confText =
+        nd.word === 'WAIT' || nd.word === 'SKIP'
+          ? '-'
+          : nd.confidenceDisplay || `${nd.confidence}%`;
       lines.push(
         `• Next: <b>${feed.nextEvent.title}</b> (${feed.nextEvent.displayTime || feed.nextEvent.timeUtc})`,
         `🎯 <b>Verdict:</b> <b>${nd.word} (${confText})</b> · phase: ${nd.phase} (score ${nd.score >= 0 ? '+' : ''}${nd.score})`,
