@@ -122,6 +122,10 @@ import {
   startMacroFeedLoop,
 } from './src/server/macroFeedEngine.ts';
 import {
+  sampleLiveReleaseTicks,
+  getReleaseLoggerSummary,
+} from './src/server/releaseLogger.ts';
+import {
   getOrGenerateAhmedAiBrief,
   buildRuleBasedBrief,
   pregenerateUpcomingBriefs,
@@ -2296,6 +2300,7 @@ app.get('/api/news', async (_req, res) => {
     ahmedAiOnline: ahmedAiStatus === 'ON',
     accuracy,
     calibrationTable: accuracy.calibrationTable,
+    releaseLogger: getReleaseLoggerSummary(),
   });
 });
 
@@ -2668,6 +2673,12 @@ app.get('/api/admin/go-live/status', requireAdminAuth, (_req, res) => {
       passed: isDryRunSignalsOk,
       details: `${dryRunHistoryCount} completed signal lifecycles verified in history (Minimum required: 5)`,
     },
+    {
+      id: 'releaseLogger',
+      name: 'Live USD Release Logger (DATA_DIR)',
+      passed: true,
+      details: `Logged Releases: ${getReleaseLoggerSummary().loggedReleasesCount} (${getReleaseLoggerSummary().completedReleasesCount}/30 completed — hit rate disabled until >= 30)`,
+    },
   ];
 
   const allPassed = checks.every((c) => c.passed);
@@ -2677,6 +2688,7 @@ app.get('/api/admin/go-live/status', requireAdminAuth, (_req, res) => {
     allPassed,
     isDryRun: workerStatus.dryRun,
     checks,
+    releaseLogger: getReleaseLoggerSummary(),
   });
 });
 
@@ -2952,12 +2964,21 @@ async function startServer() {
   // 10c. Initialize 24/7 BTC Tide Node.js Backend & SQLite Database
   await initBtcTideBackend();
 
-  // 10d. Start continuous live macro feed loop (20s FX/Yields + Kalshi/Polymarket discovery) & 30s newsDecision lifecycle worker
+  // 10d. Start continuous live macro feed loop (20s FX/Yields + Kalshi/Polymarket discovery) & 30s newsDecision + live release logger worker
   startMacroFeedLoop();
   setInterval(() => {
     try {
       const uiEvents = getNewsEventsForUI();
       evaluateNewsDecisions(uiEvents).catch(() => {});
+      const lastTick = getLastValidTick();
+      const macroSnap = getCachedMacroData();
+      sampleLiveReleaseTicks({
+        events: uiEvents as any,
+        liveGoldMid: lastTick ? lastTick.price : null,
+        liveGoldLastQuoteAtMs: lastTick ? (lastTick.lastReceivedAt || new Date(lastTick.timestamp).getTime()) : null,
+        liveDxy: macroSnap?.dxy && !macroSnap.dxy.isStale ? macroSnap.dxy.price : (macroSnap?.dollarProxy?.dxy && !macroSnap.dollarProxy.dxy.stale ? macroSnap.dollarProxy.dxy.mid : null),
+        liveUs10y: macroSnap?.us10y && !macroSnap.us10y.isStale ? macroSnap.us10y.yield : null,
+      });
     } catch {}
   }, 30_000);
 

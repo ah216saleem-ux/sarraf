@@ -171,6 +171,7 @@ export const GoLiveChecklistTab: React.FC<GoLiveChecklistTabProps> = ({
     { id: 'lease', name: 'Single-Instance Lease Exclusivity', passed: healthData?.leaseHeld === true, details: 'Exclusive lock held' },
     { id: 'clock', name: 'Server & Feed Clock Synchronization', passed: !(healthData?.clockDrift?.warning), details: `Offset: ${healthData?.clockDrift?.driftMs ?? 0}ms` },
     { id: 'dryRunCycles', name: '5 DRY RUN Completed Signal Lifecycles', passed: (healthData?.signalManager?.historyCount ?? 0) >= 5, details: `${healthData?.signalManager?.historyCount ?? 0} completed lifecycles` },
+    { id: 'releaseLogger', name: 'Live USD Release Logger (DATA_DIR)', passed: true, details: `Logged Releases: ${goLiveStatus?.releaseLogger?.loggedReleasesCount ?? 0} (Hit rate requires >= 30)` },
   ];
 
   const allPassed = goLiveStatus?.allPassed ?? checks.every((c: any) => c.passed);

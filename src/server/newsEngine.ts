@@ -385,14 +385,14 @@ export function transformRawEvent(raw: RawForexFactoryEvent, existingArchive?: N
   const ahmedTier = getAhmedEventTier(raw.title);
   const tier: NewsTier = ahmedTier === 1 ? 'TIER_1' : ahmedTier === 2 ? 'TIER_2' : 'NONE';
   const unifiedImpact: NewsImpact =
-    raw.impact === 'Holiday'
-      ? 'Holiday'
+    raw.impact === 'Holiday' || raw.impact === 'High' || raw.impact === 'Medium' || raw.impact === 'Low'
+      ? (raw.impact as NewsImpact)
       : ahmedTier === 1
       ? 'High'
       : ahmedTier === 2
       ? 'Medium'
       : 'Low';
-  const isHigh = ahmedTier === 1 || ahmedTier === 2;
+  const isHigh = unifiedImpact === 'High' || ahmedTier === 1 || ahmedTier === 2;
   const isSpeech = isSpeechEvent(raw.title);
   const scenarios = buildGoldDirectionScenarios(raw.title, forecastNum, previousNum, actualNum, isReleased);
   const goldImpact = computeGoldImpact(raw.title, forecastNum, actualNum, isReleased);
@@ -685,14 +685,14 @@ export function getNewsFeedStatus(displayTz: string = 'UTC'): NewsFeedStatus {
     const ahmedTier = getAhmedEventTier(evt.title);
     const tier: NewsTier = ahmedTier === 1 ? 'TIER_1' : ahmedTier === 2 ? 'TIER_2' : 'NONE';
     const unifiedImpact: NewsImpact =
-      evt.impact === 'Holiday'
-        ? 'Holiday'
+      evt.impact === 'Holiday' || evt.impact === 'High' || evt.impact === 'Medium' || evt.impact === 'Low'
+        ? evt.impact
         : ahmedTier === 1
         ? 'High'
         : ahmedTier === 2
         ? 'Medium'
         : 'Low';
-    const isHighImpactUsd = ahmedTier === 1 || ahmedTier === 2;
+    const isHighImpactUsd = unifiedImpact === 'High' || ahmedTier === 1 || ahmedTier === 2;
     const lockEval = evaluateTieredLock({ ...evt, tier, impact: unifiedImpact, isHighImpactUsd, minutesUntil, isReleased }, settings);
     const isSpeech = evt.isSpeech ?? isSpeechEvent(evt.title);
     const scenarios = buildGoldDirectionScenarios(evt.title, evt.forecastNum, evt.previousNum, actualNum, isReleased);
@@ -775,14 +775,14 @@ export function getNewsEventsForUI(): NewsEvent[] {
     const ahmedTier = getAhmedEventTier(evt.title);
     const tier: NewsTier = ahmedTier === 1 ? 'TIER_1' : ahmedTier === 2 ? 'TIER_2' : 'NONE';
     const unifiedImpact: NewsImpact =
-      evt.impact === 'Holiday'
-        ? 'Holiday'
+      evt.impact === 'Holiday' || evt.impact === 'High' || evt.impact === 'Medium' || evt.impact === 'Low'
+        ? evt.impact
         : ahmedTier === 1
         ? 'High'
         : ahmedTier === 2
         ? 'Medium'
         : 'Low';
-    const isHighImpactUsd = ahmedTier === 1 || ahmedTier === 2;
+    const isHighImpactUsd = unifiedImpact === 'High' || ahmedTier === 1 || ahmedTier === 2;
     const lockEval = evaluateTieredLock({ ...evt, tier, impact: unifiedImpact, isHighImpactUsd, minutesUntil, isReleased });
     const isSpeech = evt.isSpeech ?? isSpeechEvent(evt.title);
     const scenarios = buildGoldDirectionScenarios(evt.title, evt.forecastNum, evt.previousNum, actualNum, isReleased);
@@ -1217,43 +1217,48 @@ export async function evaluateNewsDecisions(events: NewsEvent[]): Promise<Record
         ).catch(() => {});
       }
 
-      if (
-        v2Rec &&
-        now >= eventTimeMs &&
-        minutesUntil <= -5 &&
-        nd.phase === 'confirmed' &&
-        nd.word !== 'WAIT' &&
-        (nd.word as string) !== 'SKIP' &&
-        !v2Rec.telegramConfirmSentAt &&
-        evt.actualStr &&
-        evt.actualStr !== 'PENDING'
-      ) {
-        v2Rec.telegramConfirmSentAt = new Date().toISOString();
-        saveStoredDecisionRecords(v2Records);
+      // Round 6 Item 8: Suspend post-release Telegram decisions until Item 5 is verified with real tick data.
+      // The neutral T-60m heads-up above remains active.
+      if (false) {
+        if (
+          v2Rec &&
+          now >= eventTimeMs &&
+          minutesUntil <= -5 &&
+          nd.phase === 'confirmed' &&
+          nd.word !== 'WAIT' &&
+          (nd.word as string) !== 'SKIP' &&
+          !v2Rec.telegramConfirmSentAt &&
+          evt.actualStr &&
+          evt.actualStr !== 'PENDING'
+        ) {
+          v2Rec.telegramConfirmSentAt = new Date().toISOString();
+          saveStoredDecisionRecords(v2Records);
 
-        const inputsLine = nd.inputs
-          .map((i) => `${i.label} (${i.normalizedWeight}%)`)
-          .join(' | ');
-        const confDisp = `${nd.confidence}% confidence`;
-        const confirmMsg = [
-          `✅ <b>NEWS DECISION CONFIRMED (+5m WINDOW)</b>`,
-          `━━━━━━━━━━━━━━━━━━━━━━━━━`,
-          `📌 <b>Event:</b> ${evt.title} (Actual: <b>${evt.actualStr}</b> vs Forecast: ${evt.forecastStr || '--'})`,
-          `🎯 <b>Verdict:</b> <b>${nd.word}</b> · <b>${confDisp}</b> (score ${nd.score >= 0 ? '+' : ''}${nd.score})`,
-          `💬 <b>Reason:</b> ${nd.reason}`,
-          inputsLine ? `🧩 <b>5m Breakdown:</b> ${inputsLine}` : '',
-        ]
-          .filter(Boolean)
-          .join('\n');
+          const inputsLine = nd.inputs
+            .map((i) => `${i.label} (${i.normalizedWeight}%)`)
+            .join(' | ');
+          const confDisp = nd.word === 'WAIT' ? 'no call' : `${nd.confidence}% confidence`;
+          const scoreStr = nd.score === null ? 'no call' : `${nd.score >= 0 ? '+' : ''}${nd.score}`;
+          const confirmMsg = [
+            `✅ <b>NEWS DECISION CONFIRMED (+5m WINDOW)</b>`,
+            `━━━━━━━━━━━━━━━━━━━━━━━━━`,
+            `📌 <b>Event:</b> ${evt.title} (Actual: <b>${evt.actualStr}</b> vs Forecast: ${evt.forecastStr || '--'})`,
+            `🎯 <b>Verdict:</b> <b>${nd.word}</b> · <b>${confDisp}</b> (score ${scoreStr})`,
+            `💬 <b>Reason:</b> ${nd.reason}`,
+            inputsLine ? `🧩 <b>5m Breakdown:</b> ${inputsLine}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n');
 
-        sendTelegramHttpRequest(
-          confirmMsg,
-          undefined,
-          undefined,
-          undefined,
-          'HTML',
-          `news_confirm_${evt.id}`
-        ).catch(() => {});
+          sendTelegramHttpRequest(
+            confirmMsg,
+            undefined,
+            undefined,
+            undefined,
+            'HTML',
+            `news_confirm_${evt.id}`
+          ).catch(() => {});
+        }
       }
 
       // 4. Sync legacy LockedDecision store with newsDecision output
@@ -1350,7 +1355,7 @@ export function getNewsDecisionAccuracy(): {
   const calibrationTable = getCalibrationTable30d();
 
   if (total === 0) {
-    return { hits: 0, total: 0, accuracyPct: 0, display: 'Collecting 30d calibration results', calibrationTable };
+    return { hits: 0, total: 0, accuracyPct: 0, display: 'Backtest: unverified', calibrationTable };
   }
 
   const accuracyPct = Math.round((hits / total) * 100);

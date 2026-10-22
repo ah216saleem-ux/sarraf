@@ -31,12 +31,14 @@ export interface UnifiedNewsDecision {
   eventId: string;
   eventTitle: string;
   verdict: NewsVerdict;          // EXACTLY ONE: BULLISH | BEARISH | WAIT | SKIP
-  confidence: number;            // 0 - 100 integer confidence (capped at 40% in PREVIEW, 70% in FORMING)
+  confidence: number;            // 0 - 100 integer confidence (single consistent value everywhere)
+  confidenceDisplay?: string;    // "no call" for WAIT, or e.g. "65%" for directional calls
   confidenceStatus?: 'calibrated' | 'calibrating';
   rawConfidence?: number;        // 0 - 100 uncalibrated confidence
   stage: NewsDecisionStage;      // PREVIEW | FORMING | PRE-NEWS LEAN | PROVISIONAL | CONFIRMED | MIXED
   phase?: 'preview' | 'forming' | 'pre' | 'provisional' | 'confirmed' | 'mixed';
-  dialScore: number;             // -100 to +100 (-100 = full bear, 0 = wait/skip, +100 = full bull)
+  dialScore: number | null;      // -100 to +100, or null ("no call") when < 2 event inputs or WAIT
+  scoreDisplay?: string;         // "no call" when score is null, or "+24.5" / "-24.5"
   headlineReason: string;        // One short sentence
   chips: ReasonChipItem[];       // Active reason chips from newsDecision(event).inputs
   lockedAt?: string | null;

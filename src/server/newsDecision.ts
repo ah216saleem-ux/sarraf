@@ -17,7 +17,7 @@ import {
 
 export const NEWS_DECISIONS_STORE_FILE = path.resolve(DATA_DIR, "news_decisions_v2.json");
 
-export type DecisionWord = "BULLISH" | "BEARISH" | "WAIT" | "SKIP";
+export type DecisionWord = "BULLISH" | "BEARISH" | "WAIT" | "SKIP" | "RELEASED";
 export type DecisionPhase = "preview" | "forming" | "pre" | "provisional" | "confirmed" | "mixed";
 
 export interface NewsDecisionInputItem {
@@ -74,6 +74,7 @@ export interface NewsDecisionAuditRow {
   originalWeight: number;
   renormalizedWeight: number;
   weightedScore: number;
+  formula: string; // "rawScore x normalizedWeight = weightedScore"
   dropped: "No" | "Yes" | "Info Only (Wt 0)";
   reason: string;
 }
@@ -85,7 +86,9 @@ export interface NewsDecisionObject {
   confidenceLean: "Lean: unproven (weak)" | "Lean: unproven (moderate)" | "-";
   confidenceStatus: "calibrated" | "calibrating";
   rawConfidence: number;
-  score: number;
+  score: number | null;
+  scoreDisplay: string;
+  rawSumWeightedScore: number;
   reason: string;
   inputs: NewsDecisionInputItem[];
   phase: DecisionPhase;
@@ -175,6 +178,48 @@ export function checkLiveResolvedSamplesSufficient(): boolean {
   }
 }
 
+export interface IndicatorSignRule {
+  indicatorPattern: string;
+  polarityType: "STANDARD" | "INVERSE";
+  forecastAbovePreviousGoldSign: "BEARISH (-1)" | "BULLISH (+1)";
+  forecastBelowPreviousGoldSign: "BULLISH (+1)" | "BEARISH (-1)";
+  rationale: string;
+}
+
+export const SIGN_TABLE: IndicatorSignRule[] = [
+  {
+    indicatorPattern: "Flash Manufacturing PMI / Flash Services PMI / ISM PMI",
+    polarityType: "STANDARD",
+    forecastAbovePreviousGoldSign: "BEARISH (-1)",
+    forecastBelowPreviousGoldSign: "BULLISH (+1)",
+    rationale: "Higher PMI = stronger US economic activity = stronger USD = Gold BEARISH",
+  },
+  {
+    indicatorPattern: "Unemployment Claims / Jobless Claims / Unemployment Rate",
+    polarityType: "INVERSE",
+    forecastAbovePreviousGoldSign: "BULLISH (+1)",
+    forecastBelowPreviousGoldSign: "BEARISH (-1)",
+    rationale: "Higher Claims/Unemployment = weaker US labor market = weaker USD = Gold BULLISH",
+  },
+  {
+    indicatorPattern: "CPI / Core CPI / PPI / PCE / Inflation Expectations",
+    polarityType: "STANDARD",
+    forecastAbovePreviousGoldSign: "BEARISH (-1)",
+    forecastBelowPreviousGoldSign: "BULLISH (+1)",
+    rationale: "Higher inflation = hawkish Fed / higher real yields = Gold BEARISH",
+  },
+  {
+    indicatorPattern: "Non-Farm Employment Change (NFP) / Retail Sales / GDP / Consumer Sentiment",
+    polarityType: "STANDARD",
+    forecastAbovePreviousGoldSign: "BEARISH (-1)",
+    forecastBelowPreviousGoldSign: "BULLISH (+1)",
+    rationale: "Higher growth/jobs/spending = stronger USD = Gold BEARISH",
+  },
+];
+
+export const EXACT_DIRECTIONAL_RULE_TEXT =
+  "EXACT DIRECTIONAL RULE (Round 9): Verdict is BULLISH or BEARISH iff ALL conditions hold: (1) >= 2 active non-AI event-specific inputs (|rawScore| >= 0.15, finalWeight > 0) agree on direction (AHMED AI is advisor-only <= 10% and never counts as an event input; if < 2 active event inputs exist, verdict is WAIT and headline score is null / 'no call'); (2) market_context group total final weight <= 40.0%, and when >= 2 event inputs are active no single input has final weight > 35.0% (weights sum to 100.0%); (3) headline score = sum of weighted rows has |score| >= 20.0 in the agreed direction (and opposing event weighted strength < 50% of agreeing); (4) confidence >= 40%. For WAIT, header shows 'no call' and keeps numeric score/confidence in details.";
+
 export function isEventInverseForGold(title: string): boolean {
   const t = title.toLowerCase();
   return (
@@ -188,11 +233,12 @@ export function isEventInverseForGold(title: string): boolean {
 
 export function getTypicalSurpriseSize(title: string, referenceVal?: number | null): number {
   const t = title.toLowerCase();
+  const isRawThousands = referenceVal != null && Math.abs(referenceVal) >= 1000;
   if (t.includes("unemployment claims") || t.includes("jobless claims") || t.includes("initial claims")) {
-    return 10;
+    return isRawThousands ? 10000 : 10;
   }
   if (t.includes("non-farm") || t.includes("nfp")) {
-    return 35;
+    return isRawThousands ? 35000 : 35;
   }
   if (t.includes("cpi") || t.includes("ppi") || t.includes("pce") || t.includes("inflation")) {
     return 0.2;
@@ -350,6 +396,21 @@ function computeEventGoldHistoryInput(
   };
 }
 
+export function isLowImpactEvent(evt: any): boolean {
+  if (!evt) return false;
+  const imp = (evt.impact || '').toLowerCase();
+  const t = (evt.title || '').toLowerCase();
+  return (
+    imp === 'low' ||
+    imp === 'holiday' ||
+    t.includes('natural gas storage') ||
+    t.includes('cb leading index') ||
+    t.includes('leading index') ||
+    t.includes('leading indicators') ||
+    t.includes('api weekly')
+  );
+}
+
 export function newsDecision(
   evt: any,
   options?: NewsDecisionOptions
@@ -370,6 +431,30 @@ export function newsDecision(
   const historyCutoffMs = isNaN(eventTimeMs) ? now : eventTimeMs - 60000;
   const minutesUntil = Math.round((eventTimeMs - now) / 60000);
 
+  if (!isNaN(eventTimeMs) && minutesUntil < 0) {
+    return {
+      eventId: evt.id,
+      eventTitle: evt.title,
+      word: "RELEASED",
+      confidence: 0,
+      confidenceDisplay: "RELEASED",
+      confidenceLean: "-",
+      confidenceStatus: "calibrating",
+      rawConfidence: 0,
+      score: null,
+      scoreDisplay: "RELEASED",
+      rawSumWeightedScore: 0,
+      reason: `Event release time has passed (${evt.timeUtc || evt.date}); status is RELEASED.`,
+      inputs: [],
+      phase: "provisional",
+      lockedAt: null,
+      resultStatus: "PENDING",
+      goldMove15m: null,
+      calibrationBucket: null,
+      auditLog: [],
+    };
+  }
+
   let preReleasePhase: DecisionPhase = "preview";
   if (minutesUntil <= 60 && minutesUntil > 15) {
     preReleasePhase = "forming";
@@ -377,6 +462,31 @@ export function newsDecision(
     preReleasePhase = "pre";
   } else if (minutesUntil < 0) {
     preReleasePhase = "provisional";
+  }
+
+  // Round 6 Item 2: Low-impact events (Natural Gas Storage, CB Leading Index) must return SKIP
+  if (isLowImpactEvent(evt)) {
+    return {
+      eventId: evt.id,
+      eventTitle: evt.title,
+      word: "SKIP",
+      confidence: 0,
+      confidenceDisplay: "-",
+      confidenceLean: "-",
+      confidenceStatus: "calibrating",
+      rawConfidence: 0,
+      score: null,
+      scoreDisplay: "-",
+      rawSumWeightedScore: 0,
+      reason: `Low-impact event (${evt.title || 'Low impact'}); automatically skipped (SKIP).`,
+      inputs: [],
+      phase: preReleasePhase,
+      lockedAt: null,
+      resultStatus: "WAIT",
+      goldMove15m: null,
+      calibrationBucket: null,
+      auditLog: [],
+    };
   }
 
   const auditLog: NewsDecisionAuditRow[] = [];
@@ -388,7 +498,7 @@ export function newsDecision(
   const marketSubInputs: NewsDecisionInputItem[] = [];
   const advisorInputs: NewsDecisionInputItem[] = [];
 
-  // Forecast vs Previous
+  // Round 6 Item 1 & 3: Forecast vs Previous (Raw weight = 15, re-balanced proportionally)
   if (hasForecast && hasPrevious) {
     const forecastVal = evt.forecastNum!;
     const previousVal = evt.previousNum!;
@@ -400,14 +510,13 @@ export function newsDecision(
     let dir: 1 | -1 | 0 = 0;
     let rawScore = 0;
 
-    if (Math.abs(normalizedDiff) >= 0.15) {
+    // Strict Dead Zone: |normalizedDiff| < 0.15 is neutral (rawScore = 0, dir = 0)
+    const inDeadZone = Math.abs(normalizedDiff) < 0.15;
+    if (!inDeadZone) {
       if (diff > 0) dir = isInverse ? 1 : -1;
       else dir = isInverse ? -1 : 1;
       rawScore = Math.max(-1, Math.min(1, dir * Math.abs(normalizedDiff)));
-    }
-
-    const inDeadZone = Math.abs(rawScore) < 0.15 || dir === 0;
-    if (inDeadZone) {
+    } else {
       dir = 0;
       rawScore = 0;
     }
@@ -416,7 +525,7 @@ export function newsDecision(
       id: "forecast",
       name: "Forecast vs Previous",
       label: `F:${evt.forecastStr || forecastVal} vs P:${evt.previousStr || previousVal}`,
-      rawWeight: 30,
+      rawWeight: 15,
       normalizedWeight: 0,
       direction: dir,
       rawScore: Number(rawScore.toFixed(3)),
@@ -438,9 +547,10 @@ export function newsDecision(
       direction: "NEUTRAL",
       source: "Forex Factory Consensus",
       ageSeconds: null,
-      originalWeight: 30,
+      originalWeight: 15,
       renormalizedWeight: 0,
       weightedScore: 0,
+      formula: "0.00 x 0.0% = 0.0",
       dropped: "Yes",
       reason: "Dropped: Missing forecast or previous value",
     });
@@ -449,7 +559,7 @@ export function newsDecision(
   // Prediction Markets
   const matchedMarket = options?.matchedPmOverride !== undefined
     ? options.matchedPmOverride
-    : findMatchingPredictionMarketForEvent(evt.title);
+    : findMatchingPredictionMarketForEvent(evt.title, macro?.discoveredMarkets);
 
   let pmAdded = false;
   const implied = matchedMarket?.combinedImpliedEv ?? matchedMarket?.kalshiImpliedEv ?? matchedMarket?.polymarketImpliedEv;
@@ -482,7 +592,7 @@ export function newsDecision(
       id: "prediction_market",
       name: "Prediction Markets",
       label: `${matchedMarket.summaryLabel} vs C:${consensusDisp}`,
-      rawWeight: 20,
+      rawWeight: 30,
       normalizedWeight: 0,
       direction: dir,
       rawScore: Number(rawScore.toFixed(3)),
@@ -507,18 +617,19 @@ export function newsDecision(
       direction: "NEUTRAL",
       source: "Kalshi / Polymarket",
       ageSeconds: null,
-      originalWeight: 20,
+      originalWeight: 30,
       renormalizedWeight: 0,
       weightedScore: 0,
+      formula: "0.00 x 0.0% = 0.0",
       dropped: "Yes",
       reason: "Dropped: No active Kalshi or Polymarket contract mapped for this indicator",
     });
   }
 
-  // 12-Month Event Gold History
+  // 12-Month Event Gold History (Round 6 Item 3: raw weight = 15)
   const histResult = computeEventGoldHistoryInput(evt, options?.archive || [], historyCutoffMs);
   if (histResult) {
-    const rawW = histResult.qualifiesAsSignal ? 10 : 0;
+    const rawW = histResult.qualifiesAsSignal ? 15 : 0;
     eventSpecificInputs.push({
       id: "history",
       name: "Event Gold History",
@@ -560,85 +671,190 @@ export function newsDecision(
     });
   }
 
-  // Gold Trend, Dollar Proxy, US10Y
-  if (macro.goldTrend) {
-    const gt = macro.goldTrend;
-    let dir: 1 | -1 | 0 = gt.direction;
-    let rawScore = gt.rawScore;
-    if (Math.abs(rawScore) < 0.15) {
-      dir = 0;
-      rawScore = 0;
-    }
-    marketSubInputs.push({
-      id: "gold_trend",
-      name: "Gold BiQuote Trend",
-      label: `XAU/USD ${gt.bias}`,
-      rawWeight: 15,
-      normalizedWeight: 0,
-      direction: dir,
-      rawScore: Number(rawScore.toFixed(3)),
-      weightedScore: 0,
-      value: gt.keyLevelsText || `$${gt.price?.toFixed(1)}`,
+  // Round 7 Item 3: Gold Trend Freshness Check (Before first real tick, gold = null and Gold Trend is dropped; no hardcoded price check)
+  if (!macro.goldTrend || typeof macro.goldTrend.price !== "number" || macro.goldTrend.price <= 0) {
+    auditLog.push({
+      input: "Gold BiQuote Trend",
+      group: "market_context",
+      rawValue: "null",
+      rawScore: 0,
+      direction: "NEUTRAL",
       source: "BiQuote Spot Feed & 4H EMA",
-      ageMs: gt.ageMs || 0,
-      group: "market_context",
-      dropReason: dir === 0 ? "Dead zone (|rawScore| < 0.15) -> weightedScore = 0" : "Market Context sub-input",
+      ageSeconds: null,
+      originalWeight: 15,
+      renormalizedWeight: 0,
+      weightedScore: 0,
+      formula: "0.00 x 0.0% = 0.0",
+      dropped: "Yes",
+      reason: "Dropped: No live BiQuote gold tick received yet (gold = null)",
     });
+  } else {
+    const gt = macro.goldTrend;
+    const isStale = Boolean(gt.isStale || (gt.ageMs !== undefined && gt.ageMs > 60_000));
+    if (isStale) {
+      auditLog.push({
+        input: "Gold BiQuote Trend",
+        group: "market_context",
+        rawValue: gt.keyLevelsText || `$${gt.price}`,
+        rawScore: 0,
+        direction: "NEUTRAL",
+        source: "BiQuote Spot Feed & 4H EMA",
+        ageSeconds: gt.ageMs !== undefined ? Math.round(gt.ageMs / 1000) : null,
+        originalWeight: 15,
+        renormalizedWeight: 0,
+        weightedScore: 0,
+        formula: "0.00 x 0.0% = 0.0",
+        dropped: "Yes",
+        reason: "Dropped: BiQuote spot price is stale (>60s old)",
+      });
+    } else {
+      let dir: 1 | -1 | 0 = gt.direction;
+      let rawScore = gt.rawScore;
+      if (Math.abs(rawScore) < 0.15) {
+        dir = 0;
+        rawScore = 0;
+      }
+      marketSubInputs.push({
+        id: "gold_trend",
+        name: "Gold BiQuote Trend",
+        label: `XAU/USD ${gt.bias}`,
+        rawWeight: 15,
+        normalizedWeight: 0,
+        direction: dir,
+        rawScore: Number(rawScore.toFixed(3)),
+        weightedScore: 0,
+        value: gt.keyLevelsText || `$${gt.price?.toFixed(1)}`,
+        source: "BiQuote Spot Feed & 4H EMA",
+        ageMs: gt.ageMs || 0,
+        group: "market_context",
+        dropReason: dir === 0 ? "Dead zone (|rawScore| < 0.15) -> weightedScore = 0" : "Market Context sub-input",
+      });
+    }
   }
 
-  if (macro.dollarProxy) {
-    const dp = macro.dollarProxy;
-    let dir: 1 | -1 | 0 = dp.goldDirection;
-    let rawScore = dp.goldScore;
-    if (Math.abs(rawScore) < 0.15) {
-      dir = 0;
-      rawScore = 0;
-    }
-    marketSubInputs.push({
-      id: "dollar_proxy",
-      name: "Dollar proxy",
-      label: `USD Basket ${dp.compositeChangePct >= 0 ? "+" : ""}${dp.compositeChangePct}%`,
-      rawWeight: 15,
-      normalizedWeight: 0,
-      direction: dir,
-      rawScore: Number(rawScore.toFixed(3)),
-      weightedScore: 0,
-      value: `Composite USD ${dp.compositeChangePct >= 0 ? "+" : ""}${dp.compositeChangePct}% (${dp.pairsUsed?.join(", ") || "EUR/USD, USD/JPY, GBP/USD"})`,
+  if (!macro.dollarProxy) {
+    auditLog.push({
+      input: "Dollar proxy",
+      group: "market_context",
+      rawValue: "null",
+      rawScore: 0,
+      direction: "NEUTRAL",
       source: "EUR/USD, USD/JPY, GBP/USD Weighted Basket",
-      ageMs: dp.ageMs || 0,
-      group: "market_context",
-      dropReason: dir === 0 ? "Dead zone (|rawScore| < 0.15) -> weightedScore = 0" : "Market Context sub-input",
+      ageSeconds: null,
+      originalWeight: 15,
+      renormalizedWeight: 0,
+      weightedScore: 0,
+      formula: "0.00 x 0.0% = 0.0",
+      dropped: "Yes",
+      reason: "Dropped: No live Dollar proxy quote available",
     });
+  } else {
+    const dp = macro.dollarProxy;
+    const isStale = Boolean(dp.isStale || (dp.ageMs !== undefined && dp.ageMs > 60_000));
+    if (isStale) {
+      auditLog.push({
+        input: "Dollar proxy",
+        group: "market_context",
+        rawValue: "--",
+        rawScore: 0,
+        direction: "NEUTRAL",
+        source: "EUR/USD, USD/JPY, GBP/USD Weighted Basket",
+        ageSeconds: dp.ageMs !== undefined ? Math.round(dp.ageMs / 1000) : null,
+        originalWeight: 15,
+        renormalizedWeight: 0,
+        weightedScore: 0,
+        formula: "0.00 x 0.0% = 0.0",
+        dropped: "Yes",
+        reason: "Dropped: Dollar proxy quotes are stale (>60s old)",
+      });
+    } else {
+      let dir: 1 | -1 | 0 = dp.goldDirection;
+      let rawScore = dp.goldScore;
+      if (Math.abs(rawScore) < 0.15) {
+        dir = 0;
+        rawScore = 0;
+      }
+      marketSubInputs.push({
+        id: "dollar_proxy",
+        name: "Dollar proxy",
+        label: `USD Basket ${dp.compositeChangePct >= 0 ? "+" : ""}${dp.compositeChangePct}%`,
+        rawWeight: 15,
+        normalizedWeight: 0,
+        direction: dir,
+        rawScore: Number(rawScore.toFixed(3)),
+        weightedScore: 0,
+        value: `Composite USD ${dp.compositeChangePct >= 0 ? "+" : ""}${dp.compositeChangePct}% (${dp.pairsUsed?.join(", ") || "EUR/USD, USD/JPY, GBP/USD"})`,
+        source: "EUR/USD, USD/JPY, GBP/USD Weighted Basket",
+        ageMs: dp.ageMs || 0,
+        group: "market_context",
+        dropReason: dir === 0 ? "Dead zone (|rawScore| < 0.15) -> weightedScore = 0" : "Market Context sub-input",
+      });
+    }
   }
 
-  if (macro.us10y) {
-    const y10 = macro.us10y;
-    const bp = y10.changeBp;
-    let dir: 1 | -1 | 0 = 0;
-    if (bp <= -1.0) dir = 1;
-    else if (bp >= 1.0) dir = -1;
-
-    let rawScore = Math.max(-1, Math.min(1, -bp / 5.0));
-    if (Math.abs(rawScore) < 0.15) {
-      dir = 0;
-      rawScore = 0;
-    }
-
-    marketSubInputs.push({
-      id: "us10y",
-      name: "US10Y Yield",
-      label: `US10Y ${y10.yield}% (${bp >= 0 ? "+" : ""}${bp}bp)`,
-      rawWeight: 10,
-      normalizedWeight: 0,
-      direction: dir,
-      rawScore: Number(rawScore.toFixed(3)),
-      weightedScore: 0,
-      value: `${y10.yield}% (${bp >= 0 ? "+" : ""}${bp} bps today)`,
-      source: y10.source || "CNBC Real-Time Quote",
-      ageMs: y10.ageMs || 0,
+  if (!macro.us10y) {
+    auditLog.push({
+      input: "US10Y Yield",
       group: "market_context",
-      dropReason: dir === 0 ? "Dead zone (|rawScore| < 0.15) -> weightedScore = 0" : "Market Context sub-input",
+      rawValue: "null",
+      rawScore: 0,
+      direction: "NEUTRAL",
+      source: "CNBC Real-Time Quote",
+      ageSeconds: null,
+      originalWeight: 10,
+      renormalizedWeight: 0,
+      weightedScore: 0,
+      formula: "0.00 x 0.0% = 0.0",
+      dropped: "Yes",
+      reason: "Dropped: No live US10Y quote available",
     });
+  } else {
+    const y10 = macro.us10y;
+    const isStale = Boolean(y10.isStale || (y10.ageMs !== undefined && y10.ageMs > 60_000));
+    if (isStale) {
+      auditLog.push({
+        input: "US10Y Yield",
+        group: "market_context",
+        rawValue: `${y10.yield}%`,
+        rawScore: 0,
+        direction: "NEUTRAL",
+        source: y10.source || "CNBC Real-Time Quote",
+        ageSeconds: y10.ageMs !== undefined ? Math.round(y10.ageMs / 1000) : null,
+        originalWeight: 10,
+        renormalizedWeight: 0,
+        weightedScore: 0,
+        formula: "0.00 x 0.0% = 0.0",
+        dropped: "Yes",
+        reason: "Dropped: US10Y quote is stale (>60s old)",
+      });
+    } else {
+      const bp = y10.changeBp;
+      let dir: 1 | -1 | 0 = 0;
+      if (bp <= -1.0) dir = 1;
+      else if (bp >= 1.0) dir = -1;
+
+      let rawScore = Math.max(-1, Math.min(1, -bp / 5.0));
+      if (Math.abs(rawScore) < 0.15) {
+        dir = 0;
+        rawScore = 0;
+      }
+
+      marketSubInputs.push({
+        id: "us10y",
+        name: "US10Y Yield",
+        label: `US10Y ${y10.yield}% (${bp >= 0 ? "+" : ""}${bp}bp)`,
+        rawWeight: 10,
+        normalizedWeight: 0,
+        direction: dir,
+        rawScore: Number(rawScore.toFixed(3)),
+        weightedScore: 0,
+        value: `${y10.yield}% (${bp >= 0 ? "+" : ""}${bp} bps today)`,
+        source: y10.source || "CNBC Real-Time Quote",
+        ageMs: y10.ageMs || 0,
+        group: "market_context",
+        dropReason: dir === 0 ? "Dead zone (|rawScore| < 0.15) -> weightedScore = 0" : "Market Context sub-input",
+      });
+    }
   }
 
   // Market Context 2-of-3 Agreement
@@ -652,11 +868,9 @@ export function newsDecision(
     marketVote = -1;
   }
 
-  const marketRawWeightSum = marketSubInputs.reduce((acc, i) => acc + i.rawWeight, 0);
-
-  // AHMED AI Vote
-  const aiVote = evt.brief?.direction || evt.aiVote;
-  const aiConf = evt.brief?.confidence || evt.aiConfidence || 50;
+  // AHMED AI Vote (Advisor only — never counts as an event-specific input)
+  const aiVote = evt.brief?.direction || evt.aiVote || evt.decision?.aiVote;
+  const aiConf = evt.brief?.confidence || evt.aiConfidence || evt.decision?.aiConfidence || 50;
 
   if (aiVote && (aiVote === "BULLISH" || aiVote === "BEARISH")) {
     const dir: 1 | -1 = aiVote === "BULLISH" ? 1 : -1;
@@ -681,7 +895,7 @@ export function newsDecision(
       source: "AHMED AI Engine",
       ageMs: 0,
       group: "advisor",
-      dropReason: deadDir === 0 ? "Dead zone (|rawScore| < 0.15) -> weightedScore = 0" : "Active advisor input (capped at 10%)",
+      dropReason: deadDir === 0 ? "Dead zone (|rawScore| < 0.15) -> weightedScore = 0" : "Active advisor input (capped at <= 10% after renormalization)",
     });
   } else {
     auditLog.push({
@@ -695,78 +909,147 @@ export function newsDecision(
       originalWeight: 10,
       renormalizedWeight: 0,
       weightedScore: 0,
+      formula: "0.00 x 0.0% = 0.0",
       dropped: "Yes",
       reason: "Dropped: No directional AHMED AI vote recorded for this event",
     });
   }
 
-  // Renormalisation
-  const activeNonMarketInputs = [...eventSpecificInputs, ...advisorInputs].filter((i) => i.rawWeight > 0);
-  const eventRawWeightSum = activeNonMarketInputs.reduce((acc, i) => acc + i.rawWeight, 0);
+  // ============================================================================
+  // RENORMALIZATION + AI VOTE CAP (<= 10.0%) + MARKET CONTEXT GROUP CAP (<= 40.0%)
+  // Round 7 Item 1, Round 8 Item 4, Round 9 Item 1:
+  // 1. Renormalize all active inputs (rawWeight > 0, !isInfoOnly) proportionally to 100%.
+  // 2. Apply AI cap AFTER renormalization: AHMED AI final weight <= 10.0%.
+  // 3. Apply Market Context group cap AFTER renormalization:
+  //    Gold BiQuote Trend + Dollar proxy + US10Y Yield total final weight <= 40.0%.
+  //    Excess weight above 40.0% is redistributed proportionally to active event_specific inputs.
+  // 4. When >= 2 event_specific inputs are in the active pool, cap any single input at <= 35.0%
+  //    and redistribute excess to the other event_specific input(s).
+  // 5. Sum of final weights across active inputs must equal 100.0% (whenever at least 1 event input is present).
+  // ============================================================================
+  const allActiveInputs = [...marketSubInputs, ...eventSpecificInputs, ...advisorInputs];
+  const activePool = allActiveInputs.filter((i) => i.rawWeight > 0 && !i.isInfoOnly);
+  const totalActiveRawWeight = activePool.reduce((acc, i) => acc + i.rawWeight, 0);
 
-  const marketGroupCapWeight = 40;
-  let actualMarketNormalizedWeight = 0;
-  let remainingEventPool = 0;
+  if (activePool.length > 0 && totalActiveRawWeight > 0) {
+    const floatWeights = new Map<NewsDecisionInputItem, number>();
+    for (const inp of activePool) {
+      floatWeights.set(inp, (inp.rawWeight / totalActiveRawWeight) * 100.0);
+    }
 
-  if (marketRawWeightSum > 0 && eventRawWeightSum > 0) {
-    actualMarketNormalizedWeight = Math.min(
-      marketGroupCapWeight,
-      Number(((marketRawWeightSum / (marketRawWeightSum + eventRawWeightSum)) * 100).toFixed(1))
-    );
-    remainingEventPool = Number((100 - actualMarketNormalizedWeight).toFixed(1));
-  } else if (marketRawWeightSum > 0) {
-    actualMarketNormalizedWeight = marketGroupCapWeight;
-    remainingEventPool = 0;
-  } else if (eventRawWeightSum > 0) {
-    actualMarketNormalizedWeight = 0;
-    remainingEventPool = 100;
-  }
+    const aiItem = activePool.find((i) => i.group === "advisor" || i.id === "ahmed_ai");
+    const nonAiItems = activePool.filter((i) => i !== aiItem);
+    const marketPool = activePool.filter((i) => i.group === "market_context");
+    const eventPool = activePool.filter((i) => i.group === "event_specific");
 
-  for (const inp of marketSubInputs) {
-    const rawShare = marketRawWeightSum > 0 ? (inp.rawWeight / marketRawWeightSum) * actualMarketNormalizedWeight : 0;
-    inp.normalizedWeight = Math.min(40, Number(rawShare.toFixed(1)));
+    // Step 1: Cap AHMED AI advisor at <= 10.0%
+    if (aiItem && (floatWeights.get(aiItem) ?? 0) > 10.0) {
+      const unCappedAi = floatWeights.get(aiItem)!;
+      const excess = unCappedAi - 10.0;
+      floatWeights.set(aiItem, 10.0);
 
-    if (Math.abs(inp.rawScore) < 0.15 || inp.direction === 0) {
-      inp.direction = 0;
-      inp.weightedScore = 0;
-    } else {
-      inp.weightedScore = Number((inp.rawScore * inp.normalizedWeight).toFixed(1));
-      if (marketVote === 0) {
-        inp.dropReason = `Sub-input ${inp.direction === 1 ? "BULLISH" : "BEARISH"}, but Market Context group is NEUTRAL (< 2 of 3 market inputs point same way)`;
+      const nonAiRawSum = nonAiItems.reduce((acc, i) => acc + i.rawWeight, 0);
+      if (nonAiRawSum > 0) {
+        for (const other of nonAiItems) {
+          const cur = floatWeights.get(other) ?? 0;
+          floatWeights.set(other, cur + excess * (other.rawWeight / nonAiRawSum));
+        }
+      }
+    }
+
+    // Step 2: Cap Market Context group total at <= 40.0%
+    const marketFloatSum = marketPool.reduce((acc, i) => acc + (floatWeights.get(i) ?? 0), 0);
+    if (marketFloatSum > 40.0) {
+      const marketExcess = marketFloatSum - 40.0;
+      const scale = 40.0 / marketFloatSum;
+      for (const mInp of marketPool) {
+        floatWeights.set(mInp, (floatWeights.get(mInp) ?? 0) * scale);
+      }
+
+      if (eventPool.length > 0) {
+        const eventRawSum = eventPool.reduce((acc, i) => acc + i.rawWeight, 0);
+        if (eventRawSum > 0) {
+          for (const eInp of eventPool) {
+            const cur = floatWeights.get(eInp) ?? 0;
+            floatWeights.set(eInp, cur + marketExcess * (eInp.rawWeight / eventRawSum));
+          }
+        }
+      }
+    }
+
+    // Step 3: When >= 2 event_specific inputs are in activePool, cap any single input at <= 35.0%
+    if (eventPool.length >= 2) {
+      for (let iter = 0; iter < 4; iter++) {
+        let excessPool = 0;
+        const uncappedEvents: NewsDecisionInputItem[] = [];
+        for (const eInp of eventPool) {
+          const w = floatWeights.get(eInp) ?? 0;
+          if (w > 35.0) {
+            excessPool += w - 35.0;
+            floatWeights.set(eInp, 35.0);
+          } else if (w < 35.0) {
+            uncappedEvents.push(eInp);
+          }
+        }
+        if (excessPool <= 0 || uncappedEvents.length === 0) break;
+        const uncappedRawSum = uncappedEvents.reduce((acc, i) => acc + i.rawWeight, 0);
+        for (const uInp of uncappedEvents) {
+          const cur = floatWeights.get(uInp) ?? 0;
+          const share = uncappedRawSum > 0 ? uInp.rawWeight / uncappedRawSum : 1 / uncappedEvents.length;
+          floatWeights.set(uInp, cur + excessPool * share);
+        }
+      }
+    }
+
+    for (const inp of activePool) {
+      inp.normalizedWeight = Number((floatWeights.get(inp) ?? 0).toFixed(1));
+    }
+
+    // Step 4: Enforce exact rounding invariants (Market group <= 40.0%, AI <= 10.0%, total = 100.0% when eventPool.length > 0)
+    if (aiItem && aiItem.normalizedWeight > 10.0) {
+      aiItem.normalizedWeight = 10.0;
+    }
+
+    const roundedMarketSum = Number(marketPool.reduce((acc, i) => acc + i.normalizedWeight, 0).toFixed(1));
+    if (roundedMarketSum > 40.0 && marketPool.length > 0) {
+      const mOver = Number((roundedMarketSum - 40.0).toFixed(1));
+      marketPool[0].normalizedWeight = Number((marketPool[0].normalizedWeight - mOver).toFixed(1));
+    }
+
+    if (eventPool.length > 0) {
+      const roundedSum = Number(activePool.reduce((acc, i) => acc + i.normalizedWeight, 0).toFixed(1));
+      const residual = Number((100.0 - roundedSum).toFixed(1));
+      if (residual !== 0) {
+        // Pick an event_specific input to absorb the 0.1% rounding residual without violating the 35% cap when >=2 event inputs exist
+        let target = eventPool.find((i) => eventPool.length < 2 || i.normalizedWeight + residual <= 35.0) || eventPool[0];
+        target.normalizedWeight = Number((target.normalizedWeight + residual).toFixed(1));
       }
     }
   }
 
-  const nonMarketInputs = [...eventSpecificInputs, ...advisorInputs];
-  for (const inp of nonMarketInputs) {
-    if (inp.rawWeight <= 0 || eventRawWeightSum <= 0) {
+  // Compute weightedScore = rawScore x normalizedWeight for every input
+  for (const inp of allActiveInputs) {
+    if (inp.isInfoOnly || inp.rawWeight <= 0 || inp.normalizedWeight <= 0) {
       inp.normalizedWeight = 0;
       inp.weightedScore = 0;
       continue;
     }
-    const maxCap = inp.group === "advisor" ? 10 : 40;
-    const rawShare = (inp.rawWeight / eventRawWeightSum) * remainingEventPool;
-    inp.normalizedWeight = Math.min(maxCap, Number(rawShare.toFixed(1)));
-
     if (Math.abs(inp.rawScore) < 0.15 || inp.direction === 0) {
       inp.direction = 0;
+      inp.rawScore = 0;
       inp.weightedScore = 0;
     } else {
       inp.weightedScore = Number((inp.rawScore * inp.normalizedWeight).toFixed(1));
     }
   }
 
-  const allActiveInputs = [...marketSubInputs, ...eventSpecificInputs, ...advisorInputs];
-
-  const effectiveScoreInputs =
-    marketVote === 0
-      ? [...eventSpecificInputs, ...advisorInputs]
-      : allActiveInputs;
-
-  const totalScoreFloat = effectiveScoreInputs.reduce((acc, i) => acc + i.weightedScore, 0);
-  const score = Math.max(-100, Math.min(100, Math.round(totalScoreFloat)));
-
   for (const inp of allActiveInputs) {
+    const effWeight = inp.normalizedWeight;
+    const effWeightedScore = inp.weightedScore;
+    const formulaStr = inp.isInfoOnly
+      ? `${inp.rawScore.toFixed(2)} x 0.0% (Info Only) = 0.0`
+      : `${inp.rawScore >= 0 ? "+" : ""}${inp.rawScore.toFixed(2)} x ${effWeight.toFixed(1)}% = ${effWeightedScore >= 0 ? "+" : ""}${effWeightedScore.toFixed(1)}`;
+
     auditLog.push({
       input: inp.name,
       group: (inp.group as "market_context" | "event_specific" | "advisor") || "event_specific",
@@ -775,9 +1058,10 @@ export function newsDecision(
       direction: inp.direction === 1 ? "BULLISH" : inp.direction === -1 ? "BEARISH" : "NEUTRAL",
       source: inp.source || "Live Engine",
       ageSeconds: inp.ageMs !== undefined ? Math.round(inp.ageMs / 1000) : 0,
-      originalWeight: inp.id === "history" && inp.isInfoOnly ? 10 : inp.rawWeight,
+      originalWeight: inp.id === "history" && inp.isInfoOnly ? 15 : inp.rawWeight,
       renormalizedWeight: inp.normalizedWeight,
-      weightedScore: marketVote === 0 && inp.group === "market_context" ? 0 : inp.weightedScore,
+      weightedScore: effWeightedScore,
+      formula: formulaStr,
       dropped: inp.isInfoOnly ? "Info Only (Wt 0)" : "No",
       reason: inp.dropReason || "Active",
     });
@@ -795,41 +1079,58 @@ export function newsDecision(
   ];
   auditLog.sort((a, b) => canonicalOrder.indexOf(a.input) - canonicalOrder.indexOf(b.input));
 
-  // Decision Gates
+  // Raw sum of weighted rows (kept in details; headline score is null when < 2 active non-AI event inputs exist)
+  const rawSumWeightedScore = Number(auditLog.reduce((acc, row) => acc + row.weightedScore, 0).toFixed(1));
+  const marketContextGroupWeight = Number(
+    auditLog
+      .filter((row) => row.group === "market_context")
+      .reduce((acc, row) => acc + row.renormalizedWeight, 0)
+      .toFixed(1)
+  );
+
+  // ============================================================================
+  // EXACT DIRECTIONAL DECISION RULE (Round 7 Item 2, Round 8 Item 4, Round 9 Item 1 & 4):
+  // Verdict is BULLISH or BEARISH iff ALL conditions pass:
+  //   1. At least 2 active non-AI event-specific inputs (|rawScore| >= 0.15, normalizedWeight > 0)
+  //      agreeing on the same direction (AHMED AI is advisor-only and NEVER counts as an event input).
+  //      If fewer than 2 active non-AI event inputs exist, verdict is WAIT and headline score is null ("no call").
+  //   2. Market context group total final weight <= 40.0%, and when >= 2 event inputs are active
+  //      no single active input has final normalizedWeight > 35.0% (otherwise verdict MUST be WAIT).
+  //   3. Headline score = sum of weighted rows has |score| >= 20.0 in the agreed direction,
+  //      and opposing event-specific weighted strength < 50% of agreeing strength.
+  //   4. Calibrated confidence >= 40%.
+  // If ANY condition fails, verdict is WAIT and reason states the exact failed condition(s) + numbers.
+  // For WAIT, header shows "no call" while keeping the single consistent confidence & rawSumWeightedScore in details.
+  // ============================================================================
   let word: DecisionWord = "WAIT";
   let reason = "";
 
-  const activeWeightedInputs = allActiveInputs.filter((i) => i.normalizedWeight > 0);
   const activeWeightedEventInputs = eventSpecificInputs.filter(
-    (i) => i.normalizedWeight > 0 && i.direction !== 0
+    (i) => !i.isInfoOnly && i.normalizedWeight > 0 && i.direction !== 0 && Math.abs(i.rawScore) >= 0.15
   );
-  const totalNormalizedWeight = Number(
-    allActiveInputs.reduce((acc, i) => acc + i.normalizedWeight, 0).toFixed(1)
-  );
+  const hasTwoActiveEventInputs = activeWeightedEventInputs.length >= 2;
 
   const bullEventInputs = activeWeightedEventInputs.filter((i) => i.direction === 1);
   const bearEventInputs = activeWeightedEventInputs.filter((i) => i.direction === -1);
 
-  let targetDir: 1 | -1 | 0 = 0;
+  let candidateDir: 1 | -1 | 0 = 0;
   let agreeingEventInputs: NewsDecisionInputItem[] = [];
   let opposingEventInputs: NewsDecisionInputItem[] = [];
 
-  if (marketVote !== 0) {
-    targetDir = marketVote;
-    agreeingEventInputs = activeWeightedEventInputs.filter((i) => i.direction === marketVote);
-    opposingEventInputs = activeWeightedEventInputs.filter((i) => i.direction === -marketVote);
+  if (bullEventInputs.length > bearEventInputs.length) {
+    candidateDir = 1;
+    agreeingEventInputs = bullEventInputs;
+    opposingEventInputs = bearEventInputs;
+  } else if (bearEventInputs.length > bullEventInputs.length) {
+    candidateDir = -1;
+    agreeingEventInputs = bearEventInputs;
+    opposingEventInputs = bullEventInputs;
+  } else if (bullEventInputs.length > 0) {
+    candidateDir = rawSumWeightedScore >= 0 ? 1 : -1;
+    agreeingEventInputs = candidateDir === 1 ? bullEventInputs : bearEventInputs;
+    opposingEventInputs = candidateDir === 1 ? bearEventInputs : bullEventInputs;
   } else {
-    if (bullEventInputs.length >= 2) {
-      targetDir = 1;
-      agreeingEventInputs = bullEventInputs;
-      opposingEventInputs = bearEventInputs;
-    } else if (bearEventInputs.length >= 2) {
-      targetDir = -1;
-      agreeingEventInputs = bearEventInputs;
-      opposingEventInputs = bullEventInputs;
-    } else {
-      targetDir = 0;
-    }
+    candidateDir = rawSumWeightedScore > 0 ? 1 : rawSumWeightedScore < 0 ? -1 : 0;
   }
 
   const agreeingWeightedStrength = Number(
@@ -839,73 +1140,92 @@ export function newsDecision(
     opposingEventInputs.reduce((sum, i) => sum + Math.abs(i.weightedScore), 0).toFixed(1)
   );
 
-  if (activeWeightedInputs.length < 2 || eventSpecificInputs.filter((i) => i.normalizedWeight > 0).length === 0 || totalNormalizedWeight <= 40) {
+  const maxWeightItem = activePool.reduce(
+    (max, i) => (i.normalizedWeight > (max?.normalizedWeight ?? 0) ? i : max),
+    null as NewsDecisionInputItem | null
+  );
+  const maxSingleWeight = maxWeightItem?.normalizedWeight ?? 0;
+
+  const agreeingCountForConf = agreeingEventInputs.length + (marketVote !== 0 && marketVote === candidateDir ? 1 : 0);
+  const computedRawConf = Math.round(30 + Math.abs(rawSumWeightedScore) * 0.4 + Math.max(0, agreeingCountForConf - 2) * 5);
+  const candidateWord: DecisionWord = candidateDir === 1 ? "BULLISH" : candidateDir === -1 ? "BEARISH" : "WAIT";
+  const cal = applyConfidenceCalibration(computedRawConf, preReleasePhase, candidateWord);
+
+  // Round 9 Item 1: If fewer than 2 active non-AI event inputs exist, headline score is null ("no call")
+  const score: number | null = hasTwoActiveEventInputs ? rawSumWeightedScore : null;
+
+  const failedReasons: string[] = [];
+
+  // Condition 1: At least 2 active non-AI event inputs agreeing
+  if (agreeingEventInputs.length < 2) {
+    if (activeWeightedEventInputs.length === 0) {
+      const fcastItem = eventSpecificInputs.find((i) => i.id === "forecast");
+      const fcastDetail = fcastItem
+        ? `Forecast vs Previous rawScore=${fcastItem.rawScore.toFixed(2)} (dead zone |rawScore| < 0.15)`
+        : "Forecast vs Previous missing";
+      failedReasons.push(`only 0 active non-AI event inputs (${fcastDetail}), need >= 2 agreeing -> headline score = null (no call)`);
+    } else if (activeWeightedEventInputs.length === 1) {
+      const activeListStr = activeWeightedEventInputs
+        .map((i) => `${i.name} ${i.direction === 1 ? "BULLISH" : "BEARISH"} [rawScore ${i.rawScore >= 0 ? "+" : ""}${i.rawScore.toFixed(2)}]`)
+        .join(", ");
+      failedReasons.push(`only 1 active non-AI event input (${activeListStr}), need >= 2 agreeing -> headline score = null (no call)`);
+    } else {
+      failedReasons.push(`active non-AI event inputs conflict (${bullEventInputs.length} BULLISH vs ${bearEventInputs.length} BEARISH), need >= 2 agreeing`);
+    }
+  }
+
+  // Condition 2a: Market context group total final weight <= 40.0%
+  if (marketContextGroupWeight > 40.0) {
+    failedReasons.push(
+      `market context group final weight = ${marketContextGroupWeight.toFixed(1)}% exceeds 40.0% max cap`
+    );
+  }
+
+  // Condition 2b: No single input above 35% final weight (Round 9 Item 1: applies ONLY when >= 2 event inputs are active)
+  if (hasTwoActiveEventInputs && maxSingleWeight > 35.0 && maxWeightItem) {
+    failedReasons.push(
+      `single input final weight ${maxWeightItem.name} = ${maxSingleWeight.toFixed(1)}% exceeds 35.0% max cap`
+    );
+  }
+
+  // Condition 3a: Opposing event-specific strength < 50% of agreeing
+  if (hasTwoActiveEventInputs && opposingWeightedStrength > 0 && opposingWeightedStrength >= 0.5 * agreeingWeightedStrength) {
+    failedReasons.push(
+      `event input conflict (opposing weighted strength ${opposingWeightedStrength.toFixed(1)} >= 50% of agreeing ${agreeingWeightedStrength.toFixed(1)})`
+    );
+  }
+
+  // Condition 3b: Headline score >= 20 in candidate direction (checked when headline score is not null)
+  if (score !== null) {
+    const scorePasses =
+      (candidateDir === 1 && score >= 20.0) || (candidateDir === -1 && score <= -20.0);
+    if (!scorePasses) {
+      const reqScoreStr =
+        candidateDir === 1 ? ">= +20.0" : candidateDir === -1 ? "<= -20.0" : "|score| >= 20.0";
+      failedReasons.push(`headline score = ${score >= 0 ? "+" : ""}${score.toFixed(1)}, need ${reqScoreStr}`);
+    }
+  }
+
+  // Condition 4: Calibrated confidence >= 40%
+  if (cal.calibrated < 40) {
+    failedReasons.push(`confidence = ${cal.calibrated}%, need >= 40%`);
+  }
+
+  // Round 9 Item 4: Use ONE confidence value everywhere (never 0% in header while reason says 34%).
+  const confidence = cal.calibrated;
+  const rawConfidence = computedRawConf;
+  const confidenceStatus: "calibrated" | "calibrating" = cal.status;
+
+  if (failedReasons.length > 0) {
     word = "WAIT";
-    reason = !hasForecast
-      ? "No forecast yet; too few active inputs after 40% single-input weight cap."
-      : "Too few active inputs after 40% single-input weight cap; standing aside (WAIT).";
-  } else if (!hasForecast && agreeingEventInputs.length === 0) {
-    word = "WAIT";
-    reason = "No forecast yet.";
-  } else if (hasForecast && hasPrevious && evt.forecastNum === evt.previousNum && agreeingEventInputs.length === 0) {
-    word = "WAIT";
-    reason = "No clear surprise expected (forecast equals previous).";
-  } else if (marketVote === 0 && targetDir === 0) {
-    word = "WAIT";
-    const nonNeutralMkt = bullMarketSubs.length + bearMarketSubs.length;
-    const maxEventAgree = Math.max(bullEventInputs.length, bearEventInputs.length);
-    reason = `Market context is neutral (${nonNeutralMkt} of 3 market inputs non-neutral; requires >= 2 pointing same way), and only ${maxEventAgree} active event-specific input(s) (requires 2 when market context is neutral).`;
-  } else if (marketVote !== 0 && agreeingEventInputs.length === 0) {
-    word = "WAIT";
-    reason = `Event-specific catalysts are neutral or oppose Market context; requires at least one event input agreeing with Market context (${marketVote === 1 ? "Bullish" : "Bearish"}).`;
-  } else if (opposingWeightedStrength > 0 && opposingWeightedStrength >= 0.5 * agreeingWeightedStrength) {
-    word = "WAIT";
-    reason = `Conflict between event catalysts (opposing weighted strength ${opposingWeightedStrength} is >= 50% of agreeing ${agreeingWeightedStrength}); standing aside (WAIT).`;
+    reason = `WAIT (no call) — Failed gate(s): ${failedReasons.join("; ")} [details: rawSumWeighted=${rawSumWeightedScore >= 0 ? "+" : ""}${rawSumWeightedScore.toFixed(1)}, confidence=${confidence}%, marketGroupWeight=${marketContextGroupWeight.toFixed(1)}%].`;
   } else {
-    word = targetDir === 1 ? "BULLISH" : "BEARISH";
+    word = candidateDir === 1 ? "BULLISH" : "BEARISH";
     const agreeingNames = agreeingEventInputs.map((i) => i.name).join(", ");
-    if (marketVote !== 0) {
-      const mktCount = marketVote === 1 ? bullMarketSubs.length : bearMarketSubs.length;
-      reason = `Market context (${mktCount}/3 inputs ${word}) + ${agreeingEventInputs.length} event catalyst(s) (${agreeingNames}) agree on ${word}.`;
-    } else {
-      reason = `Market context is neutral, but ${agreeingEventInputs.length} active event-specific catalysts (${agreeingNames}) agree on ${word}.`;
-    }
+    reason = `PASS (${word}) — ${agreeingEventInputs.length} active non-AI event inputs (${agreeingNames}) agree; score = ${score! >= 0 ? "+" : ""}${score!.toFixed(1)} (|score| >= 20.0), confidence = ${confidence}% (>= 40%), market group weight = ${marketContextGroupWeight.toFixed(1)}% (<= 40.0%), max single input weight = ${maxSingleWeight.toFixed(1)}% (<= 35.0%).`;
   }
 
-  // Score & Confidence Gates
-  let confidence = 0;
-  let rawConfidence = 0;
-  let confidenceStatus: "calibrated" | "calibrating" = "calibrating";
-
-  if (word !== "WAIT") {
-    const scoreMatchesDirection =
-      (word === "BULLISH" && score >= 20) || (word === "BEARISH" && score <= -20);
-
-    if (!scoreMatchesDirection) {
-      word = "WAIT";
-      reason = `Net score (${score}) is below the ±20 minimum directional threshold; standing aside (WAIT).`;
-    } else {
-      const agreeingCount = agreeingEventInputs.length + (marketVote !== 0 ? 1 : 0);
-      const computedRaw = Math.round(30 + Math.abs(score) * 0.4 + Math.max(0, agreeingCount - 2) * 5);
-      const cal = applyConfidenceCalibration(computedRaw, preReleasePhase, word);
-      confidence = cal.calibrated;
-      rawConfidence = computedRaw;
-      confidenceStatus = cal.status;
-
-      if (confidence < 40) {
-        word = "WAIT";
-        reason = `Confidence (${confidence}%) is below the 40% minimum directional threshold; standing aside (WAIT).`;
-      }
-    }
-  }
-
-  if (word === "WAIT") {
-    confidence = 0;
-    rawConfidence = 0;
-    confidenceStatus = "calibrating";
-  }
-
-  const scoreAbs = Math.abs(score);
+  const scoreAbs = score !== null ? Math.abs(score) : 0;
   const confidenceLean: "Lean: unproven (weak)" | "Lean: unproven (moderate)" | "-" =
     word === "WAIT" || (word as string) === "SKIP"
       ? "-"
@@ -915,9 +1235,11 @@ export function newsDecision(
 
   const has15LivePerBucket = checkLiveResolvedSamplesSufficient();
 
-  let confidenceDisplay = "-";
-  if (word === "WAIT" || (word as string) === "SKIP") {
+  let confidenceDisplay = "no call";
+  if ((word as string) === "SKIP") {
     confidenceDisplay = "-";
+  } else if (word === "WAIT") {
+    confidenceDisplay = "no call";
   } else if ((preReleasePhase as string) === "post" && (word as any) === "CONFIRMED") {
     confidenceDisplay = `${confidence}%`;
   } else {
@@ -927,6 +1249,13 @@ export function newsDecision(
       confidenceDisplay = confidenceLean;
     }
   }
+
+  const scoreDisplay =
+    (word as string) === "SKIP"
+      ? "-"
+      : word === "WAIT" || score === null
+      ? "no call"
+      : `${score >= 0 ? "+" : ""}${score.toFixed(1)}`;
 
   const calibrationBucket = deriveCalibrationBucket(confidence, preReleasePhase, word);
 
@@ -943,7 +1272,9 @@ export function newsDecision(
     confidenceLean,
     confidenceStatus,
     rawConfidence,
-    score: word === "WAIT" ? Math.max(-19, Math.min(19, score)) : score,
+    score,
+    scoreDisplay,
+    rawSumWeightedScore,
     reason,
     inputs: allActiveInputs,
     phase: preReleasePhase,
@@ -995,103 +1326,14 @@ export function calcWilsonCI(hits: number, n: number, z = 1.95996): { lowerPct: 
 
 export const calcCI = calcWilsonCI;
 
-function loadHistoricalCandlesForBacktest(): Array<{ openTimeMs: number; closeTimeMs: number; open: number; close: number }> {
-  const candidates = [
-    path.resolve(DATA_DIR, "candles.json"),
-    path.resolve("/app/applet/data/candles.json"),
-  ];
-  for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) {
-        const raw = JSON.parse(fs.readFileSync(p, "utf-8"));
-        const d1 = Array.isArray(raw.D1) ? raw.D1 : [];
-        return d1
-          .map((c: any) => {
-            const openTimeMs = new Date(c.openTime).getTime();
-            return {
-              openTimeMs,
-              closeTimeMs: openTimeMs + 24 * 60 * 60 * 1000,
-              open: Number(c.open),
-              close: Number(c.close),
-            };
-          })
-          .filter((c: any) => !isNaN(c.openTimeMs) && c.close > 0)
-          .sort((a: any, b: any) => a.openTimeMs - b.openTimeMs);
-      }
-    } catch {}
-  }
-  return [];
-}
-
-function computePointInTimeMacroAtT60m(
-  d1Candles: Array<{ openTimeMs: number; closeTimeMs: number; open: number; close: number }>,
-  tMinus60m: number,
-  priorIndicatorReleases: typeof CHRONOLOGICAL_RELEASE_LEDGER
-): {
-  goldTrendRawScore: number;
-  goldPrice: number;
-  keyLevelsText: string;
-  dollarProxyPct: number;
-  dollarGoldScore: number;
-  us10yChangeBp: number;
-} {
-  const closedPrior = d1Candles.filter((c) => c.closeTimeMs <= tMinus60m);
-  if (closedPrior.length >= 5) {
-    const last5 = closedPrior.slice(-5);
-    const latest = last5[last5.length - 1];
-    const prev1 = last5[last5.length - 2];
-    const first = last5[0];
-    const sma5 = last5.reduce((s, c) => s + c.close, 0) / last5.length;
-    const pct1d = ((latest.close - latest.open) / latest.open) * 100;
-    const pct2d = ((latest.close - prev1.open) / prev1.open) * 100;
-    const pct5d = ((latest.close - first.open) / first.open) * 100;
-    const pctVsSma = ((latest.close - sma5) / sma5) * 100;
-
-    const goldTrendRawScore = Math.max(
-      -1,
-      Math.min(1, Number((pctVsSma * 0.45 + pct5d * 0.22 + pct1d * 0.35).toFixed(3)))
-    );
-
-    const lastPriorRel =
-      priorIndicatorReleases.length > 0
-        ? priorIndicatorReleases[priorIndicatorReleases.length - 1]
-        : null;
-    const priorSurpriseBias = lastPriorRel
-      ? Math.max(-0.15, Math.min(0.15, (lastPriorRel.actual - lastPriorRel.forecast) * 0.02))
-      : 0;
-
-    const dollarProxyPct = Number((-pct1d * 0.22 - pct2d * 0.08 + priorSurpriseBias).toFixed(2));
-    const dollarGoldScore = Math.max(-1, Math.min(1, Number((-dollarProxyPct / 0.35).toFixed(3))));
-
-    const us10yChangeBp = Number(((-pct5d * 1.15 - pct1d * 1.4) + priorSurpriseBias * 8).toFixed(1));
-
-    return {
-      goldTrendRawScore,
-      goldPrice: latest.close,
-      keyLevelsText: `$${latest.close.toFixed(1)} vs 5d SMA $${sma5.toFixed(1)} (${pct5d >= 0 ? "+" : ""}${pct5d.toFixed(2)}%)`,
-      dollarProxyPct,
-      dollarGoldScore,
-      us10yChangeBp,
-    };
-  }
-  return {
-    goldTrendRawScore: 0,
-    goldPrice: 3500,
-    keyLevelsText: "$3500.0 (flat)",
-    dollarProxyPct: 0,
-    dollarGoldScore: 0,
-    us10yChangeBp: 0,
-  };
-}
-
 export interface BacktestEvaluationSummary {
   sampleName: string;
+  status: "none / unverified";
   totalReleases: number;
   directionalCalls: number;
   bullishCalls: number;
   bearishCalls: number;
   waitCalls: number;
-
   threshold50Cents: {
     hits: number;
     misses: number;
@@ -1101,7 +1343,6 @@ export interface BacktestEvaluationSummary {
     baselineAlwaysBearish: { hits: number; hitRatePct: number; ci95Pct: string };
     baselineRandom: { hitRatePct: number; ci95Pct: string };
   };
-
   threshold03Percent: {
     hits: number;
     misses: number;
@@ -1111,7 +1352,6 @@ export interface BacktestEvaluationSummary {
     baselineAlwaysBearish: { hits: number; hitRatePct: number; ci95Pct: string };
     baselineRandom: { hitRatePct: number; ci95Pct: string };
   };
-
   buckets: Array<{
     bucket: CalibrationBucketId;
     min: number;
@@ -1137,6 +1377,8 @@ export interface SurpriseBandDetail {
 }
 
 export interface PostReleaseWalkForwardReport {
+  status: "NOT_POSSIBLE_WITH_THIS_DATA" | "VERIFIED";
+  provenanceNote: string;
   totalEvaluated: number;
   confirmedRegime: {
     total: number;
@@ -1194,11 +1436,11 @@ export interface PostReleaseWalkForwardReport {
 }
 
 export interface WalkForwardBacktestReport {
+  status: "none / unverified";
   trainingSummary: BacktestEvaluationSummary;
   holdoutSummary: BacktestEvaluationSummary;
   combinedSummary: BacktestEvaluationSummary;
   postReleaseReport: PostReleaseWalkForwardReport;
-
   totalReleases: number;
   directionalCalls: number;
   overallHitRatePct: number | null;
@@ -1207,516 +1449,125 @@ export interface WalkForwardBacktestReport {
   buckets: CalibrationBucketRow[];
 }
 
-function evaluateSet(
-  ledgerSlice: typeof CHRONOLOGICAL_RELEASE_LEDGER,
-  d1Candles: ReturnType<typeof loadHistoricalCandlesForBacktest>,
-  sampleName: string
-): BacktestEvaluationSummary {
-  let totalReleases = 0;
-  let waitCalls = 0;
-  let directionalCalls = 0;
-  let bullishCalls = 0;
-  let bearishCalls = 0;
-
-  let hits50 = 0;
-  let misses50 = 0;
-  let hits03 = 0;
-  let misses03 = 0;
-
-  let alwaysBullHits50 = 0;
-  let alwaysBearHits50 = 0;
-  let alwaysBullHits03 = 0;
-  let alwaysBearHits03 = 0;
-
+function buildEmptyUnverifiedSummary(sampleName: string): BacktestEvaluationSummary {
   const bucketIds: CalibrationBucketId[] = ["0-29", "30-39", "40-49", "50-59", "60-69", "70+"];
-  const bucketDataMap: Record<CalibrationBucketId, { total: number; hits50: number; hits03: number; alwaysBull03: number; alwaysBear03: number }> = {
-    "0-29": { total: 0, hits50: 0, hits03: 0, alwaysBull03: 0, alwaysBear03: 0 },
-    "30-39": { total: 0, hits50: 0, hits03: 0, alwaysBull03: 0, alwaysBear03: 0 },
-    "40-49": { total: 0, hits50: 0, hits03: 0, alwaysBull03: 0, alwaysBear03: 0 },
-    "50-59": { total: 0, hits50: 0, hits03: 0, alwaysBull03: 0, alwaysBear03: 0 },
-    "60-69": { total: 0, hits50: 0, hits03: 0, alwaysBull03: 0, alwaysBear03: 0 },
-    "70+": { total: 0, hits50: 0, hits03: 0, alwaysBull03: 0, alwaysBear03: 0 },
-  };
-
-  for (const rel of ledgerSlice) {
-    totalReleases++;
-    const releaseMs = new Date(rel.timestampUtc).getTime();
-    const tMinus60m = releaseMs - 60 * 60_000;
-
-    const priorSameIndicator = CHRONOLOGICAL_RELEASE_LEDGER.filter(
-      (r) => r.indicatorKey === rel.indicatorKey && new Date(r.timestampUtc).getTime() <= tMinus60m
-    );
-
-    const pitMacro = computePointInTimeMacroAtT60m(d1Candles, tMinus60m, priorSameIndicator);
-    const macroAtT60m: LiveMacroData = {
-      dxy: null,
-      gold4h: null,
-      us10y: {
-        yield: 4.2,
-        change: Number((pitMacro.us10yChangeBp / 100).toFixed(3)),
-        changeBp: pitMacro.us10yChangeBp,
-        direction: pitMacro.us10yChangeBp > 0.5 ? "UP" : pitMacro.us10yChangeBp < -0.5 ? "DOWN" : "FLAT",
-        source: "CNBC_LIVE",
-        lastUpdated: tMinus60m,
-        ageMs: 5_000,
-        isStale: false,
-      },
-      dollarProxy: {
-        compositeChangePct: pitMacro.dollarProxyPct,
-        goldDirection: pitMacro.dollarGoldScore >= 0.15 ? 1 : pitMacro.dollarGoldScore <= -0.15 ? -1 : 0,
-        goldScore: pitMacro.dollarGoldScore,
-        pairsUsed: ["EURUSD", "USDJPY", "GBPUSD"],
-        lastUpdated: tMinus60m,
-        ageMs: 5_000,
-        isStale: false,
-      },
-      goldTrend: {
-        price: pitMacro.goldPrice,
-        open24h: pitMacro.goldPrice,
-        high24h: pitMacro.goldPrice + 12,
-        low24h: pitMacro.goldPrice - 12,
-        pivot: pitMacro.goldPrice,
-        h4Open: pitMacro.goldPrice,
-        h4Close: pitMacro.goldPrice,
-        h4ChangePct: Number((pitMacro.goldTrendRawScore * 0.45).toFixed(2)),
-        h4Ema10: pitMacro.goldPrice,
-        bias: pitMacro.goldTrendRawScore >= 0.15 ? "BULLISH" : pitMacro.goldTrendRawScore <= -0.15 ? "BEARISH" : "NEUTRAL",
-        direction: pitMacro.goldTrendRawScore >= 0.15 ? 1 : pitMacro.goldTrendRawScore <= -0.15 ? -1 : 0,
-        rawScore: pitMacro.goldTrendRawScore,
-        keyLevelsText: pitMacro.keyLevelsText,
-        lastUpdated: tMinus60m,
-        ageMs: 5_000,
-        isStale: false,
-      },
-      predictionMarket: null,
-      discoveredMarkets: {},
-      timestamp: tMinus60m,
-    };
-
-    let pmOverride: DiscoveredPredictionMarket | null = null;
-    if ((rel.indicatorKey === "cpi" || rel.indicatorKey === "nfp" || rel.indicatorKey === "unemployment_claims") && priorSameIndicator.length >= 1) {
-      const prevRel = priorSameIndicator[priorSameIndicator.length - 1];
-      const prevSurprise = prevRel.actual - prevRel.forecast;
-      const forecastGap = rel.forecast - rel.previous;
-      const pmImpliedEv = Number((rel.forecast + forecastGap * 0.35 + prevSurprise * 0.25).toFixed(2));
-      pmOverride = {
-        category: rel.indicatorKey === "unemployment_claims" ? "UNEMPLOYMENT" : rel.indicatorKey === "nfp" ? "NFP" : "CPI_MOM",
-        kalshiSeriesTicker: "KXMACRO",
-        combinedImpliedEv: pmImpliedEv,
-        summaryLabel: `Implied: ${pmImpliedEv}${rel.unit || ""}`,
-        lastUpdated: tMinus60m,
-      };
-    }
-
-    const unitSuffix = rel.unit || "";
-    const synthEvent = {
-      id: rel.id,
-      title: rel.title,
-      country: "USD",
-      impact: rel.impact,
-      ahmedTier: rel.ahmedTier,
-      isSpeech: false,
-      timeUtc: rel.timestampUtc,
-      forecastStr: `${rel.forecast}${unitSuffix}`,
-      previousStr: `${rel.previous}${unitSuffix}`,
-      forecastNum: rel.forecast,
-      previousNum: rel.previous,
-      actualStr: null,
-      actualNum: null,
-      minutesUntil: 60,
-      isReleased: false,
-    };
-
-    const dec = newsDecision(synthEvent, {
-      macro: macroAtT60m,
-      asOfTimeMs: tMinus60m,
-      skipPersistence: true,
-      matchedPmOverride: pmOverride,
-    });
-
-    const entryPrice = pitMacro.goldPrice || 2700;
-    const reqMove03 = entryPrice * 0.0003;
-    const reqMove50 = 0.50;
-
-    const actualMove15m = rel.goldMove15m;
-
-    if (dec.word === "WAIT" || dec.word === "SKIP") {
-      waitCalls++;
-    } else {
-      directionalCalls++;
-      if (dec.word === "BULLISH") bullishCalls++;
-      else bearishCalls++;
-
-      const predictedDir = dec.word === "BULLISH" ? 1 : -1;
-
-      const hit50 = predictedDir * actualMove15m >= reqMove50;
-      if (hit50) hits50++;
-      else misses50++;
-
-      const hit03 = predictedDir * actualMove15m >= reqMove03;
-      if (hit03) hits03++;
-      else misses03++;
-
-      const bullHit50 = actualMove15m >= reqMove50;
-      const bearHit50 = -actualMove15m >= reqMove50;
-      const bullHit03 = actualMove15m >= reqMove03;
-      const bearHit03 = -actualMove15m >= reqMove03;
-
-      if (bullHit50) alwaysBullHits50++;
-      if (bearHit50) alwaysBearHits50++;
-      if (bullHit03) alwaysBullHits03++;
-      if (bearHit03) alwaysBearHits03++;
-
-      const bId = dec.calibrationBucket || deriveCalibrationBucket(dec.confidence, "pre", dec.word);
-      if (bId && bucketDataMap[bId]) {
-        bucketDataMap[bId].total++;
-        if (hit50) bucketDataMap[bId].hits50++;
-        if (hit03) bucketDataMap[bId].hits03++;
-        if (bullHit03) bucketDataMap[bId].alwaysBull03++;
-        if (bearHit03) bucketDataMap[bId].alwaysBear03++;
-      }
-    }
-  }
-
-  const hitRate50 = directionalCalls > 0 ? Math.round((hits50 / directionalCalls) * 100) : null;
-  const hitRate03 = directionalCalls > 0 ? Math.round((hits03 / directionalCalls) * 100) : null;
-
-  const abHitRate50 = directionalCalls > 0 ? Math.round((alwaysBullHits50 / directionalCalls) * 100) : 0;
-  const abearHitRate50 = directionalCalls > 0 ? Math.round((alwaysBearHits50 / directionalCalls) * 100) : 0;
-  const randHitRate50 = Math.round(0.5 * abHitRate50 + 0.5 * abearHitRate50);
-
-  const abHitRate03 = directionalCalls > 0 ? Math.round((alwaysBullHits03 / directionalCalls) * 100) : 0;
-  const abearHitRate03 = directionalCalls > 0 ? Math.round((alwaysBearHits03 / directionalCalls) * 100) : 0;
-  const randHitRate03 = Math.round(0.5 * abHitRate03 + 0.5 * abearHitRate03);
-
-  const buckets = bucketIds.map((id) => {
-    const bd = bucketDataMap[id];
-    const hr50 = bd.total > 0 ? Math.round((bd.hits50 / bd.total) * 100) : null;
-    const hr03 = bd.total > 0 ? Math.round((bd.hits03 / bd.total) * 100) : null;
-    const rand03 = bd.total > 0 ? Math.round((0.5 * bd.alwaysBull03 + 0.5 * bd.alwaysBear03) / bd.total * 100) : null;
-    return {
+  return {
+    sampleName,
+    status: "none / unverified",
+    totalReleases: 0,
+    directionalCalls: 0,
+    bullishCalls: 0,
+    bearishCalls: 0,
+    waitCalls: 0,
+    threshold50Cents: {
+      hits: 0,
+      misses: 0,
+      hitRatePct: null,
+      ci95Pct: "N/A",
+      baselineAlwaysBullish: { hits: 0, hitRatePct: 0, ci95Pct: "N/A" },
+      baselineAlwaysBearish: { hits: 0, hitRatePct: 0, ci95Pct: "N/A" },
+      baselineRandom: { hitRatePct: 0, ci95Pct: "N/A" },
+    },
+    threshold03Percent: {
+      hits: 0,
+      misses: 0,
+      hitRatePct: null,
+      ci95Pct: "N/A",
+      baselineAlwaysBullish: { hits: 0, hitRatePct: 0, ci95Pct: "N/A" },
+      baselineAlwaysBearish: { hits: 0, hitRatePct: 0, ci95Pct: "N/A" },
+      baselineRandom: { hitRatePct: 0, ci95Pct: "N/A" },
+    },
+    buckets: bucketIds.map((id) => ({
       bucket: id,
       min: id === "0-29" ? 0 : id === "30-39" ? 30 : id === "40-49" ? 40 : id === "50-59" ? 50 : id === "60-69" ? 60 : 70,
       max: id === "0-29" ? 29 : id === "30-39" ? 39 : id === "40-49" ? 49 : id === "50-59" ? 59 : id === "60-69" ? 69 : 100,
-      total: bd.total,
-      hits50Cents: bd.hits50,
-      hitRate50CentsPct: hr50,
-      ci95_50Cents: calcCI(bd.hits50, bd.total).str,
-      hits03Percent: bd.hits03,
-      hitRate03PercentPct: hr03,
-      ci95_03Percent: calcCI(bd.hits03, bd.total).str,
-      baselineRandom03Pct: rand03,
-    };
-  });
-
-  return {
-    sampleName,
-    totalReleases,
-    directionalCalls,
-    bullishCalls,
-    bearishCalls,
-    waitCalls,
-    threshold50Cents: {
-      hits: hits50,
-      misses: misses50,
-      hitRatePct: hitRate50,
-      ci95Pct: calcCI(hits50, directionalCalls).str,
-      baselineAlwaysBullish: { hits: alwaysBullHits50, hitRatePct: abHitRate50, ci95Pct: calcCI(alwaysBullHits50, directionalCalls).str },
-      baselineAlwaysBearish: { hits: alwaysBearHits50, hitRatePct: abearHitRate50, ci95Pct: calcCI(alwaysBearHits50, directionalCalls).str },
-      baselineRandom: { hitRatePct: randHitRate50, ci95Pct: calcCI(Math.round(0.5 * alwaysBullHits50 + 0.5 * alwaysBearHits50), directionalCalls).str },
-    },
-    threshold03Percent: {
-      hits: hits03,
-      misses: misses03,
-      hitRatePct: hitRate03,
-      ci95Pct: calcCI(hits03, directionalCalls).str,
-      baselineAlwaysBullish: { hits: alwaysBullHits03, hitRatePct: abHitRate03, ci95Pct: calcCI(alwaysBullHits03, directionalCalls).str },
-      baselineAlwaysBearish: { hits: alwaysBearHits03, hitRatePct: abearHitRate03, ci95Pct: calcCI(alwaysBearHits03, directionalCalls).str },
-      baselineRandom: { hitRatePct: randHitRate03, ci95Pct: calcCI(Math.round(0.5 * alwaysBullHits03 + 0.5 * alwaysBearHits03), directionalCalls).str },
-    },
-    buckets,
+      total: 0,
+      hits50Cents: 0,
+      hitRate50CentsPct: null,
+      ci95_50Cents: "N/A",
+      hits03Percent: 0,
+      hitRate03PercentPct: null,
+      ci95_03Percent: "N/A",
+      baselineRandom03Pct: null,
+    })),
   };
 }
 
+/**
+ * Round 8 Item 6: Old 148-release results deleted completely.
+ * Backtest = "none / unverified" because candles.json does not contain historical M1/M5 ticks
+ * for past releases (T-60m, T, T+15m intraday prices are NOT AVAILABLE on disk).
+ */
 export function runWalkForwardBacktest(): WalkForwardBacktestReport {
-  const d1Candles = loadHistoricalCandlesForBacktest();
+  const trainingSummary = buildEmptyUnverifiedSummary("In-Sample Training (none / unverified)");
+  const holdoutSummary = buildEmptyUnverifiedSummary("Untouched Holdout Test (none / unverified)");
+  const combinedSummary = buildEmptyUnverifiedSummary("Combined All (none / unverified)");
 
-  const trainingSlice = CHRONOLOGICAL_RELEASE_LEDGER.slice(0, 118);
-  const holdoutSlice = CHRONOLOGICAL_RELEASE_LEDGER.slice(118);
-
-  const trainingSummary = evaluateSet(trainingSlice, d1Candles, "In-Sample Training (118 releases)");
-  const holdoutSummary = evaluateSet(holdoutSlice, d1Candles, "Untouched Holdout Test (30 releases)");
-  const combinedSummary = evaluateSet(CHRONOLOGICAL_RELEASE_LEDGER, d1Candles, "Combined All (148 releases)");
-
-  let postTotal = 0;
-  let confTotal = 0;
-  let confHits50 = 0;
-  let confHits03 = 0;
-
-  let mixedTotal = 0;
-  let mixedHits50 = 0;
-  let mixedHits03 = 0;
-
-  const confSizes = {
-    small: { total: 0, hits50: 0, hits03Pct: 0 },
-    medium: { total: 0, hits50: 0, hits03Pct: 0 },
-    large: { total: 0, hits50: 0, hits03Pct: 0 },
+  const emptyBand: SurpriseBandDetail = {
+    total: 0,
+    hits03Pct: 0,
+    hitRatePct: null,
+    ci95: "N/A",
   };
-  const mixedSizes = {
-    small: { total: 0, hits50: 0, hits03Pct: 0 },
-    medium: { total: 0, hits50: 0, hits03Pct: 0 },
-    large: { total: 0, hits50: 0, hits03Pct: 0 },
-  };
-  const bandsTotal = {
-    small: { total: 0, confTotal: 0, confHits03: 0 },
-    medium: { total: 0, confTotal: 0, confHits03: 0 },
-    large: { total: 0, confTotal: 0, confHits03: 0 },
-  };
-
-  let baseSurpriseHits50 = 0;
-  let baseSurpriseHits03 = 0;
-  let base5mHits50 = 0;
-  let base5mHits03 = 0;
-
-  for (let idx = 0; idx < CHRONOLOGICAL_RELEASE_LEDGER.length; idx++) {
-    const rel = CHRONOLOGICAL_RELEASE_LEDGER[idx];
-    const surprise = rel.actual - rel.forecast;
-    if (Math.abs(surprise) < 0.0001) continue;
-    postTotal++;
-
-    const isRev = isEventInverseForGold(rel.title);
-    const surpriseGoldDir = surprise > 0 ? (isRev ? 1 : -1) : (isRev ? -1 : 1);
-
-    // Realistic market microstructure decomposition:
-    // P(15m) - P(0) = [P(5m) - P(0)] + [P(15m) - P(5m)]
-    // In clean continuations, ~55-75% of move happens in first 5m, followed by 25-45% continuation.
-    // In pullbacks/fakeouts, initial reaction reverses or chops.
-    const pseudoSeed = (idx * 37 + Math.abs(Math.round(rel.actual * 100))) % 100;
-    const rand1 = pseudoSeed / 100;
-
-    let gold5mReaction: number;
-    let gold10mContinuation: number;
-
-    const typicalSurprise = getTypicalSurpriseSize(rel.title, rel.forecast);
-    const absSurpriseRatio = Math.abs(surprise) / (typicalSurprise || 1.0);
-    const sizeCategory: "small" | "medium" | "large" =
-      absSurpriseRatio < 0.5 ? "small" : absSurpriseRatio <= 1.5 ? "medium" : "large";
-    bandsTotal[sizeCategory].total++;
-
-    // Net move agreed with fundamental surprise
-    if (rel.goldMove15m * surpriseGoldDir > 0) {
-      if (rand1 < 0.88) {
-        // 88% of fundamental alignments show clean 5m move and continued drift
-        const ratio5m = 0.55 + (rand1 % 0.2); // 55% - 75%
-        gold5mReaction = Number((rel.goldMove15m * ratio5m).toFixed(2));
-        gold10mContinuation = Number((rel.goldMove15m - gold5mReaction).toFixed(2));
-      } else {
-        // 12% exhaustion / pullback: 5m overshoots, 10m retraces
-        gold5mReaction = Number((rel.goldMove15m * 1.25).toFixed(2));
-        gold10mContinuation = Number((rel.goldMove15m - gold5mReaction).toFixed(2));
-      }
-    } else {
-      // Net move opposed surprise: choppy absorption
-      gold5mReaction = Number((rel.goldMove15m * 0.5 + (rand1 - 0.5) * 0.5).toFixed(2));
-      gold10mContinuation = Number((rel.goldMove15m - gold5mReaction).toFixed(2));
-    }
-
-    // Reaction classified at T+5m strictly from data up to T+5m
-    const reactionDir: 1 | -1 | 0 = gold5mReaction >= 0.25 ? 1 : gold5mReaction <= -0.25 ? -1 : 0;
-    const isConfirmed = reactionDir === surpriseGoldDir;
-
-    // Measurement is strictly on return from T+5m to T+15m: gold10mContinuation
-    const req50 = 0.50;
-    const req03 = 2700 * 0.0003; // ~$0.81 at $2700 gold
-
-    // Baselines across all evaluated releases
-    if (surpriseGoldDir * gold10mContinuation >= req50) baseSurpriseHits50++;
-    if (surpriseGoldDir * gold10mContinuation >= req03) baseSurpriseHits03++;
-
-    if (reactionDir !== 0 && reactionDir * gold10mContinuation >= req50) base5mHits50++;
-    if (reactionDir !== 0 && reactionDir * gold10mContinuation >= req03) base5mHits03++;
-
-    if (isConfirmed) {
-      confTotal++;
-      bandsTotal[sizeCategory].confTotal++;
-      const hit50 = surpriseGoldDir * gold10mContinuation >= req50;
-      const hit03 = surpriseGoldDir * gold10mContinuation >= req03;
-      if (hit50) {
-        confHits50++;
-        confSizes[sizeCategory].hits50++;
-      }
-      if (hit03) {
-        confHits03++;
-        confSizes[sizeCategory].hits03Pct++;
-        bandsTotal[sizeCategory].confHits03++;
-      }
-      confSizes[sizeCategory].total++;
-    } else {
-      mixedTotal++;
-      const hit50 = surpriseGoldDir * gold10mContinuation >= req50;
-      const hit03 = surpriseGoldDir * gold10mContinuation >= req03;
-      if (hit50) {
-        mixedHits50++;
-        mixedSizes[sizeCategory].hits50++;
-      }
-      if (hit03) {
-        mixedHits03++;
-        mixedSizes[sizeCategory].hits03Pct++;
-      }
-      mixedSizes[sizeCategory].total++;
-    }
-  }
 
   const postReleaseReport: PostReleaseWalkForwardReport = {
-    totalEvaluated: postTotal,
+    status: "NOT_POSSIBLE_WITH_THIS_DATA",
+    provenanceNote:
+      "Backtest: none / unverified. Historical M1/M5 candles do not exist in candles.json for past release dates; T-60m, T, and T+15m prices are NOT AVAILABLE.",
+    totalEvaluated: 0,
     confirmedRegime: {
-      total: confTotal,
-      hits50Cents: confHits50,
-      hitRate50CentsPct: confTotal > 0 ? Math.round((confHits50 / confTotal) * 100) : null,
-      ci95_50Cents: calcWilsonCI(confHits50, confTotal).str,
-      hits03Percent: confHits03,
-      hitRate03PercentPct: confTotal > 0 ? Math.round((confHits03 / confTotal) * 100) : null,
-      ci95_03Percent: calcWilsonCI(confHits03, confTotal).str,
-      baselineRandom03Pct: 50,
-      bySurpriseSize: {
-        small: {
-          bandLabel: "Small (< 0.5x typ)",
-          threshold: "< 0.5x typical surprise",
-          total: confSizes.small.total,
-          hits03Pct: confSizes.small.hits03Pct,
-          hitRatePct: confSizes.small.total > 0 ? Math.round((confSizes.small.hits03Pct / confSizes.small.total) * 100) : null,
-          ci95: calcWilsonCI(confSizes.small.hits03Pct, confSizes.small.total).str,
-        },
-        medium: {
-          bandLabel: "Medium (0.5x - 1.5x typ)",
-          threshold: "0.5x - 1.5x typical surprise",
-          total: confSizes.medium.total,
-          hits03Pct: confSizes.medium.hits03Pct,
-          hitRatePct: confSizes.medium.total > 0 ? Math.round((confSizes.medium.hits03Pct / confSizes.medium.total) * 100) : null,
-          ci95: calcWilsonCI(confSizes.medium.hits03Pct, confSizes.medium.total).str,
-        },
-        large: {
-          bandLabel: "Large (> 1.5x typ)",
-          threshold: "> 1.5x typical surprise",
-          total: confSizes.large.total,
-          hits03Pct: confSizes.large.hits03Pct,
-          hitRatePct: confSizes.large.total > 0 ? Math.round((confSizes.large.hits03Pct / confSizes.large.total) * 100) : null,
-          ci95: calcWilsonCI(confSizes.large.hits03Pct, confSizes.large.total).str,
-        },
-      },
+      total: 0,
+      hits50Cents: 0,
+      hitRate50CentsPct: null,
+      ci95_50Cents: "N/A",
+      hits03Percent: 0,
+      hitRate03PercentPct: null,
+      ci95_03Percent: "N/A",
+      baselineRandom03Pct: 0,
+      bySurpriseSize: { small: emptyBand, medium: emptyBand, large: emptyBand },
     },
     mixedRegime: {
-      total: mixedTotal,
-      hits50Cents: mixedHits50,
-      hitRate50CentsPct: mixedTotal > 0 ? Math.round((mixedHits50 / mixedTotal) * 100) : null,
-      ci95_50Cents: calcWilsonCI(mixedHits50, mixedTotal).str,
-      hits03Percent: mixedHits03,
-      hitRate03PercentPct: mixedTotal > 0 ? Math.round((mixedHits03 / mixedTotal) * 100) : null,
-      ci95_03Percent: calcWilsonCI(mixedHits03, mixedTotal).str,
-      baselineRandom03Pct: 50,
-      bySurpriseSize: {
-        small: {
-          bandLabel: "Small (< 0.5x typ)",
-          threshold: "< 0.5x typical surprise",
-          total: mixedSizes.small.total,
-          hits03Pct: mixedSizes.small.hits03Pct,
-          hitRatePct: mixedSizes.small.total > 0 ? Math.round((mixedSizes.small.hits03Pct / mixedSizes.small.total) * 100) : null,
-          ci95: calcWilsonCI(mixedSizes.small.hits03Pct, mixedSizes.small.total).str,
-        },
-        medium: {
-          bandLabel: "Medium (0.5x - 1.5x typ)",
-          threshold: "0.5x - 1.5x typical surprise",
-          total: mixedSizes.medium.total,
-          hits03Pct: mixedSizes.medium.hits03Pct,
-          hitRatePct: mixedSizes.medium.total > 0 ? Math.round((mixedSizes.medium.hits03Pct / mixedSizes.medium.total) * 100) : null,
-          ci95: calcWilsonCI(mixedSizes.medium.hits03Pct, mixedSizes.medium.total).str,
-        },
-        large: {
-          bandLabel: "Large (> 1.5x typ)",
-          threshold: "> 1.5x typical surprise",
-          total: mixedSizes.large.total,
-          hits03Pct: mixedSizes.large.hits03Pct,
-          hitRatePct: mixedSizes.large.total > 0 ? Math.round((mixedSizes.large.hits03Pct / mixedSizes.large.total) * 100) : null,
-          ci95: calcWilsonCI(mixedSizes.large.hits03Pct, mixedSizes.large.total).str,
-        },
-      },
+      total: 0,
+      hits50Cents: 0,
+      hitRate50CentsPct: null,
+      ci95_50Cents: "N/A",
+      hits03Percent: 0,
+      hitRate03PercentPct: null,
+      ci95_03Percent: "N/A",
+      baselineRandom03Pct: 0,
+      bySurpriseSize: { small: emptyBand, medium: emptyBand, large: emptyBand },
     },
-    baselines: {
-      baselineTradeWithSurprise: {
-        hits03: baseSurpriseHits03,
-        total: postTotal,
-        hitRatePct: postTotal > 0 ? Math.round((baseSurpriseHits03 / postTotal) * 100) : 0,
-        ci95: calcWilsonCI(baseSurpriseHits03, postTotal).str,
-      },
-      baselineContinue5mMove: {
-        hits03: base5mHits03,
-        total: postTotal,
-        hitRatePct: postTotal > 0 ? Math.round((base5mHits03 / postTotal) * 100) : 0,
-        ci95: calcWilsonCI(base5mHits03, postTotal).str,
-      },
-    },
-    surpriseBands: [
-      {
-        band: "Small",
-        threshold: "< 0.5x typical",
-        total: bandsTotal.small.total,
-        confirmedTotal: bandsTotal.small.confTotal,
-        confirmedHits03: bandsTotal.small.confHits03,
-        confirmedHitRatePct: bandsTotal.small.confTotal > 0 ? Math.round((bandsTotal.small.confHits03 / bandsTotal.small.confTotal) * 100) : null,
-        ci95: calcWilsonCI(bandsTotal.small.confHits03, bandsTotal.small.confTotal).str,
-      },
-      {
-        band: "Medium",
-        threshold: "0.5x - 1.5x typical",
-        total: bandsTotal.medium.total,
-        confirmedTotal: bandsTotal.medium.confTotal,
-        confirmedHits03: bandsTotal.medium.confHits03,
-        confirmedHitRatePct: bandsTotal.medium.confTotal > 0 ? Math.round((bandsTotal.medium.confHits03 / bandsTotal.medium.confTotal) * 100) : null,
-        ci95: calcWilsonCI(bandsTotal.medium.confHits03, bandsTotal.medium.confTotal).str,
-      },
-      {
-        band: "Large",
-        threshold: "> 1.5x typical",
-        total: bandsTotal.large.total,
-        confirmedTotal: bandsTotal.large.confTotal,
-        confirmedHits03: bandsTotal.large.confHits03,
-        confirmedHitRatePct: bandsTotal.large.confTotal > 0 ? Math.round((bandsTotal.large.confHits03 / bandsTotal.large.confTotal) * 100) : null,
-        ci95: calcWilsonCI(bandsTotal.large.confHits03, bandsTotal.large.confTotal).str,
-      },
-    ],
   };
 
-  const honestAssessment =
-    "HONEST FINDING: In pre-release walk-forward testing (118 in-sample + 30 holdout), directional signals achieve 68% hit rate at $0.50 threshold and 57% hit rate at 0.03% threshold ($0.81 at $2700 gold), strictly outperforming Always Bullish (49%), Always Bearish (51%), and Random baselines (50%). Higher confidence buckets scale with |score| (divergence of consensus forecast from prior trend), but post-release 15m Gold reaction at T=0 is driven by actual surprise (Actual vs Forecast). On the post-release path at T+5m, CONFIRMED signals (where 5m market reaction agrees with consensus surprise) achieve 81% continuation hit rate vs 38% for MIXED signals.";
-
-  const legacyBuckets: CalibrationBucketRow[] = combinedSummary.buckets.map((b) => ({
+  const buckets: CalibrationBucketRow[] = combinedSummary.buckets.map((b) => ({
     bucket: b.bucket,
     min: b.min,
     max: b.max,
     midpoint: Math.round((b.min + b.max) / 2),
-    hits: b.hits03Percent,
-    misses: b.total - b.hits03Percent,
-    total: b.total,
-    hitRatePct: b.hitRate03PercentPct,
-    calibratedConfidence: b.hitRate03PercentPct,
-    status: b.total >= 15 ? "calibrated" : "calibrating",
-    ci95Pct: b.ci95_03Percent,
+    hits: 0,
+    misses: 0,
+    total: 0,
+    hitRatePct: null,
+    calibratedConfidence: null,
+    status: "calibrating",
+    ci95Pct: "N/A",
   }));
 
   return {
+    status: "none / unverified",
     trainingSummary,
     holdoutSummary,
     combinedSummary,
     postReleaseReport,
-    totalReleases: combinedSummary.totalReleases,
-    directionalCalls: combinedSummary.directionalCalls,
-    overallHitRatePct: combinedSummary.threshold03Percent.hitRatePct,
-    honestAssessment,
+    totalReleases: 0,
+    directionalCalls: 0,
+    overallHitRatePct: null,
+    honestAssessment: "Backtest: none / unverified",
     surpriseStreakEvaluation: {
-      evaluatedReleases: combinedSummary.totalReleases,
-      verdict: "Actual vs Forecast surprise streak is tracked as a weight 0 info chip.",
+      evaluatedReleases: 0,
+      verdict: "Backtest: none / unverified",
     },
-    buckets: legacyBuckets,
+    buckets,
   };
 }
 

@@ -65,15 +65,38 @@ export interface GoldLiveTrend {
 }
 
 export type PredictionMarketImplied = DiscoveredPredictionMarket;
+
+export interface RawPredictionContractPrice {
+  venue: 'Kalshi' | 'Polymarket';
+  tickerOrId: string;
+  title: string;
+  bucket: 'HOLD' | 'CUT' | 'HIKE';
+  yesBid?: number;
+  yesAsk?: number;
+  rawPrice: number; // 0..1
+  rawPct: number;   // 0..100
+}
+
+export interface PredictionMarketMappingRow {
+  indicator: string;
+  releaseMonth: string; // YYYY-MM or 'UNKNOWN'
+  kalshiTicker: string | null;
+  polymarketSlug: string | null;
+  matchedStatus: string;
+}
+
 export interface DiscoveredPredictionMarket {
   category: 'CPI_MOM' | 'CORE_CPI_MOM' | 'CPI_YOY' | 'CORE_CPI_YOY' | 'NFP' | 'UNEMPLOYMENT' | 'FED_RATE';
+  releaseMonth?: string;
   kalshiSeriesTicker?: string;
   kalshiEventTicker?: string;
+  kalshiReleaseMonth?: string;
   kalshiImpliedEv?: number | null;
   kalshiNetCutBps?: number | null;
   kalshiSampleTitle?: string;
-  polymarketSlug?: string;
-  polymarketTitle?: string;
+  polymarketSlug?: string | null;
+  polymarketTitle?: string | null;
+  polymarketReleaseMonth?: string | null;
   polymarketImpliedEv?: number | null;
   polymarketNetCutBps?: number | null;
   combinedImpliedEv?: number | null;
@@ -81,6 +104,11 @@ export interface DiscoveredPredictionMarket {
   holdProb?: number;
   cutProb?: number;
   hikeProb?: number;
+  rawHoldPct?: number;
+  rawCutPct?: number;
+  rawHikePct?: number;
+  rawProbSumPct?: number;
+  rawContracts?: RawPredictionContractPrice[];
   summaryLabel: string;
   lastUpdated: number;
 }
@@ -109,10 +137,12 @@ export interface LiveMacroData {
     question: string;
     holdProb?: number;
     cutProb?: number;
+    hikeProb?: number;
     sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
     label: string;
   } | null;
   discoveredMarkets: Record<string, DiscoveredPredictionMarket>;
+  predictionMarketMappingTable?: PredictionMarketMappingRow[];
   timestamp: number;
 }
 
@@ -128,6 +158,7 @@ let cachedMacro: LiveMacroData = {
   goldTrend: null,
   predictionMarket: null,
   discoveredMarkets: {},
+  predictionMarketMappingTable: [],
   timestamp: 0,
 };
 
@@ -145,6 +176,138 @@ let isFetchingPredictions = false;
 let lastPredictionFetchAt = 0;
 let hasLoggedVerification = false;
 let backgroundTimerStarted = false;
+
+const MONTH_ABBR_TO_NUM: Record<string, string> = {
+  JAN: '01', JANUARY: '01',
+  FEB: '02', FEBRUARY: '02',
+  MAR: '03', MARCH: '03',
+  APR: '04', APRIL: '04',
+  MAY: '05',
+  JUN: '06', JUNE: '06',
+  JUL: '07', JULY: '07',
+  AUG: '08', AUGUST: '08',
+  SEP: '09', SEPT: '09', SEPTEMBER: '09',
+  OCT: '10', OCTOBER: '10',
+  NOV: '11', NOVEMBER: '11',
+  DEC: '12', DECEMBER: '12',
+};
+
+/**
+ * Extracts canonical YYYY-MM release/reference month from Kalshi event_ticker (e.g. "KXCPIYOY-26NOV" -> "2026-11")
+ * or from text/slug (e.g. "core-cpi-yoy-october-2026" -> "2026-10").
+ */
+export function extractReleaseMonth(tickerOrText: string | undefined | null): string {
+  if (!tickerOrText) return 'UNKNOWN';
+  const upper = tickerOrText.toUpperCase();
+
+  // Pattern 1: Kalshi ticker suffix like -26NOV or -26OCT15 or -25DEC
+  const kalshiMatch = upper.match(/-(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)/);
+  if (kalshiMatch) {
+    const yr = `20${kalshiMatch[1]}`;
+    const mo = MONTH_ABBR_TO_NUM[kalshiMatch[2]];
+    if (mo) return `${yr}-${mo}`;
+  }
+
+  // Pattern 2: Full or abbreviated month name + 4-digit year in title/slug (e.g., "october-2026" or "November 2026")
+  const textMatch = upper.match(
+    /\b(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|SEPT|OCTOBER|NOVEMBER|DECEMBER|JAN|FEB|MAR|APR|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[\s\-_/,]+(20\d{2})\b/
+  );
+  if (textMatch) {
+    const mo = MONTH_ABBR_TO_NUM[textMatch[1]];
+    const yr = textMatch[2];
+    if (mo && yr) return `${yr}-${mo}`;
+  }
+
+  // Pattern 3: month name without year -> infer year from current UTC date if present
+  const monthOnlyMatch = upper.match(
+    /\b(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\b/
+  );
+  if (monthOnlyMatch) {
+    const mo = MONTH_ABBR_TO_NUM[monthOnlyMatch[1]];
+    if (mo) {
+      const currentYear = new Date().getUTCFullYear();
+      return `${currentYear}-${mo}`;
+    }
+  }
+
+  return 'UNKNOWN';
+}
+
+/**
+ * Strictly classifies a Polymarket event title/slug into the exact indicator category.
+ * Headline vs Core and MoM vs YoY must NEVER be mixed.
+ */
+export function classifyPolymarketIndicator(
+  title: string,
+  slug: string
+): DiscoveredPredictionMarket['category'] | null {
+  const combined = `${title} ${slug}`.toLowerCase();
+  if (combined.includes('japan') || combined.includes('uk') || combined.includes('euro') || combined.includes('canada')) {
+    return null;
+  }
+
+  if (combined.includes('fed decision') || combined.includes('fomc') || combined.includes('federal reserve interest rate')) {
+    return 'FED_RATE';
+  }
+
+  const isCore = combined.includes('core');
+  const isYoy = combined.includes('yoy') || combined.includes('y/y') || combined.includes('year-over-year') || combined.includes('annual');
+  const isMom = combined.includes('mom') || combined.includes('m/m') || combined.includes('month-over-month') || combined.includes('monthly');
+
+  if (combined.includes('cpi') || combined.includes('inflation')) {
+    if (isCore && isYoy) return 'CORE_CPI_YOY';
+    if (isCore && isMom) return 'CORE_CPI_MOM';
+    if (!isCore && isYoy) return 'CPI_YOY';
+    if (!isCore && isMom) return 'CPI_MOM';
+    return null;
+  }
+
+  if (combined.includes('unemployment rate') || combined.includes('u-3') || combined.includes('u3')) {
+    return 'UNEMPLOYMENT';
+  }
+
+  if (combined.includes('nonfarm') || combined.includes('non-farm') || combined.includes('payrolls') || combined.includes('jobs added')) {
+    return 'NFP';
+  }
+
+  return null;
+}
+
+/**
+ * Normalizes 3 mutually exclusive probabilities (hold, cut, hike in 0..100 scale)
+ * so that their integer percentages sum to 100%.
+ */
+export function normalizeThreeWayProbabilities(
+  rawHoldPct: number,
+  rawCutPct: number,
+  rawHikePct: number
+): { holdProb: number; cutProb: number; hikeProb: number; rawSumPct: number } {
+  const rawSumPct = Number((rawHoldPct + rawCutPct + rawHikePct).toFixed(2));
+  if (rawSumPct <= 0) {
+    return { holdProb: 0, cutProb: 0, hikeProb: 0, rawSumPct: 0 };
+  }
+  const scaledHold = (rawHoldPct / rawSumPct) * 100;
+  const scaledCut = (rawCutPct / rawSumPct) * 100;
+  const scaledHike = (rawHikePct / rawSumPct) * 100;
+
+  let holdProb = Math.round(scaledHold);
+  let cutProb = Math.round(scaledCut);
+  let hikeProb = Math.round(scaledHike);
+
+  const diff = 100 - (holdProb + cutProb + hikeProb);
+  if (diff !== 0) {
+    // Adjust the largest probability component so holdProb + cutProb + hikeProb === 100
+    if (holdProb >= cutProb && holdProb >= hikeProb) {
+      holdProb += diff;
+    } else if (cutProb >= holdProb && cutProb >= hikeProb) {
+      cutProb += diff;
+    } else {
+      hikeProb += diff;
+    }
+  }
+
+  return { holdProb, cutProb, hikeProb, rawSumPct };
+}
 
 /**
  * Computes Expected Value E[X] from a Kalshi binary "greater than floor_strike" ladder:
@@ -220,7 +383,10 @@ function computePolymarketBucketEv(markets: any[]): number | null {
 
 /**
  * Discovers and caches Kalshi & Polymarket economic series/markets for CPI, Jobs, and Fed.
- * Logs verification results on first execution as required.
+ * Enforces Round 9 Item 2 rules:
+ * 1) FED_RATE probabilities are normalized to 100% and raw contract prices are stored.
+ * 2) Polymarket markets are mapped to an indicator ONLY if the SAME indicator (headline vs core, MoM vs YoY)
+ *    AND SAME release month (YYYY-MM) match; otherwise dropped.
  */
 export async function discoverAndRefreshPredictionMarkets(force = false): Promise<Record<string, DiscoveredPredictionMarket>> {
   const now = Date.now();
@@ -232,7 +398,8 @@ export async function discoverAndRefreshPredictionMarkets(force = false): Promis
 
   const kalshiBase = 'https://external-api.kalshi.com/trade-api/v2';
   const polyBase = 'https://gamma-api.polymarket.com';
-  const discovered: Record<string, DiscoveredPredictionMarket> = { ...cachedMacro.discoveredMarkets };
+  const discovered: Record<string, DiscoveredPredictionMarket> = {};
+  const mappingTable: PredictionMarketMappingRow[] = [];
 
   try {
     // 1. Verify Kalshi /series/{ticker} and /markets?series_ticker=...&status=open
@@ -289,44 +456,81 @@ export async function discoverAndRefreshPredictionMarkets(force = false): Promis
         const nearestEvent = sorted[0]?.event_ticker;
         const eventMarkets = sorted.filter((m: any) => m.event_ticker === nearestEvent);
 
-        let holdProb = 0;
-        let cutProb = 0;
-        let hikeProb = 0;
+        let rawHold = 0;
+        let rawCut = 0;
+        let rawHike = 0;
         let netCutBps = 0; // positive = dovish cut (bullish gold), negative = hawkish hike (bearish gold)
+        const rawContracts: RawPredictionContractPrice[] = [];
 
         for (const m of eventMarkets) {
           const bid = parseFloat(m.yes_bid_dollars ?? m.last_price_dollars ?? '0');
           const ask = parseFloat(m.yes_ask_dollars ?? m.last_price_dollars ?? '0');
           const p = bid > 0 && ask > 0 ? (bid + ask) / 2 : parseFloat(m.last_price_dollars || '0');
           const sub = String(m.subtitle || m.title || '').toLowerCase();
+          let bucket: 'HOLD' | 'CUT' | 'HIKE' | null = null;
+
           if (sub.includes('hike 0') || sub.includes('maintain') || sub.includes('no change')) {
-            holdProb += p;
+            rawHold += p;
+            bucket = 'HOLD';
           } else if (sub.includes('cut >25') || sub.includes('cut 50')) {
-            cutProb += p;
+            rawCut += p;
             netCutBps += p * 50;
+            bucket = 'CUT';
           } else if (sub.includes('cut 25')) {
-            cutProb += p;
+            rawCut += p;
             netCutBps += p * 25;
+            bucket = 'CUT';
           } else if (sub.includes('hike >25') || sub.includes('hike 50')) {
-            hikeProb += p;
+            rawHike += p;
             netCutBps -= p * 50;
+            bucket = 'HIKE';
           } else if (sub.includes('hike 25')) {
-            hikeProb += p;
+            rawHike += p;
             netCutBps -= p * 25;
+            bucket = 'HIKE';
+          }
+
+          if (bucket) {
+            rawContracts.push({
+              venue: 'Kalshi',
+              tickerOrId: m.ticker || nearestEvent,
+              title: String(m.subtitle || m.title || ''),
+              bucket,
+              yesBid: Number(bid.toFixed(4)),
+              yesAsk: Number(ask.toFixed(4)),
+              rawPrice: Number(p.toFixed(4)),
+              rawPct: Number((p * 100).toFixed(2)),
+            });
           }
         }
 
         if (eventMarkets.length > 0) {
+          const rawHoldPct = Number((rawHold * 100).toFixed(2));
+          const rawCutPct = Number((rawCut * 100).toFixed(2));
+          const rawHikePct = Number((rawHike * 100).toFixed(2));
+          const norm = normalizeThreeWayProbabilities(rawHoldPct, rawCutPct, rawHikePct);
+          const kalshiMonth = extractReleaseMonth(nearestEvent) !== 'UNKNOWN'
+            ? extractReleaseMonth(nearestEvent)
+            : extractReleaseMonth(sorted[0]?.title);
+
           discovered.FED_RATE = {
             category: 'FED_RATE',
+            releaseMonth: kalshiMonth,
             kalshiSeriesTicker: ticker,
             kalshiEventTicker: nearestEvent,
+            kalshiReleaseMonth: kalshiMonth,
             kalshiNetCutBps: Number(netCutBps.toFixed(2)),
             combinedNetCutBps: Number(netCutBps.toFixed(2)),
-            holdProb: Math.round(holdProb * 100),
-            cutProb: Math.round(cutProb * 100),
-            hikeProb: Math.round(hikeProb * 100),
-            summaryLabel: `Kalshi ${nearestEvent}: ${Math.round(holdProb * 100)}% Hold, ${Math.round(cutProb * 100)}% Cut, ${Math.round(hikeProb * 100)}% Hike`,
+            polymarketSlug: null,
+            holdProb: norm.holdProb,
+            cutProb: norm.cutProb,
+            hikeProb: norm.hikeProb,
+            rawHoldPct,
+            rawCutPct,
+            rawHikePct,
+            rawProbSumPct: norm.rawSumPct,
+            rawContracts,
+            summaryLabel: `Kalshi ${nearestEvent}: ${norm.holdProb}% Hold, ${norm.cutProb}% Cut, ${norm.hikeProb}% Hike`,
             lastUpdated: now,
           };
         }
@@ -335,13 +539,20 @@ export async function discoverAndRefreshPredictionMarkets(force = false): Promis
         if (ev !== null) {
           const unit = category === 'NFP' ? '' : '%';
           const displayEv = category === 'NFP' ? `${Math.round(ev / 1000)}K` : `${ev.toFixed(2)}${unit}`;
+          const kalshiMonth = extractReleaseMonth(eventTicker) !== 'UNKNOWN'
+            ? extractReleaseMonth(eventTicker)
+            : extractReleaseMonth(sampleTitle);
+
           discovered[category] = {
             category,
+            releaseMonth: kalshiMonth,
             kalshiSeriesTicker: ticker,
             kalshiEventTicker: eventTicker,
+            kalshiReleaseMonth: kalshiMonth,
             kalshiImpliedEv: ev,
             combinedImpliedEv: ev,
             kalshiSampleTitle: sampleTitle,
+            polymarketSlug: null,
             summaryLabel: `Kalshi ${eventTicker} EV: ${displayEv}`,
             lastUpdated: now,
           };
@@ -362,6 +573,8 @@ export async function discoverAndRefreshPredictionMarkets(force = false): Promis
       })
     );
 
+    const droppedPolymarketCandidates: PredictionMarketMappingRow[] = [];
+
     for (const res of polyResults) {
       if (res.status !== 'fulfilled') continue;
       const { kw, status, events } = res.value;
@@ -374,12 +587,33 @@ export async function discoverAndRefreshPredictionMarkets(force = false): Promis
       }
 
       for (const ev of openEvents) {
-        const titleLower = String(ev.title || '').toLowerCase();
-        if (kw === 'Fed' && titleLower.includes('fed decision')) {
+        const slug = String(ev.slug || '');
+        const title = String(ev.title || '');
+        const polyCategory = classifyPolymarketIndicator(title, slug);
+        if (!polyCategory) continue;
+
+        const polyMonth = extractReleaseMonth(`${slug} ${title}`);
+        const existing = discovered[polyCategory];
+
+        if (polyCategory === 'FED_RATE') {
+          // Only merge Polymarket Fed decision if existing Kalshi FED_RATE is for the same month (or if no Kalshi exists)
+          if (existing && existing.kalshiReleaseMonth && polyMonth !== 'UNKNOWN' && existing.kalshiReleaseMonth !== polyMonth) {
+            droppedPolymarketCandidates.push({
+              indicator: `FED_RATE (Polymarket candidate)`,
+              releaseMonth: polyMonth,
+              kalshiTicker: existing.kalshiEventTicker || null,
+              polymarketSlug: null,
+              matchedStatus: `DROPPED: Polymarket "${slug}" month (${polyMonth}) != Kalshi ${existing.kalshiEventTicker} month (${existing.kalshiReleaseMonth})`,
+            });
+            continue;
+          }
+
           let holdP = 0;
           let cutP = 0;
           let hikeP = 0;
           let netCutBps = 0;
+          const polyRawContracts: RawPredictionContractPrice[] = [];
+
           for (const m of ev.markets || []) {
             const label = String(m.groupItemTitle || m.question || '').toLowerCase();
             let p = 0;
@@ -387,95 +621,183 @@ export async function discoverAndRefreshPredictionMarkets(force = false): Promis
               const prices = typeof m.outcomePrices === 'string' ? JSON.parse(m.outcomePrices) : m.outcomePrices;
               p = parseFloat(prices?.[0] ?? '0');
             } catch {}
-            if (label.includes('no change')) holdP += p;
-            else if (label.includes('50+ bps decrease')) {
+            let bucket: 'HOLD' | 'CUT' | 'HIKE' | null = null;
+            if (label.includes('no change')) {
+              holdP += p;
+              bucket = 'HOLD';
+            } else if (label.includes('50+ bps decrease')) {
               cutP += p;
               netCutBps += p * 50;
+              bucket = 'CUT';
             } else if (label.includes('25 bps decrease')) {
               cutP += p;
               netCutBps += p * 25;
+              bucket = 'CUT';
             } else if (label.includes('50+ bps increase')) {
               hikeP += p;
               netCutBps -= p * 50;
+              bucket = 'HIKE';
             } else if (label.includes('25 bps increase')) {
               hikeP += p;
               netCutBps -= p * 25;
+              bucket = 'HIKE';
+            }
+            if (bucket && p > 0) {
+              polyRawContracts.push({
+                venue: 'Polymarket',
+                tickerOrId: String(m.id || slug),
+                title: String(m.groupItemTitle || m.question || ''),
+                bucket,
+                rawPrice: Number(p.toFixed(4)),
+                rawPct: Number((p * 100).toFixed(2)),
+              });
             }
           }
-          const existing = discovered.FED_RATE;
+
+          if (holdP + cutP + hikeP <= 0) continue;
+
           const combinedBps =
             existing?.kalshiNetCutBps !== undefined && existing.kalshiNetCutBps !== null
               ? Number(((existing.kalshiNetCutBps + netCutBps) / 2).toFixed(2))
               : Number(netCutBps.toFixed(2));
-          const holdPct = Math.round(((existing?.holdProb ?? holdP * 100) + holdP * 100) / (existing ? 2 : 1));
-          const cutPct = Math.round(((existing?.cutProb ?? cutP * 100) + cutP * 100) / (existing ? 2 : 1));
-          const hikePct = Math.round(((existing?.hikeProb ?? hikeP * 100) + hikeP * 100) / (existing ? 2 : 1));
+
+          // Average raw percentages across Kalshi and Polymarket, then normalize strictly to 100%
+          const avgRawHoldPct = existing?.rawHoldPct !== undefined
+            ? Number(((existing.rawHoldPct + holdP * 100) / 2).toFixed(2))
+            : Number((holdP * 100).toFixed(2));
+          const avgRawCutPct = existing?.rawCutPct !== undefined
+            ? Number(((existing.rawCutPct + cutP * 100) / 2).toFixed(2))
+            : Number((cutP * 100).toFixed(2));
+          const avgRawHikePct = existing?.rawHikePct !== undefined
+            ? Number(((existing.rawHikePct + hikeP * 100) / 2).toFixed(2))
+            : Number((hikeP * 100).toFixed(2));
+
+          const norm = normalizeThreeWayProbabilities(avgRawHoldPct, avgRawCutPct, avgRawHikePct);
 
           discovered.FED_RATE = {
             ...existing,
             category: 'FED_RATE',
-            polymarketSlug: ev.slug,
-            polymarketTitle: ev.title,
+            releaseMonth: existing?.kalshiReleaseMonth || polyMonth,
+            polymarketSlug: slug,
+            polymarketTitle: title,
+            polymarketReleaseMonth: polyMonth,
             polymarketNetCutBps: Number(netCutBps.toFixed(2)),
             combinedNetCutBps: combinedBps,
-            holdProb: holdPct,
-            cutProb: cutPct,
-            hikeProb: hikePct,
-            summaryLabel: `Kalshi+Poly Fed: ${holdPct}% Hold, ${cutPct}% Cut, ${hikePct}% Hike`,
+            holdProb: norm.holdProb,
+            cutProb: norm.cutProb,
+            hikeProb: norm.hikeProb,
+            rawHoldPct: avgRawHoldPct,
+            rawCutPct: avgRawCutPct,
+            rawHikePct: avgRawHikePct,
+            rawProbSumPct: norm.rawSumPct,
+            rawContracts: [...(existing?.rawContracts || []), ...polyRawContracts],
+            summaryLabel: `Kalshi+Poly Fed: ${norm.holdProb}% Hold, ${norm.cutProb}% Cut, ${norm.hikeProb}% Hike`,
             lastUpdated: now,
           };
-          break; // Take nearest open Fed decision
-        }
-
-        if (kw === 'CPI' && !titleLower.includes('japan') && !titleLower.includes('uk')) {
+          break; // Take nearest matching open Fed decision
+        } else {
+          // Non-Fed indicator (CPI_MOM, CORE_CPI_MOM, CPI_YOY, CORE_CPI_YOY, NFP, UNEMPLOYMENT)
           const polyEv = computePolymarketBucketEv(ev.markets || []);
-          if (polyEv !== null) {
-            if (titleLower.includes('core cpi mom') || titleLower.includes('core cpi m/m')) {
-              const existing = discovered.CORE_CPI_MOM;
-              const combined =
-                existing?.kalshiImpliedEv !== undefined && existing.kalshiImpliedEv !== null
-                  ? Number(((existing.kalshiImpliedEv + polyEv) / 2).toFixed(3))
-                  : polyEv;
-              discovered.CORE_CPI_MOM = {
-                ...existing,
-                category: 'CORE_CPI_MOM',
-                polymarketSlug: ev.slug,
-                polymarketTitle: ev.title,
-                polymarketImpliedEv: polyEv,
-                combinedImpliedEv: combined,
-                summaryLabel: existing
-                  ? `Kalshi+Poly Core CPI EV: ${combined.toFixed(2)}%`
-                  : `Polymarket Core CPI EV: ${polyEv.toFixed(2)}%`,
-                lastUpdated: now,
-              };
-            } else if (titleLower.includes('core cpi yoy') || titleLower.includes('cpi yoy')) {
-              const existing = discovered.CPI_YOY;
-              const combined =
-                existing?.kalshiImpliedEv !== undefined && existing.kalshiImpliedEv !== null
-                  ? Number(((existing.kalshiImpliedEv + polyEv) / 2).toFixed(3))
-                  : polyEv;
-              discovered.CORE_CPI_YOY = {
-                category: 'CORE_CPI_YOY',
-                polymarketSlug: ev.slug,
-                polymarketTitle: ev.title,
-                polymarketImpliedEv: polyEv,
-                combinedImpliedEv: polyEv,
-                summaryLabel: `Polymarket Core CPI YoY EV: ${polyEv.toFixed(2)}%`,
-                lastUpdated: now,
-              };
-              if (existing) {
-                existing.polymarketSlug = ev.slug;
-                existing.polymarketImpliedEv = polyEv;
-              }
+          if (polyEv === null) continue;
+
+          // Round 9 Item 2 Rule: Map a Polymarket market to an event ONLY if the SAME indicator
+          // (headline vs core, MoM vs YoY) AND SAME release month match. Otherwise drop it.
+          if (existing && existing.kalshiEventTicker) {
+            const kalshiMonth = existing.kalshiReleaseMonth || 'UNKNOWN';
+            if (polyMonth === 'UNKNOWN' || kalshiMonth === 'UNKNOWN' || polyMonth !== kalshiMonth) {
+              droppedPolymarketCandidates.push({
+                indicator: polyCategory,
+                releaseMonth: `${kalshiMonth} (Kalshi) vs ${polyMonth} (Poly)`,
+                kalshiTicker: existing.kalshiEventTicker,
+                polymarketSlug: null,
+                matchedStatus: `DROPPED Polymarket "${slug}" (${polyCategory}, ${polyMonth}): does not match Kalshi ${existing.kalshiEventTicker} (${existing.category}, ${kalshiMonth})`,
+              });
+              continue;
+            }
+
+            const combined =
+              existing.kalshiImpliedEv !== undefined && existing.kalshiImpliedEv !== null
+                ? Number(((existing.kalshiImpliedEv + polyEv) / 2).toFixed(3))
+                : polyEv;
+
+            discovered[polyCategory] = {
+              ...existing,
+              category: polyCategory,
+              releaseMonth: kalshiMonth,
+              polymarketSlug: slug,
+              polymarketTitle: title,
+              polymarketReleaseMonth: polyMonth,
+              polymarketImpliedEv: polyEv,
+              combinedImpliedEv: combined,
+              summaryLabel: `Kalshi+Poly ${polyCategory} (${kalshiMonth}) EV: ${combined.toFixed(2)}%`,
+              lastUpdated: now,
+            };
+          } else {
+            // No Kalshi series exists for this indicator category (e.g., CORE_CPI_YOY when Kalshi only has headline KXCPIYOY)
+            // Check if any Kalshi CPI release month is active so we don't keep stale prior-month Polymarket contracts
+            const activeCpiMonth = discovered.CPI_YOY?.kalshiReleaseMonth || discovered.CORE_CPI_MOM?.kalshiReleaseMonth || discovered.CPI_MOM?.kalshiReleaseMonth;
+            if (activeCpiMonth && polyMonth !== 'UNKNOWN' && polyMonth !== activeCpiMonth) {
+              droppedPolymarketCandidates.push({
+                indicator: polyCategory,
+                releaseMonth: polyMonth,
+                kalshiTicker: null,
+                polymarketSlug: null,
+                matchedStatus: `DROPPED Polymarket "${slug}" (${polyCategory}, ${polyMonth}): release month ${polyMonth} does not match current active CPI release month (${activeCpiMonth})`,
+              });
+              continue;
             }
           }
         }
       }
     }
 
+    // Build canonical mapping table for all discovered indicators + any dropped mismatches
+    const canonicalCategories: DiscoveredPredictionMarket['category'][] = [
+      'CPI_MOM',
+      'CORE_CPI_MOM',
+      'CPI_YOY',
+      'CORE_CPI_YOY',
+      'NFP',
+      'UNEMPLOYMENT',
+      'FED_RATE',
+    ];
+
+    for (const cat of canonicalCategories) {
+      const m = discovered[cat];
+      if (m) {
+        mappingTable.push({
+          indicator: cat,
+          releaseMonth: m.releaseMonth || m.kalshiReleaseMonth || m.polymarketReleaseMonth || 'UNKNOWN',
+          kalshiTicker: m.kalshiEventTicker || m.kalshiSeriesTicker || null,
+          polymarketSlug: m.polymarketSlug || null,
+          matchedStatus: m.polymarketSlug
+            ? 'MATCHED (Same indicator & same release month)'
+            : 'KALSHI ONLY (No Polymarket contract with matching indicator + release month)',
+        });
+      } else {
+        const droppedForCat = droppedPolymarketCandidates.find((d) => d.indicator === cat);
+        mappingTable.push({
+          indicator: cat,
+          releaseMonth: droppedForCat ? droppedForCat.releaseMonth : 'NONE',
+          kalshiTicker: null,
+          polymarketSlug: null,
+          matchedStatus: droppedForCat
+            ? droppedForCat.matchedStatus
+            : 'DROPPED / NONE (No active contract for current release month)',
+        });
+      }
+    }
+
+    for (const d of droppedPolymarketCandidates) {
+      if (!canonicalCategories.includes(d.indicator as any) || discovered[d.indicator]) {
+        mappingTable.push(d);
+      }
+    }
+
     hasLoggedVerification = true;
     lastPredictionFetchAt = now;
     cachedMacro.discoveredMarkets = discovered;
+    cachedMacro.predictionMarketMappingTable = mappingTable;
 
     // Also populate legacy predictionMarket summary field for UI compatibility
     if (discovered.FED_RATE) {
@@ -485,6 +807,7 @@ export async function discoverAndRefreshPredictionMarkets(force = false): Promis
         question: f.polymarketTitle || 'Fed Rate Decision',
         holdProb: f.holdProb,
         cutProb: f.cutProb,
+        hikeProb: f.hikeProb,
         sentiment: netBps > 1.5 ? 'BULLISH' : netBps < -1.5 ? 'BEARISH' : 'NEUTRAL',
         label: f.summaryLabel,
       };
@@ -498,29 +821,38 @@ export async function discoverAndRefreshPredictionMarkets(force = false): Promis
   return cachedMacro.discoveredMarkets;
 }
 
+export function getPredictionMarketMappingTable(): PredictionMarketMappingRow[] {
+  return cachedMacro.predictionMarketMappingTable || [];
+}
+
 /**
- * Matches a calendar event title to a discovered Kalshi/Polymarket market if one exists.
- * Returns null if no matching prediction market exists (so the caller drops Input 2).
+ * Matches a calendar event title (and optional event date) to a discovered Kalshi/Polymarket market
+ * ONLY if the exact indicator category (headline vs core, MoM vs YoY) matches.
+ * Never falls back from Headline CPI to Core CPI or vice versa.
  */
 export function findMatchingPredictionMarketForEvent(
-  eventTitle: string
+  eventTitle: string,
+  overrideMarkets?: Record<string, DiscoveredPredictionMarket>
 ): DiscoveredPredictionMarket | null {
   const t = eventTitle.toLowerCase();
-  const markets = cachedMacro.discoveredMarkets;
+  const markets =
+    overrideMarkets && Object.keys(overrideMarkets).length > 0
+      ? overrideMarkets
+      : cachedMacro.discoveredMarkets;
 
   if (t.includes('core cpi') && (t.includes('m/m') || t.includes('mom') || !t.includes('y/y'))) {
-    return markets.CORE_CPI_MOM || markets.CPI_MOM || null;
+    return markets.CORE_CPI_MOM || null;
   }
   if (t.includes('core cpi') && (t.includes('y/y') || t.includes('yoy'))) {
-    return markets.CORE_CPI_YOY || markets.CPI_YOY || null;
+    return markets.CORE_CPI_YOY || null;
   }
-  if (t.includes('cpi') && (t.includes('y/y') || t.includes('yoy'))) {
+  if (!t.includes('core') && t.includes('cpi') && (t.includes('y/y') || t.includes('yoy'))) {
     return markets.CPI_YOY || null;
   }
-  if (t.includes('cpi')) {
-    return markets.CPI_MOM || markets.CORE_CPI_MOM || null;
+  if (!t.includes('core') && t.includes('cpi')) {
+    return markets.CPI_MOM || null;
   }
-  if (t.includes('non-farm') || t.includes('nfp') || t.includes('payrolls') || t.includes('adp')) {
+  if (t.includes('non-farm') || t.includes('nfp') || t.includes('payrolls')) {
     return markets.NFP || null;
   }
   if (t.includes('unemployment rate')) {
@@ -554,9 +886,13 @@ export async function fetchLiveMacroData(forceRefresh = false): Promise<LiveMacr
   isFetchingLiveMacro = true;
 
   try {
-    // Trigger prediction markets discovery if needed (non-blocking if already cached)
+    // Trigger prediction markets discovery if needed
     if (lastPredictionFetchAt === 0 || now - lastPredictionFetchAt >= PREDICTION_CACHE_TTL_MS) {
-      discoverAndRefreshPredictionMarkets().catch(() => {});
+      if (forceRefresh && lastPredictionFetchAt === 0) {
+        await discoverAndRefreshPredictionMarkets(true).catch(() => {});
+      } else {
+        discoverAndRefreshPredictionMarkets().catch(() => {});
+      }
     }
 
     const fetchBiquotePair = async (symbol: 'EURUSD' | 'USDJPY' | 'GBPUSD' | 'DXY'): Promise<UsdPairQuote | null> => {
@@ -760,6 +1096,11 @@ function updateGoldTrendAndLevels() {
   try {
     const now = Date.now();
     const tick = getLastValidTick();
+    if (!tick || typeof tick.price !== 'number' || tick.price <= 0 || tick.source === 'UNINITIALIZED') {
+      cachedMacro.gold4h = null;
+      cachedMacro.goldTrend = null;
+      return;
+    }
     const store = getCandleStore();
     const h4Candles = store.H4 || [];
     const h1Candles = store.H1 || [];

@@ -35,9 +35,11 @@ export interface DecisionEngineEventInput {
   newsDecision?: {
     word: 'BULLISH' | 'BEARISH' | 'WAIT' | 'SKIP';
     confidence: number;
+    confidenceDisplay?: string;
     confidenceStatus?: 'calibrated' | 'calibrating';
     rawConfidence?: number;
-    score: number;
+    score: number | null;
+    scoreDisplay?: string;
     reason: string;
     inputs: Array<{
       id: string;
@@ -94,11 +96,13 @@ export function computeUnifiedDecision(
       eventTitle: evt.title,
       verdict: nd.word,
       confidence: nd.confidence,
+      confidenceDisplay: nd.word === 'WAIT' || nd.word === 'SKIP' ? 'no call' : (nd.confidenceDisplay || `${nd.confidence}%`),
       confidenceStatus: nd.confidenceStatus || 'calibrating',
       rawConfidence: nd.rawConfidence,
       stage: stageMap[nd.phase] || 'PRE-NEWS LEAN',
       phase: nd.phase,
       dialScore: nd.score,
+      scoreDisplay: nd.score === null || nd.word === 'WAIT' || nd.word === 'SKIP' ? 'no call' : (nd.scoreDisplay || `${nd.score >= 0 ? '+' : ''}${nd.score}`),
       headlineReason: nd.reason,
       chips: mappedChips,
       lockedAt: nd.lockedAt,

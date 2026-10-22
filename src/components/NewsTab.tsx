@@ -643,8 +643,8 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
         dec.verdict === 'SKIP'
           ? 'Low impact · SKIP'
           : dec.verdict === 'WAIT'
-          ? `WAIT (-) · ${dec.stage}`
-          : `${dec.verdict} (${(dec as any).confidenceDisplay || `${dec.confidence}%`}) · ${dec.stage}`;
+          ? `WAIT (no call) · ${dec.stage}`
+          : `${dec.verdict} (${dec.confidenceDisplay || `${dec.confidence}%`}) · ${dec.stage}`;
 
       return {
         id: e.id,
@@ -853,8 +853,8 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
       dec.verdict === 'SKIP'
         ? 'SKIP'
         : dec.verdict === 'WAIT'
-        ? 'WAIT -'
-        : `${dec.verdict} ${(dec as any).confidenceDisplay || `${dec.confidence}%`}`;
+        ? 'WAIT · no call'
+        : `${dec.verdict} ${dec.confidenceDisplay || `${dec.confidence}%`}`;
 
     const badgeStyle =
       dec.verdict === 'BULLISH'
@@ -868,7 +868,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
     return (
       <span
         className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${badgeStyle} shrink-0 whitespace-nowrap`}
-        title={`Unified Decision: ${dec.verdict} (${dec.verdict === 'WAIT' || dec.verdict === 'SKIP' ? '-' : `${dec.confidence}%`} confidence) · Stage: ${dec.stage}`}
+        title={`Unified Decision: ${dec.verdict} (${dec.verdict === 'WAIT' || dec.verdict === 'SKIP' ? `no call · details: ${dec.confidence}%` : `${dec.confidence}%`} confidence) · Stage: ${dec.stage}`}
       >
         {dec.verdict === 'BULLISH' && <TrendingUp className="w-2.5 h-2.5 shrink-0" />}
         {dec.verdict === 'BEARISH' && <TrendingDown className="w-2.5 h-2.5 shrink-0" />}

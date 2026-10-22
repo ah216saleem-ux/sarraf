@@ -15,8 +15,11 @@ export const DecisionCard: React.FC<DecisionCardProps> = ({
   onSelectNextNews,
   countdownText,
 }) => {
-  // Map dialScore (-100 to +100) to needle rotation angle [-75deg to +75deg]
-  const needleAngle = Math.max(-75, Math.min(75, (decision.dialScore / 100) * 75));
+  // Map dialScore (-100 to +100) to needle rotation angle [-75deg to +75deg]; 0deg when dialScore is null ("no call")
+  const needleAngle =
+    decision.dialScore === null || decision.verdict === 'WAIT' || decision.verdict === 'SKIP'
+      ? 0
+      : Math.max(-75, Math.min(75, (decision.dialScore / 100) * 75));
 
   const verdictColorClass =
     decision.verdict === 'BULLISH'
@@ -205,10 +208,10 @@ export const DecisionCard: React.FC<DecisionCardProps> = ({
           <div className="space-y-1 pt-0.5">
             <div className="flex items-center justify-between text-xs font-mono">
               <span className="text-neutral-400">
-                {decision.verdict === 'WAIT' || decision.verdict === 'SKIP' ? 'Confidence' : (decision as any).confidenceDisplay?.startsWith('Lean') ? 'Strength' : 'Confidence'}{decision.verdict !== 'WAIT' && decision.verdict !== 'SKIP' && decision.confidenceStatus === 'calibrating' && !(decision as any).confidenceDisplay?.startsWith('Lean') ? ' (calibrating)' : ''}
+                {decision.verdict === 'WAIT' || decision.verdict === 'SKIP' ? 'Call' : decision.confidenceDisplay?.startsWith('Lean') ? 'Strength' : 'Confidence'}{decision.verdict !== 'WAIT' && decision.verdict !== 'SKIP' && decision.confidenceStatus === 'calibrating' && !decision.confidenceDisplay?.startsWith('Lean') ? ' (calibrating)' : ''}
               </span>
               <span className="text-white font-bold">
-                {decision.verdict === 'WAIT' || decision.verdict === 'SKIP' ? '-' : ((decision as any).confidenceDisplay || `${decision.confidence}%`)}
+                {decision.verdict === 'WAIT' || decision.verdict === 'SKIP' ? 'no call' : (decision.confidenceDisplay || `${decision.confidence}%`)}
               </span>
             </div>
 

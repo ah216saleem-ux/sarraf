@@ -178,22 +178,22 @@ export function getMarketSchedule(now: Date = new Date()): MarketScheduleResult 
   };
 }
 
-// In-memory last valid tick cache
+// In-memory last valid tick cache (uninitialized until first real tick or valid restored tick)
 let lastValidTick: PersistedTickData = {
   symbol: 'XAUUSD',
-  price: 4165.5,
-  bid: 4165.35,
-  ask: 4165.65,
-  high: 4182.2,
-  low: 4148.8,
-  open: 4158.0,
-  previousClose: 4155.0,
-  spread: 0.3,
-  dayDiffPercent: 0.25,
+  price: 0,
+  bid: 0,
+  ask: 0,
+  high: 0,
+  low: 0,
+  open: 0,
+  previousClose: 0,
+  spread: 0,
+  dayDiffPercent: 0,
   direction: 'FLAT',
-  timestamp: new Date().toISOString(),
-  lastReceivedAt: Date.now(),
-  source: 'biquote.io (MetaTrader 5)',
+  timestamp: '',
+  lastReceivedAt: 0,
+  source: 'UNINITIALIZED',
 };
 
 // Load last persisted tick from disk on startup
@@ -203,7 +203,7 @@ export function loadLastTickFromDisk(): PersistedTickData {
     if (fs.existsSync(LAST_TICK_FILE)) {
       const raw = fs.readFileSync(LAST_TICK_FILE, 'utf-8');
       const data = JSON.parse(raw);
-      if (data && typeof data.price === 'number') {
+      if (data && typeof data.price === 'number' && data.price > 0) {
         lastValidTick = {
           ...lastValidTick,
           ...data,

@@ -291,6 +291,7 @@ const TARGET_BACKUP_FILES = [
   'google_chat_learning.json',
   'news_manual.json',
   'restarts.json',
+  'release_live_log.json',
 ];
 
 export function createRollingBackup(): string | null {
