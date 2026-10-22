@@ -16,6 +16,17 @@ import {
   getClosedCandles,
 } from './src/server/candleEngine.ts';
 import {
+  loadActualsMeta,
+  saveActualsMeta,
+  appendManualActualAudit,
+  loadManualActualAuditLog,
+  processManualActualRequest,
+  getExpectedFredSpecForEvent,
+  convertFredObservationsForEvent,
+  computeActualReactionReading,
+  AdminSessionContext,
+} from './src/server/newsActualsManager.ts';
+import {
   computeZonesForTimeframe,
   getWhereSellBuyCanComeFrom,
   getLiquidityZonesListForPanel,
@@ -2261,8 +2272,133 @@ app.get('/api/google-chat/tests', requireAdminAuth, (_req, res) => {
 // PHASE 5: NEWS, SETTINGS, PERFORMANCE & SYSTEM ENDPOINTS
 // -------------------------------------------------------------
 
+// -------------------------------------------------------------
+// ACTUALS METADATA & OPTIONAL FRED AUTO-SOURCE (SERVER-SIDE ONLY)
+// -------------------------------------------------------------
+const fredLastCheckedByEvent: Record<string, number> = {};
+
+async function syncFredActualsIfAvailable(events: any[]): Promise<void> {
+  const fredKey = process.env.FRED_API_KEY?.trim();
+  if (!fredKey) return; // Key missing -> leave actual empty, never guess
+
+  const metaMap = loadActualsMeta();
+  const now = Date.now();
+
+  for (const evt of events) {
+    if (!evt.isReleased || evt.actualStr) continue;
+    const spec = getExpectedFredSpecForEvent(evt.title || '', evt.timeUtc || '');
+    if (!spec) continue;
+
+    const lastCheck = fredLastCheckedByEvent[evt.id] || 0;
+    if (now - lastCheck < 15 * 60 * 1000) continue;
+    fredLastCheckedByEvent[evt.id] = now;
+
+    try {
+      // Request 14 observations descending so CPI y/y (t vs t-12) and CPI m/m / PAYEMS (t vs t-1) have full history
+      const url = `https://api.stlouisfed.org/fred/series/observations?series_id=${spec.seriesId}&api_key=${encodeURIComponent(fredKey)}&file_type=json&sort_order=desc&limit=14`;
+      const resp = await fetch(url);
+      if (!resp.ok) continue;
+      const data: any = await resp.json();
+
+      const conversion = convertFredObservationsForEvent(evt.title || '', evt.timeUtc || '', data);
+      if (!conversion || !conversion.accepted || !conversion.formattedActual || conversion.numericValue === null) {
+        continue; // Stale or unpublished period -> leave actual empty
+      }
+
+      const savedAt = new Date().toISOString();
+      setManualActualValue(
+        evt.id,
+        conversion.formattedActual,
+        'FEED',
+        conversion.note || `FRED (${spec.seriesId} ${spec.expectedObservationDate})`
+      );
+      metaMap[evt.id] = {
+        eventId: evt.id,
+        eventTitle: evt.title,
+        actualValue: conversion.formattedActual,
+        numberValue: conversion.numericValue,
+        unit: conversion.unit,
+        source: 'FRED',
+        savedAt,
+        fredNote: conversion.note,
+      };
+      saveActualsMeta(metaMap);
+      appendManualActualAudit({
+        eventId: evt.id,
+        eventTitle: evt.title || evt.id,
+        action: 'FRED_AUTO',
+        who: `FRED:${spec.seriesId}`,
+        when: savedAt,
+        oldValue: null,
+        newValue: conversion.formattedActual,
+        source: 'FRED',
+      });
+    } catch {
+      // Leave actual empty if FRED request fails
+    }
+  }
+}
+
+function enrichEventsWithActualMeta(events: any[]): any[] {
+  const metaMap = loadActualsMeta();
+  return events.map((evt) => {
+    const meta = metaMap[evt.id];
+    const hasValidActual = Boolean(
+      evt.actualStr && evt.actualStr !== '--' && evt.actualStr !== 'PENDING' && evt.actualSource !== 'UNVERIFIED'
+    );
+    const reaction = hasValidActual
+      ? computeActualReactionReading(
+          evt.title,
+          evt.forecastStr || '',
+          evt.forecastNum ?? null,
+          evt.actualStr || '',
+          evt.actualNum ?? null
+        )
+      : null;
+    return {
+      ...evt,
+      actualSourceDisplay: hasValidActual
+        ? meta?.source || (evt.actualSource === 'MANUAL' ? 'manual' : 'FRED')
+        : null,
+      actualSavedAt: hasValidActual ? meta?.savedAt || null : null,
+      actualFredNote: hasValidActual ? meta?.fredNote || null : null,
+      reactionReading: reaction,
+    };
+  });
+}
+
+function resolveStrictAdminSessionContext(req: express.Request): AdminSessionContext {
+  const token = getSessionToken(req);
+  const clientIp =
+    (typeof req.headers['x-forwarded-for'] === 'string'
+      ? req.headers['x-forwarded-for'].split(',')[0].trim()
+      : req.socket?.remoteAddress) || 'unknown';
+
+  if (!token) {
+    return { authenticated: false, user: null, clientIp };
+  }
+
+  const session = activeSessions.get(token);
+  if (!session || Date.now() > session.expiresAt) {
+    if (session) {
+      activeSessions.delete(token);
+      saveActiveSessions();
+    }
+    return { authenticated: false, user: null, clientIp };
+  }
+
+  return {
+    authenticated: true,
+    user: {
+      email: (session.user as any)?.email || 'admin@sarraf.gold',
+      role: (session.user as any)?.role || 'admin',
+    },
+    clientIp,
+  };
+}
+
 // GET /api/news - Live Forex Factory calendar, feed status, countdowns, pregeneration trigger, and decision lock
-app.get('/api/news', async (_req, res) => {
+app.get('/api/news', async (req, res) => {
   // Refresh live macro feeds first (US10Y, Dollar Proxy EUR/JPY/GBP, Kalshi/Polymarket, Gold BiQuote)
   let macro = getCachedMacroData();
   if (!macro.dollarProxy || !macro.us10y || macro.dollarProxy.isStale || macro.us10y.isStale) {
@@ -2278,10 +2414,18 @@ app.get('/api/news', async (_req, res) => {
     fetchLiveMacroData().catch(() => {});
   }
 
+  const rawEvents = getNewsEventsForUI();
+  if (process.env.FRED_API_KEY?.trim()) {
+    await syncFredActualsIfAvailable(rawEvents).catch(() => {});
+  }
   const status = getNewsFeedStatus();
-  const events = getNewsEventsForUI();
+  const events = enrichEventsWithActualMeta(getNewsEventsForUI());
   const ahmedAiStatus = getAhmedAiServerStatus();
   const accuracy = getNewsDecisionAccuracy();
+  const sessionCtx = resolveStrictAdminSessionContext(req);
+  const isAdminSession = Boolean(
+    sessionCtx.authenticated && String(sessionCtx.user?.role || '').toLowerCase() === 'admin'
+  );
 
   // Evaluate decisions asynchronously in background (never blocks GET /api/news)
   evaluateNewsDecisions(events).catch((err: any) => {
@@ -2298,6 +2442,7 @@ app.get('/api/news', async (_req, res) => {
     macro,
     ahmedAiStatus,
     ahmedAiOnline: ahmedAiStatus === 'ON',
+    isAdminSession,
     accuracy,
     calibrationTable: accuracy.calibrationTable,
     releaseLogger: getReleaseLoggerSummary(),
@@ -2349,23 +2494,80 @@ app.post('/api/news/brief', async (req, res) => {
   }
 });
 
-// POST /api/news/manual-actual - Admin enter manual actual for released event
-app.post('/api/news/manual-actual', requireAdminAuth, (req, res) => {
-  const user = (req as any).user;
-  const { eventId, actualValue, note } = req.body || {};
-  if (!eventId || !actualValue) {
-    return res.status(400).json({ error: 'eventId and actualValue are required.' });
+// POST /api/news/manual-actual - Admin enter, correct, or delete manual actual (strict admin session required)
+app.post('/api/news/manual-actual', (req, res) => {
+  const sessionCtx = resolveStrictAdminSessionContext(req);
+  const { eventId, eventTitle, action, actualValue, numberValue, unit, note } = req.body || {};
+  const currentEvents = getNewsEventsForUI();
+  const matchedEvent = currentEvents.find((e) => e.id === eventId);
+
+  const outcome = processManualActualRequest(sessionCtx, {
+    eventId,
+    eventTitle: eventTitle || matchedEvent?.title || eventId,
+    action,
+    actualValue,
+    numberValue,
+    unit,
+    note,
+  });
+
+  if (outcome.statusCode !== 200) {
+    return res.status(outcome.statusCode).json(outcome.body);
   }
 
-  setManualActualValue(eventId, String(actualValue), 'MANUAL', note || `Entered by ${user?.email}`);
   const status = getNewsFeedStatus();
-  const events = getNewsEventsForUI();
+  const events = enrichEventsWithActualMeta(getNewsEventsForUI());
 
-  return res.json({
-    status: 'SUCCESS',
-    message: `Manual actual value "${actualValue}" recorded. Gold impact recomputed.`,
+  return res.status(200).json({
+    ...outcome.body,
+    savedAt: outcome.body.record?.savedAt || null,
+    source: outcome.body.record?.source || 'manual',
     feed: status,
     events,
+    auditLog: loadManualActualAuditLog().slice(-20),
+  });
+});
+
+// DELETE /api/news/manual-actual - Admin delete actual (strict admin session required)
+app.delete('/api/news/manual-actual', (req, res) => {
+  const sessionCtx = resolveStrictAdminSessionContext(req);
+  const eventId = (req.body && req.body.eventId) || req.query.eventId;
+  const currentEvents = getNewsEventsForUI();
+  const matchedEvent = currentEvents.find((e) => e.id === eventId);
+
+  const outcome = processManualActualRequest(sessionCtx, {
+    eventId: String(eventId || ''),
+    eventTitle: matchedEvent?.title || String(eventId || ''),
+    action: 'delete',
+  });
+
+  if (outcome.statusCode !== 200) {
+    return res.status(outcome.statusCode).json(outcome.body);
+  }
+
+  const status = getNewsFeedStatus();
+  const events = enrichEventsWithActualMeta(getNewsEventsForUI());
+
+  return res.status(200).json({
+    ...outcome.body,
+    feed: status,
+    events,
+    auditLog: loadManualActualAuditLog().slice(-20),
+  });
+});
+
+// GET /api/news/manual-actual/audit - Admin read audit history of manual/FRED actuals
+app.get('/api/news/manual-actual/audit', (req, res) => {
+  const sessionCtx = resolveStrictAdminSessionContext(req);
+  if (!sessionCtx.authenticated) {
+    return res.status(401).json({ status: 'ERROR', error: 'Unauthorized: Valid admin session required.' });
+  }
+  if (String(sessionCtx.user?.role || '').toLowerCase() !== 'admin') {
+    return res.status(403).json({ status: 'ERROR', error: 'Forbidden: Admin role required.' });
+  }
+  return res.json({
+    status: 'SUCCESS',
+    auditLog: loadManualActualAuditLog(),
   });
 });
 

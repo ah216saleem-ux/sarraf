@@ -1,7 +1,7 @@
 // Unified Decision Types for News Tab
 
-export type NewsVerdict = 'BULLISH' | 'BEARISH' | 'WAIT' | 'SKIP';
-export type NewsDecisionStage = 'PREVIEW' | 'FORMING' | 'PRE-NEWS LEAN' | 'PROVISIONAL' | 'CONFIRMED' | 'MIXED';
+export type NewsVerdict = 'BULLISH' | 'BEARISH' | 'WAIT' | 'SKIP' | 'RELEASED';
+export type NewsDecisionStage = 'PREVIEW' | 'FORMING' | 'PRE-NEWS LEAN' | 'PROVISIONAL' | 'CONFIRMED' | 'MIXED' | 'RELEASED';
 
 export type ChipSentiment = 'BULLISH' | 'BEARISH' | 'NEUTRAL' | 'NO_DATA';
 
@@ -30,12 +30,13 @@ export interface ReasonChipItem {
 export interface UnifiedNewsDecision {
   eventId: string;
   eventTitle: string;
-  verdict: NewsVerdict;          // EXACTLY ONE: BULLISH | BEARISH | WAIT | SKIP
+  verdict: NewsVerdict;          // EXACTLY ONE: BULLISH | BEARISH | WAIT | SKIP | RELEASED
   confidence: number;            // 0 - 100 integer confidence (single consistent value everywhere)
-  confidenceDisplay?: string;    // "no call" for WAIT, or e.g. "65%" for directional calls
+  confidenceDisplay?: string;    // "no call" for WAIT, or "Lean: unproven", or e.g. "65%"
+  confidenceLean?: string;       // "Lean: unproven (weak)" | "Lean: unproven (moderate)" | "-"
   confidenceStatus?: 'calibrated' | 'calibrating';
   rawConfidence?: number;        // 0 - 100 uncalibrated confidence
-  stage: NewsDecisionStage;      // PREVIEW | FORMING | PRE-NEWS LEAN | PROVISIONAL | CONFIRMED | MIXED
+  stage: NewsDecisionStage;      // PREVIEW | FORMING | PRE-NEWS LEAN | PROVISIONAL | CONFIRMED | MIXED | RELEASED
   phase?: 'preview' | 'forming' | 'pre' | 'provisional' | 'confirmed' | 'mixed';
   dialScore: number | null;      // -100 to +100, or null ("no call") when < 2 event inputs or WAIT
   scoreDisplay?: string;         // "no call" when score is null, or "+24.5" / "-24.5"

@@ -33,9 +33,10 @@ export interface DecisionEngineEventInput {
     isLocked?: boolean;
   } | null;
   newsDecision?: {
-    word: 'BULLISH' | 'BEARISH' | 'WAIT' | 'SKIP';
+    word: 'BULLISH' | 'BEARISH' | 'WAIT' | 'SKIP' | 'RELEASED';
     confidence: number;
     confidenceDisplay?: string;
+    confidenceLean?: string;
     confidenceStatus?: 'calibrated' | 'calibrating';
     rawConfidence?: number;
     score: number | null;
@@ -96,13 +97,20 @@ export function computeUnifiedDecision(
       eventTitle: evt.title,
       verdict: nd.word,
       confidence: nd.confidence,
-      confidenceDisplay: nd.word === 'WAIT' || nd.word === 'SKIP' ? 'no call' : (nd.confidenceDisplay || `${nd.confidence}%`),
+      confidenceDisplay:
+        nd.word === 'WAIT' || nd.word === 'SKIP' || nd.word === 'RELEASED'
+          ? 'no call'
+          : nd.confidenceDisplay || nd.confidenceLean || `${nd.confidence}%`,
+      confidenceLean: nd.confidenceLean,
       confidenceStatus: nd.confidenceStatus || 'calibrating',
       rawConfidence: nd.rawConfidence,
-      stage: stageMap[nd.phase] || 'PRE-NEWS LEAN',
+      stage: nd.word === 'RELEASED' ? 'RELEASED' : stageMap[nd.phase] || 'PRE-NEWS LEAN',
       phase: nd.phase,
       dialScore: nd.score,
-      scoreDisplay: nd.score === null || nd.word === 'WAIT' || nd.word === 'SKIP' ? 'no call' : (nd.scoreDisplay || `${nd.score >= 0 ? '+' : ''}${nd.score}`),
+      scoreDisplay:
+        nd.score === null || nd.word === 'WAIT' || nd.word === 'SKIP' || nd.word === 'RELEASED'
+          ? 'no call'
+          : nd.scoreDisplay || `${nd.score >= 0 ? '+' : ''}${nd.score}`,
       headlineReason: nd.reason,
       chips: mappedChips,
       lockedAt: nd.lockedAt,

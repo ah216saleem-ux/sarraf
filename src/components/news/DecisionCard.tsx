@@ -1,255 +1,494 @@
-import React from 'react';
-import { RotateCcw, Sparkles } from 'lucide-react';
-import { UnifiedNewsDecision, ChipSentiment } from './decisionTypes';
+import React, { useState } from 'react';
+import { UnifiedNewsDecision, ReasonChipItem } from './decisionTypes';
 
-interface DecisionCardProps {
+export interface DecisionCardProps {
   decision: UnifiedNewsDecision;
-  isNextEvent?: boolean;
-  onSelectNextNews?: () => void;
-  countdownText?: string;
+  theme?: 'dark' | 'light';
+  completedReleasesCount?: number;
+  backtestLabel?: string;
+  hasForecast?: boolean;
+  forecastLean?: 'BULLISH' | 'BEARISH' | 'FLAT' | null;
+  hasActual?: boolean;
+  actualDisplayLine?: string | null;
+}
+
+const ALLOWED_CHIP_IDS = new Set([
+  'forecast',
+  'gold_trend',
+  'gold4h',
+  'dollar_proxy',
+  'dollar',
+  'us10y',
+  'prediction_market',
+  'prediction',
+  'actual_surprise',
+  'gold_reaction',
+]);
+
+function formatChipShortLabel(chip: ReasonChipItem): string {
+  // Strip verbose " weight XX%" suffix for clean compact chips while preserving engine numbers
+  const raw = chip.label.replace(/\s+weight\s+\d+%$/i, '').trim();
+  if (chip.id === 'forecast' && !raw.toLowerCase().startsWith('forecast')) {
+    return `Forecast · ${raw}`;
+  }
+  if ((chip.id === 'gold_trend' || chip.id === 'gold4h') && !raw.toLowerCase().startsWith('gold')) {
+    return `Gold · ${raw}`;
+  }
+  if ((chip.id === 'dollar_proxy' || chip.id === 'dollar') && !raw.toLowerCase().startsWith('dollar')) {
+    return `Dollar · ${raw}`;
+  }
+  if (chip.id === 'us10y' && !raw.toLowerCase().startsWith('us10y')) {
+    return `US10Y · ${raw}`;
+  }
+  if (
+    (chip.id === 'prediction_market' || chip.id === 'prediction') &&
+    !raw.toLowerCase().startsWith('prediction')
+  ) {
+    return `Prediction market · ${raw}`;
+  }
+  return raw;
+}
+
+function buildPlainEnglishReason(
+  decision: UnifiedNewsDecision,
+  hasForecast: boolean,
+  forecastLean: 'BULLISH' | 'BEARISH' | 'FLAT' | null,
+  hasActual: boolean
+): string {
+  const v = decision.verdict;
+  const raw = (decision.headlineReason || '').toLowerCase();
+
+  if (v === 'SKIP') {
+    return 'Low impact. Skipped.';
+  }
+
+  if (v === 'RELEASED') {
+    if (hasActual) {
+      return 'Result is in. See reading below.';
+    }
+    return 'Official print not published in feed yet.';
+  }
+
+  if (v === 'BULLISH') {
+    return '2+ signals agree: BULLISH for gold.';
+  }
+
+  if (v === 'BEARISH') {
+    return '2+ signals agree: BEARISH for gold.';
+  }
+
+  // WAIT cases
+  if (raw.includes('speech') || raw.includes('press conference') || raw.includes('testimony')) {
+    return 'Central bank speech. Guidance-dependent.';
+  }
+  if (!hasForecast || raw.includes('0 active non-ai event inputs')) {
+    return 'No forecast yet. Need 2 signals to call.';
+  }
+  if (raw.includes('disagree') || raw.includes('gate 3') || raw.includes('|score| <')) {
+    return 'Signals disagree.';
+  }
+  if (
+    raw.includes('only 1 active non-ai event input') ||
+    forecastLean === 'BULLISH' ||
+    forecastLean === 'BEARISH'
+  ) {
+    return 'Only 1 signal (forecast). Need 2 to call.';
+  }
+  if (forecastLean === 'FLAT') {
+    return 'Forecast matches previous. Need 2 signals to call.';
+  }
+  return 'Only 1 signal (forecast). Need 2 to call.';
 }
 
 export const DecisionCard: React.FC<DecisionCardProps> = ({
   decision,
-  isNextEvent = true,
-  onSelectNextNews,
-  countdownText,
+  theme = 'dark',
+  completedReleasesCount = 0,
+  backtestLabel,
+  hasForecast = false,
+  forecastLean = null,
+  hasActual = false,
+  actualDisplayLine = null,
 }) => {
-  // Map dialScore (-100 to +100) to needle rotation angle [-75deg to +75deg]; 0deg when dialScore is null ("no call")
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const isDark = theme === 'dark';
+
+  // Colors per theme specification
+  const colors = isDark
+    ? {
+        surface: '#0e1218',
+        line: '#1a212b',
+        text: '#e9eef4',
+        muted: '#7d8996',
+        gold: '#e6b84a',
+        up: '#34d399',
+        down: '#f4727c',
+        track: '#1a212b',
+      }
+    : {
+        surface: '#ffffff',
+        line: '#dfe4ea',
+        text: '#11171e',
+        muted: '#5d6874',
+        gold: '#9a6a00',
+        up: '#0c8a5d',
+        down: '#c23a46',
+        track: '#dfe4ea',
+      };
+
+  const verdict = decision.verdict;
+  const isBull = verdict === 'BULLISH';
+  const isBear = verdict === 'BEARISH';
+  const isWait = verdict === 'WAIT';
+  const isReleased = verdict === 'RELEASED';
+  const isSkipOrReleased = verdict === 'SKIP' || verdict === 'RELEASED';
+
+  const verdictColor = isBull
+    ? colors.up
+    : isBear
+    ? colors.down
+    : isWait
+    ? colors.gold
+    : colors.muted;
+
+  // Needle angle: -72deg (left/bearish) to +72deg (right/bullish), 0deg (center) for WAIT / SKIP / RELEASED
   const needleAngle =
-    decision.dialScore === null || decision.verdict === 'WAIT' || decision.verdict === 'SKIP'
+    decision.dialScore === null || isWait || isSkipOrReleased
       ? 0
-      : Math.max(-75, Math.min(75, (decision.dialScore / 100) * 75));
+      : Math.max(-72, Math.min(72, (decision.dialScore / 100) * 72));
 
-  const verdictColorClass =
-    decision.verdict === 'BULLISH'
-      ? 'text-emerald-400'
-      : decision.verdict === 'BEARISH'
-      ? 'text-rose-400'
-      : decision.verdict === 'WAIT'
-      ? 'text-amber-400'
-      : 'text-neutral-400';
+  // Engine confidence text exactly as the engine gives it ("Lean: unproven", or "no call")
+  const rawConfText =
+    verdict === 'WAIT' || verdict === 'SKIP' || verdict === 'RELEASED'
+      ? 'no call'
+      : decision.confidenceDisplay || decision.confidenceLean || 'Lean: unproven';
 
-  const confidenceBarColor =
-    decision.verdict === 'BULLISH'
-      ? 'bg-emerald-400'
-      : decision.verdict === 'BEARISH'
-      ? 'bg-rose-400'
-      : decision.verdict === 'WAIT'
-      ? 'bg-amber-400'
-      : 'bg-neutral-500';
+  const ariaConfSuffix = rawConfText.toLowerCase().replace(/[()]/g, '').trim();
+  const dialAriaLabel = `Decision: ${verdict}, ${ariaConfSuffix}`;
 
-  const renderChipStyle = (sentiment: ChipSentiment) => {
-    switch (sentiment) {
-      case 'BULLISH':
-        return 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300';
-      case 'BEARISH':
-        return 'bg-rose-500/10 border-rose-500/30 text-rose-300';
-      case 'NEUTRAL':
-        return 'bg-white/5 border-white/10 text-neutral-300';
-      case 'NO_DATA':
-      default:
-        return 'bg-white/[0.03] border-white/5 text-neutral-500 italic';
-    }
-  };
+  // Select up to 4 small reason chips (Forecast, Gold, Dollar, US10Y, Prediction market)
+  const filteredChips = (decision.chips || [])
+    .filter((c) => ALLOWED_CHIP_IDS.has(c.id))
+    .slice(0, 4);
+  const displayChips =
+    filteredChips.length > 0 ? filteredChips : (decision.chips || []).slice(0, 4);
 
-  const stageBadgeStyle = () => {
-    switch (decision.stage) {
-      case 'CONFIRMED':
-        return 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300';
-      case 'PROVISIONAL':
-        return 'bg-amber-500/15 border-amber-500/40 text-amber-300';
-      case 'MIXED':
-        return 'bg-rose-500/15 border-rose-500/40 text-rose-300';
-      case 'FORMING':
-        return 'bg-sky-500/15 border-sky-500/40 text-sky-300';
-      case 'PREVIEW':
-        return 'bg-neutral-800 border-neutral-700 text-neutral-400';
-      case 'PRE-NEWS LEAN':
-      default:
-        return 'bg-white/5 border-white/10 text-neutral-400';
-    }
-  };
+  const isBacktestVerified = completedReleasesCount >= 30;
+  const effectiveBacktestLabel = isBacktestVerified
+    ? backtestLabel || `Backtest: ${completedReleasesCount} releases`
+    : 'Backtest: unverified';
+
+  const plainEnglishReason = buildPlainEnglishReason(
+    decision,
+    hasForecast,
+    forecastLean,
+    hasActual
+  );
+
+  // Tick marks along the 180-degree semicircle (radius 48, center 62, 58)
+  const tickAngles = [-75, -50, -25, 0, 25, 50, 75];
 
   return (
-    <div className="w-full p-4 sm:p-5 rounded-2xl border border-white/10 bg-gradient-to-b from-black/80 to-black/60 shadow-[0_4px_24px_rgba(0,0,0,0.4)] backdrop-blur-md space-y-3.5 transition-all">
-      {/* Top Header: Title, Stage & Next News Button */}
-      <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-white/10">
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          <span className="text-[11px] font-bold text-[#FFD97A] uppercase tracking-wider flex items-center gap-1.5 shrink-0">
-            <Sparkles className="w-3.5 h-3.5 text-[#FFD97A]" />
-            DECISION
-          </span>
-          <span className="text-neutral-500 text-xs shrink-0">·</span>
-          <h3 className="text-xs sm:text-sm font-bold text-white truncate" title={decision.eventTitle}>
-            {decision.eventTitle}
-          </h3>
-          {isNextEvent ? (
-            <span className="hidden sm:inline-flex px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#E8B84A]/15 text-[#FFD97A] border border-[#E8B84A]/30">
-              NEXT KEY CATALYST
-            </span>
-          ) : null}
-        </div>
+    <section
+      id="news-decision-card"
+      className="w-full rounded-2xl border p-4 sm:p-5 transition-colors"
+      style={{
+        backgroundColor: colors.surface,
+        borderColor: colors.line,
+      }}
+      aria-label="Single News Decision Card"
+    >
+      {/* Top Eyebrow & Backtest Status */}
+      <div
+        className="flex items-center justify-between gap-2 pb-3 border-b"
+        style={{ borderColor: colors.line }}
+      >
+        <span
+          className="font-mono text-[10px] uppercase tracking-[0.14em] min-w-0 truncate"
+          style={{ color: colors.muted }}
+        >
+          DECISION ENGINE · {decision.eventTitle}
+        </span>
 
-        <div className="flex items-center gap-2 shrink-0">
-          {countdownText && (
-            <span className="text-[11px] font-mono font-bold text-neutral-400">
-              {countdownText}
-            </span>
-          )}
-
-          {!isNextEvent && onSelectNextNews && (
-            <button
-              onClick={onSelectNextNews}
-              className="px-2 py-1 rounded-lg bg-[#E8B84A]/15 hover:bg-[#E8B84A]/25 border border-[#E8B84A]/40 text-[#FFD97A] text-[10px] font-mono font-bold tracking-wider transition-colors flex items-center gap-1 cursor-pointer active:scale-95"
-              title="Return to Next Upcoming News"
-            >
-              <RotateCcw className="w-3 h-3 text-[#FFD97A]" />
-              <span>NEXT NEWS</span>
-            </button>
-          )}
-        </div>
+        <span
+          className="shrink-0 font-mono text-[10px] uppercase tracking-[0.14em] px-2 py-0.5 rounded border"
+          style={{
+            color: colors.muted,
+            borderColor: colors.line,
+            backgroundColor: isDark ? '#07090c' : '#f3f5f7',
+          }}
+        >
+          {effectiveBacktestLabel}
+        </span>
       </div>
 
-      {/* Main Core: Dial (max 124px wide) + Verdict + Confidence */}
-      <div className="flex items-center gap-4 sm:gap-6 flex-wrap sm:flex-nowrap">
-        {/* Compact Dial: Max 124px wide semicircle */}
-        <div className="shrink-0 flex flex-col items-center justify-center relative w-[120px] select-none">
+      {/* Center Stage: ONE 124px Half-Circle Dial + Single Verdict Word + Confidence */}
+      <div className="py-4 flex flex-col sm:flex-row items-center gap-4 sm:gap-6">
+        {/* 124px Half-Circle Dial */}
+        <div className="shrink-0 flex flex-col items-center">
           <svg
-            viewBox="0 0 120 66"
-            className="w-[120px] h-[66px] overflow-visible"
-            aria-label={`Decision dial indicating ${decision.verdict}`}
+            width="124"
+            height="68"
+            viewBox="0 0 124 68"
+            role="img"
+            aria-label={dialAriaLabel}
+            className="overflow-visible select-none"
           >
-            <defs>
-              <linearGradient id="decisionDialGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stopColor="#ef4444" />
-                <stop offset="35%" stopColor="#ef4444" />
-                <stop offset="50%" stopColor="#71717a" />
-                <stop offset="65%" stopColor="#22c55e" />
-                <stop offset="100%" stopColor="#22c55e" />
-              </linearGradient>
-              <filter id="dialGlow" x="-20%" y="-20%" width="140%" height="140%">
-                <feGaussianBlur stdDeviation="2" result="blur" />
-                <feComposite in="SourceGraphic" in2="blur" operator="over" />
-              </filter>
-            </defs>
-
-            {/* Background Arc */}
+            {/* Outer semicircle track */}
             <path
-              d="M 12 58 A 48 48 0 0 1 108 58"
+              d="M 14 58 A 48 48 0 0 1 110 58"
               fill="none"
-              stroke="rgba(255, 255, 255, 0.08)"
-              strokeWidth="8"
+              stroke={colors.track}
+              strokeWidth="6"
               strokeLinecap="round"
             />
 
-            {/* Colored Dial Arc: Red -> Grey -> Green */}
+            {/* Left Bearish segment */}
             <path
-              d="M 12 58 A 48 48 0 0 1 108 58"
+              d="M 14 58 A 48 48 0 0 1 45 13"
               fill="none"
-              stroke="url(#decisionDialGradient)"
-              strokeWidth="8"
+              stroke={colors.down}
+              strokeWidth="4"
               strokeLinecap="round"
-              filter="url(#dialGlow)"
+              opacity={isBear ? 0.95 : 0.35}
             />
 
-            {/* Center tick indicator */}
-            <line x1="60" y1="10" x2="60" y2="15" stroke="rgba(255,255,255,0.4)" strokeWidth="1.5" />
+            {/* Center Wait segment */}
+            <path
+              d="M 49 12 A 48 48 0 0 1 75 12"
+              fill="none"
+              stroke={isWait ? colors.gold : colors.muted}
+              strokeWidth="4"
+              strokeLinecap="round"
+              opacity={isWait ? 0.95 : 0.35}
+            />
 
-            {/* Animated Needle */}
+            {/* Right Bullish segment */}
+            <path
+              d="M 79 13 A 48 48 0 0 1 110 58"
+              fill="none"
+              stroke={colors.up}
+              strokeWidth="4"
+              strokeLinecap="round"
+              opacity={isBull ? 0.95 : 0.35}
+            />
+
+            {/* Radial ticks */}
+            {tickAngles.map((deg) => {
+              const rad = ((deg - 90) * Math.PI) / 180;
+              const r1 = 38;
+              const r2 = deg === 0 ? 43 : 41;
+              const x1 = 62 + Math.cos(rad) * r1;
+              const y1 = 58 + Math.sin(rad) * r1;
+              const x2 = 62 + Math.cos(rad) * r2;
+              const y2 = 58 + Math.sin(rad) * r2;
+              return (
+                <line
+                  key={deg}
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  stroke={colors.muted}
+                  strokeWidth={deg === 0 ? '1.5' : '1'}
+                  opacity="0.6"
+                />
+              );
+            })}
+
+            {/* Needle */}
             <g
               style={{
-                transformOrigin: '60px 58px',
+                transformOrigin: '62px 58px',
                 transform: `rotate(${needleAngle}deg)`,
-                transition: 'transform 600ms cubic-bezier(0.34, 1.56, 0.64, 1)',
+                transition: 'transform 500ms cubic-bezier(0.22, 1, 0.36, 1)',
               }}
             >
               <line
-                x1="60"
+                x1="62"
                 y1="58"
-                x2="60"
-                y2="16"
-                stroke="#FFD97A"
-                strokeWidth="2.5"
+                x2="62"
+                y2="18"
+                stroke={verdictColor}
+                strokeWidth="2.2"
                 strokeLinecap="round"
-                filter="url(#dialGlow)"
               />
-              <circle cx="60" cy="16" r="2.5" fill="#FFFFFF" />
+              <circle cx="62" cy="18" r="2.2" fill={verdictColor} />
             </g>
 
-            {/* Center Pivot Pin */}
-            <circle cx="60" cy="58" r="4.5" fill="#FFD97A" />
-            <circle cx="60" cy="58" r="2" fill="#0A0A0A" />
+            {/* Pivot */}
+            <circle
+              cx="62"
+              cy="58"
+              r="4.5"
+              fill={verdictColor}
+              stroke={colors.surface}
+              strokeWidth="1.5"
+            />
           </svg>
-
-          {/* Sub-label for dial bounds */}
-          <div className="w-full flex justify-between text-[9px] font-mono text-neutral-500 px-1 -mt-1">
-            <span>BEAR</span>
-            <span>WAIT</span>
-            <span>BULL</span>
-          </div>
         </div>
 
-        {/* Verdict & Confidence Column */}
-        <div className="flex-1 min-w-[160px] space-y-1.5">
-          <div className="flex items-center gap-2.5 flex-wrap">
-            <span className={`text-[22px] font-bold font-sans tracking-wide leading-none ${verdictColorClass}`}>
-              {decision.verdict}
-            </span>
-
+        {/* Verdict Word + Engine Confidence Text + Thin Confidence Bar + Forecast Lean + Plain-English Reason */}
+        <div className="flex-1 w-full text-center sm:text-left space-y-2 min-w-0">
+          <div className="flex flex-col sm:flex-row sm:items-baseline gap-1 sm:gap-3 justify-center sm:justify-start">
             <span
-              className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider border ${stageBadgeStyle()}`}
+              className="text-2xl sm:text-[26px] font-bold font-mono tracking-tight leading-none"
+              style={{ color: verdictColor }}
             >
-              {decision.stage}
+              {verdict}
+            </span>
+            <span
+              className="font-mono text-xs font-medium"
+              style={{ color: colors.muted }}
+            >
+              {rawConfText}
             </span>
           </div>
 
-          {/* Confidence row and thin bar */}
-          <div className="space-y-1 pt-0.5">
-            <div className="flex items-center justify-between text-xs font-mono">
-              <span className="text-neutral-400">
-                {decision.verdict === 'WAIT' || decision.verdict === 'SKIP' ? 'Call' : decision.confidenceDisplay?.startsWith('Lean') ? 'Strength' : 'Confidence'}{decision.verdict !== 'WAIT' && decision.verdict !== 'SKIP' && decision.confidenceStatus === 'calibrating' && !decision.confidenceDisplay?.startsWith('Lean') ? ' (calibrating)' : ''}
-              </span>
-              <span className="text-white font-bold">
-                {decision.verdict === 'WAIT' || decision.verdict === 'SKIP' ? 'no call' : (decision.confidenceDisplay || `${decision.confidence}%`)}
-              </span>
+          {/* Thin confidence bar */}
+          <div
+            className="w-full max-w-[220px] mx-auto sm:mx-0 h-[3px] rounded-full overflow-hidden"
+            style={{ backgroundColor: colors.line }}
+          >
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${
+                  isWait || isSkipOrReleased
+                    ? 0
+                    : Math.min(100, Math.max(8, decision.confidence || 0))
+                }%`,
+                backgroundColor: verdictColor,
+              }}
+            />
+          </div>
+
+          {/* Item 1: FORECAST LEAN (separate from the decision, muted colour, small arrow) */}
+          {isWait && (
+            <div
+              id="forecast-lean-line"
+              className="font-mono text-[11px] leading-snug flex items-center justify-center sm:justify-start gap-1.5"
+              style={{ color: colors.muted }}
+            >
+              {!hasForecast ? (
+                <span>No forecast yet</span>
+              ) : forecastLean === 'BULLISH' ? (
+                <>
+                  <span aria-hidden="true">↑</span>
+                  <span>Forecast lean: BULLISH for gold (weak, 1 signal)</span>
+                </>
+              ) : forecastLean === 'BEARISH' ? (
+                <>
+                  <span aria-hidden="true">↓</span>
+                  <span>Forecast lean: BEARISH for gold (weak, 1 signal)</span>
+                </>
+              ) : (
+                <span>Forecast flat vs previous (weak, 1 signal)</span>
+              )}
+            </div>
+          )}
+
+          {/* Item 2d: Released status line under dial */}
+          {isReleased && (
+            <div
+              className="font-mono text-[11px] leading-snug"
+              style={{ color: colors.muted }}
+            >
+              {hasActual && actualDisplayLine ? actualDisplayLine : 'Actual not available'}
+            </div>
+          )}
+
+          {/* Item 3: Plain-English Reason + Collapsible Technical Details (no ellipsis cut) */}
+          <div className="pt-0.5 space-y-1.5">
+            <div className="flex flex-wrap items-baseline justify-center sm:justify-start gap-x-2.5 gap-y-1">
+              <p
+                className="text-xs font-['Sora'] leading-relaxed"
+                style={{ color: colors.text }}
+              >
+                {plainEnglishReason}
+              </p>
+
+              {decision.headlineReason && (
+                <button
+                  type="button"
+                  onClick={() => setDetailsOpen((prev) => !prev)}
+                  aria-expanded={detailsOpen}
+                  className="font-mono text-[10px] uppercase tracking-[0.14em] underline cursor-pointer shrink-0"
+                  style={{ color: colors.muted }}
+                >
+                  {detailsOpen ? 'Hide details [-]' : 'Details [+]'}
+                </button>
+              )}
             </div>
 
-            <div className="w-full max-w-[200px] h-[3px] bg-white/10 rounded-full overflow-hidden">
+            {detailsOpen && decision.headlineReason && (
               <div
-                className={`h-full rounded-full transition-all duration-500 ${confidenceBarColor}`}
+                className="p-2.5 rounded-lg border font-mono text-[11px] leading-relaxed text-left whitespace-normal break-words"
                 style={{
-                  width: `${decision.verdict === 'WAIT' || decision.verdict === 'SKIP' ? 0 : Math.min(100, Math.max(0, decision.confidence))}%`,
+                  backgroundColor: isDark ? '#07090c' : '#f3f5f7',
+                  borderColor: colors.line,
+                  color: colors.muted,
                 }}
-              />
-            </div>
+              >
+                {decision.headlineReason}
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Short Sentence of Reason */}
-      {decision.headlineReason && (
-        <p className="text-xs text-neutral-300 leading-relaxed font-sans pt-0.5">
-          {decision.headlineReason}
-        </p>
-      )}
+      {/* Up to 4 small reason chips (Forecast, Gold, Dollar, US10Y, Prediction market) coloured up/down/flat */}
+      {displayChips.length > 0 && (
+        <div
+          className="pt-3 border-t flex flex-wrap items-center gap-1.5"
+          style={{ borderColor: colors.line }}
+        >
+          {displayChips.map((chip) => {
+            const isUp = chip.sentiment === 'BULLISH';
+            const isDown = chip.sentiment === 'BEARISH';
+            const chipColor = isUp ? colors.up : isDown ? colors.down : colors.muted;
+            const chipBg = isUp
+              ? isDark
+                ? 'rgba(52, 211, 153, 0.08)'
+                : 'rgba(12, 138, 93, 0.08)'
+              : isDown
+              ? isDark
+                ? 'rgba(244, 114, 124, 0.08)'
+                : 'rgba(194, 58, 70, 0.08)'
+              : isDark
+              ? '#07090c'
+              : '#f3f5f7';
+            const chipBorder = isUp
+              ? isDark
+                ? 'rgba(52, 211, 153, 0.28)'
+                : 'rgba(12, 138, 93, 0.28)'
+              : isDown
+              ? isDark
+                ? 'rgba(244, 114, 124, 0.28)'
+                : 'rgba(194, 58, 70, 0.28)'
+              : colors.line;
 
-      {/* Reason Chips (Forecast, Gold 4h, Dollar, US10Y, History, Prediction market, AHMED AI) */}
-      {decision.chips && decision.chips.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 pt-1">
-          {decision.chips.map((chip) => (
-            <span
-              key={chip.id}
-              className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-mono font-medium border transition-colors ${renderChipStyle(
-                chip.sentiment
-              )}`}
-              title={`${chip.label} (${chip.sentiment})`}
-            >
-              {chip.label}
-            </span>
-          ))}
+            return (
+              <span
+                key={chip.id}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-mono text-[11px] border"
+                style={{
+                  color: chipColor,
+                  backgroundColor: chipBg,
+                  borderColor: chipBorder,
+                }}
+              >
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ backgroundColor: chipColor }}
+                />
+                <span>{formatChipShortLabel(chip)}</span>
+              </span>
+            );
+          })}
         </div>
       )}
-    </div>
+    </section>
   );
 };
+

@@ -1,6 +1,15 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { DATA_DIR } from './deploymentSafety.ts';
+import {
+  processManualActualRequest,
+  loadActualsMeta,
+  loadManualActualAuditLog,
+  resetManualActualRateLimit,
+  computeActualReactionReading,
+  convertFredObservationsForEvent,
+} from './newsActualsManager.ts';
 import {
   parseFinancialNumber,
   isReversedGoldEvent,
@@ -1045,6 +1054,337 @@ export function runPhase5TestSuite(): Phase5TestSuiteReport {
     });
   }
 
+  // -------------------------------------------------------------
+  // Test T: Manual Actual Security — 401 Unauth, 403 Non-Admin, 400 Bad Value, 429 Rate Limit, Audit & Delete/Correct (Round 14 Item 2)
+  // -------------------------------------------------------------
+  try {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sarraf-r14-sec-'));
+    resetManualActualRateLimit();
+
+    const eventId = 'EVT-2026-10-22-USD-unemployment_claims';
+    const eventTitle = 'Unemployment Claims';
+
+    // 1. Unauthenticated POST -> 401
+    const res401 = processManualActualRequest(
+      { authenticated: false, user: null, clientIp: '10.0.0.1' },
+      { eventId, eventTitle, numberValue: '210', unit: 'K' },
+      { customDataDir: tmpDir }
+    );
+
+    // 2. Non-admin session POST -> 403
+    const res403 = processManualActualRequest(
+      { authenticated: true, user: { email: 'viewer@sarraf.gold', role: 'viewer' }, clientIp: '10.0.0.2' },
+      { eventId, eventTitle, numberValue: '210', unit: 'K' },
+      { customDataDir: tmpDir }
+    );
+
+    const adminSession = {
+      authenticated: true,
+      user: { email: 'admin@sarraf.gold', role: 'admin' as const },
+      clientIp: '10.0.0.3',
+    };
+
+    // 3. Bad values -> 400 (non-numeric, bad unit not in whitelist, out of sane indicator range)
+    const res400NonNum = processManualActualRequest(
+      adminSession,
+      { eventId, eventTitle, numberValue: '210abc', unit: 'K' },
+      { customDataDir: tmpDir }
+    );
+    const res400BadUnit = processManualActualRequest(
+      adminSession,
+      { eventId, eventTitle, numberValue: '210', unit: 'USD' },
+      { customDataDir: tmpDir }
+    );
+    const res400OutRange = processManualActualRequest(
+      adminSession,
+      { eventId, eventTitle, numberValue: '9999', unit: 'K' },
+      { customDataDir: tmpDir }
+    );
+
+    // 4. Valid SET -> 200, then CORRECT -> 200, then DELETE -> 200 + Audit verification
+    const resSet = processManualActualRequest(
+      adminSession,
+      { eventId, eventTitle, action: 'set', numberValue: '210', unit: 'K' },
+      { customDataDir: tmpDir, nowIso: '2026-10-22T19:00:00.000Z' }
+    );
+    const resCorrect = processManualActualRequest(
+      adminSession,
+      { eventId, eventTitle, action: 'correct', numberValue: '215', unit: 'K' },
+      { customDataDir: tmpDir, nowIso: '2026-10-22T19:05:00.000Z' }
+    );
+    const resDelete = processManualActualRequest(
+      adminSession,
+      { eventId, eventTitle, action: 'delete' },
+      { customDataDir: tmpDir, nowIso: '2026-10-22T19:10:00.000Z' }
+    );
+
+    const auditLog = loadManualActualAuditLog(tmpDir);
+    const metaAfterDelete = loadActualsMeta(tmpDir);
+
+    // 5. Rate limit check (10 requests in 60s window; 11th returns 429)
+    const rateLimitedSession = {
+      authenticated: true,
+      user: { email: 'ratetest@sarraf.gold', role: 'admin' as const },
+      clientIp: '10.0.0.99',
+    };
+    let lastStatus = 200;
+    for (let i = 0; i < 11; i++) {
+      const r = processManualActualRequest(
+        rateLimitedSession,
+        { eventId, eventTitle, numberValue: '210', unit: 'K' },
+        { customDataDir: tmpDir, nowMs: 1_700_000_000_000 + i * 100 }
+      );
+      lastStatus = r.statusCode;
+    }
+
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {}
+
+    const passed =
+      res401.statusCode === 401 &&
+      res403.statusCode === 403 &&
+      res400NonNum.statusCode === 400 &&
+      res400BadUnit.statusCode === 400 &&
+      res400OutRange.statusCode === 400 &&
+      resSet.statusCode === 200 &&
+      resCorrect.statusCode === 200 &&
+      resDelete.statusCode === 200 &&
+      metaAfterDelete[eventId] === undefined &&
+      auditLog.length === 3 &&
+      auditLog[0].action === 'SET' &&
+      auditLog[0].oldValue === null &&
+      auditLog[0].newValue === '210K' &&
+      auditLog[1].action === 'CORRECT' &&
+      auditLog[1].oldValue === '210K' &&
+      auditLog[1].newValue === '215K' &&
+      auditLog[2].action === 'DELETE' &&
+      auditLog[2].oldValue === '215K' &&
+      auditLog[2].newValue === null &&
+      lastStatus === 429;
+
+    results.push({
+      id: 't',
+      name: 'Manual Actual Security: 401 Unauth, 403 Non-Admin, 400 Bad Value, 429 Rate Limit, Audit & Delete (Round 14 Item 2)',
+      passed,
+      expected: 'unauth=401, viewer=403, badNum/badUnit/outOfRange=400, rateLimit=429, audit=[SET(null->210K), CORRECT(210K->215K), DELETE(215K->null)]',
+      actual: `unauth=${res401.statusCode}, nonAdmin=${res403.statusCode}, badVal=[${res400NonNum.statusCode},${res400BadUnit.statusCode},${res400OutRange.statusCode}], rateLimit11th=${lastStatus}, audit=${auditLog.map((a) => `${a.action}(${a.oldValue}->${a.newValue} by ${a.who})`).join(', ')}`,
+    });
+  } catch (err: any) {
+    results.push({
+      id: 't',
+      name: 'Manual Actual Security (Round 14 Item 2)',
+      passed: false,
+      expected: '401/403/400/429 and audit trail',
+      actual: `Exception: ${err.message}`,
+    });
+  }
+
+  // -------------------------------------------------------------
+  // Test U: Wording — ABOVE FORECAST / BELOW FORECAST / IN LINE + Separate Gold Reading (Round 14 Item 3)
+  // -------------------------------------------------------------
+  try {
+    const claimsAbove = computeActualReactionReading(
+      'Unemployment Claims',
+      '200K',
+      200000,
+      '210K',
+      210000
+    );
+    const pmiAbove = computeActualReactionReading(
+      'Flash Manufacturing PMI',
+      '55.4',
+      55.4,
+      '56.2',
+      56.2
+    );
+    const cpiInline = computeActualReactionReading(
+      'CPI m/m',
+      '0.2%',
+      0.2,
+      '0.2%',
+      0.2
+    );
+
+    const noBeatMissWords =
+      !JSON.stringify({ claimsAbove, pmiAbove, cpiInline }).includes('"BEAT"') &&
+      !JSON.stringify({ claimsAbove, pmiAbove, cpiInline }).includes('"MISS"');
+
+    const passed =
+      noBeatMissWords &&
+      claimsAbove?.comparisonTag === 'ABOVE FORECAST' &&
+      claimsAbove?.goldDirection === 'BULLISH' &&
+      claimsAbove?.combinedLabel === 'ABOVE FORECAST · textbook gold BULLISH' &&
+      pmiAbove?.comparisonTag === 'ABOVE FORECAST' &&
+      pmiAbove?.goldDirection === 'BEARISH' &&
+      pmiAbove?.combinedLabel === 'ABOVE FORECAST · textbook gold BEARISH' &&
+      cpiInline?.comparisonTag === 'IN LINE' &&
+      cpiInline?.combinedLabel === 'IN LINE · textbook gold NEUTRAL';
+
+    results.push({
+      id: 'u',
+      name: 'Reaction Wording: ABOVE FORECAST / BELOW FORECAST / IN LINE + Separate Gold Reading (Round 14 Item 3)',
+      passed,
+      expected: 'Claims above = "ABOVE FORECAST · textbook gold BULLISH"; PMI above = "ABOVE FORECAST · textbook gold BEARISH"; equal = "IN LINE · textbook gold NEUTRAL"',
+      actual: `Claims(210K vs 200K)="${claimsAbove?.combinedLabel}" | PMI(56.2 vs 55.4)="${pmiAbove?.combinedLabel}" | Inline="${cpiInline?.combinedLabel}"`,
+    });
+  } catch (err: any) {
+    results.push({
+      id: 'u',
+      name: 'Reaction Wording (Round 14 Item 3)',
+      passed: false,
+      expected: 'ABOVE/BELOW/IN LINE + textbook gold direction',
+      actual: `Exception: ${err.message}`,
+    });
+  }
+
+  // -------------------------------------------------------------
+  // Test V: FRED Reference Period & Series Conversions — ICSA, UNRATE, CPIAUCSL (m/m & y/y), PAYEMS (Round 14 Item 4)
+  // -------------------------------------------------------------
+  try {
+    // 1. ICSA: Release Thu 2026-10-22 -> Reference Saturday 2026-10-17, value in persons (242000 -> 242K)
+    const sampleIcsaResponse = {
+      observations: [
+        { realtime_start: '2026-10-22', date: '2026-10-17', value: '242000' },
+        { realtime_start: '2026-10-15', date: '2026-10-10', value: '241000' },
+      ],
+    };
+    const convIcsa = convertFredObservationsForEvent(
+      'Unemployment Claims',
+      '2026-10-22T12:30:00.000Z',
+      sampleIcsaResponse
+    );
+
+    // 2. UNRATE: Release Fri 2026-10-02 -> Reference month 2026-09-01, value 4.1 -> 4.1%
+    const sampleUnrateResponse = {
+      observations: [
+        { realtime_start: '2026-10-02', date: '2026-09-01', value: '4.1' },
+        { realtime_start: '2026-09-04', date: '2026-08-01', value: '4.2' },
+      ],
+    };
+    const convUnrate = convertFredObservationsForEvent(
+      'Unemployment Rate',
+      '2026-10-02T12:30:00.000Z',
+      sampleUnrateResponse
+    );
+
+    // 3. CPIAUCSL: Release Wed 2026-10-14 -> Reference month 2026-09-01 (index levels -> m/m % and y/y %)
+    const sampleCpiResponse = {
+      observations: [
+        { realtime_start: '2026-10-14', date: '2026-09-01', value: '315.664' },
+        { realtime_start: '2026-09-11', date: '2026-08-01', value: '314.796' },
+        { realtime_start: '2025-10-12', date: '2025-09-01', value: '307.789' },
+      ],
+    };
+    const convCpiMom = convertFredObservationsForEvent(
+      'CPI m/m',
+      '2026-10-14T12:30:00.000Z',
+      sampleCpiResponse
+    );
+    const convCpiYoy = convertFredObservationsForEvent(
+      'CPI y/y',
+      '2026-10-14T12:30:00.000Z',
+      sampleCpiResponse
+    );
+
+    // 4. PAYEMS: Release Fri 2026-10-02 -> Reference month 2026-09-01 (level diff in K + revision note)
+    const samplePayemsResponse = {
+      observations: [
+        { realtime_start: '2026-10-02', date: '2026-09-01', value: '159105' },
+        { realtime_start: '2026-10-02', date: '2026-08-01', value: '158925' },
+      ],
+    };
+    const convPayems = convertFredObservationsForEvent(
+      'Non-Farm Employment Change',
+      '2026-10-02T12:30:00.000Z',
+      samplePayemsResponse
+    );
+
+    const passed =
+      convIcsa?.accepted === true &&
+      convIcsa?.expectedObservationDate === '2026-10-17' &&
+      convIcsa?.formattedActual === '242K' &&
+      convUnrate?.accepted === true &&
+      convUnrate?.expectedObservationDate === '2026-09-01' &&
+      convUnrate?.formattedActual === '4.1%' &&
+      convCpiMom?.accepted === true &&
+      convCpiMom?.formattedActual === '0.3%' &&
+      convCpiYoy?.accepted === true &&
+      convCpiYoy?.formattedActual === '2.6%' &&
+      convPayems?.accepted === true &&
+      convPayems?.formattedActual === '180K' &&
+      Boolean(convPayems?.note && convPayems.note.includes('revisions'));
+
+    results.push({
+      id: 'v',
+      name: 'FRED Conversions: ICSA (persons->K), UNRATE (%), CPIAUCSL (m/m & y/y %), PAYEMS (diff K + revisions note) (Round 14 Item 4)',
+      passed,
+      expected: 'ICSA=242K (2026-10-17), UNRATE=4.1% (2026-09-01), CPI_MOM=0.3%, CPI_YOY=2.6%, PAYEMS=180K (with revision note)',
+      actual: `ICSA=${convIcsa?.formattedActual} (${convIcsa?.expectedObservationDate}), UNRATE=${convUnrate?.formattedActual}, CPI_MOM=${convCpiMom?.formattedActual}, CPI_YOY=${convCpiYoy?.formattedActual}, PAYEMS=${convPayems?.formattedActual}`,
+    });
+  } catch (err: any) {
+    results.push({
+      id: 'v',
+      name: 'FRED Series Conversions (Round 14 Item 4)',
+      passed: false,
+      expected: 'Accurate conversions for ICSA, UNRATE, CPIAUCSL, PAYEMS',
+      actual: `Exception: ${err.message}`,
+    });
+  }
+
+  // -------------------------------------------------------------
+  // Test W: FRED Stale-Observation Rejection (Round 14 Items 4 & 5)
+  // -------------------------------------------------------------
+  try {
+    // 1. Stale ICSA: Release Thu 2026-10-22 expects Saturday 2026-10-17, but latest FRED observation is 2026-10-10
+    const staleIcsaResponse = {
+      observations: [
+        { realtime_start: '2026-10-15', date: '2026-10-10', value: '241000' },
+        { realtime_start: '2026-10-08', date: '2026-10-03', value: '238000' },
+      ],
+    };
+    const staleIcsa = convertFredObservationsForEvent(
+      'Unemployment Claims',
+      '2026-10-22T12:30:00.000Z',
+      staleIcsaResponse
+    );
+
+    // 2. Stale CPI: Release 2026-10-14 expects reference month 2026-09-01, but latest FRED observation is 2026-08-01
+    const staleCpiResponse = {
+      observations: [
+        { realtime_start: '2026-09-11', date: '2026-08-01', value: '314.796' },
+        { realtime_start: '2026-08-12', date: '2026-07-01', value: '314.121' },
+      ],
+    };
+    const staleCpi = convertFredObservationsForEvent(
+      'CPI m/m',
+      '2026-10-14T12:30:00.000Z',
+      staleCpiResponse
+    );
+
+    const passed =
+      staleIcsa?.accepted === false &&
+      staleIcsa?.formattedActual === null &&
+      staleCpi?.accepted === false &&
+      staleCpi?.formattedActual === null;
+
+    results.push({
+      id: 'w',
+      name: 'FRED Stale-Observation Rejection Leaves Actual Empty (Round 14 Items 4 & 5)',
+      passed,
+      expected: 'When latest FRED observation is older than release reference period, accepted=false and formattedActual=null',
+      actual: `StaleICSA(latest=${staleIcsa?.latestObservationDate} vs expected=${staleIcsa?.expectedObservationDate})->accepted=${staleIcsa?.accepted}, actual=${staleIcsa?.formattedActual} | StaleCPI(latest=${staleCpi?.latestObservationDate} vs expected=${staleCpi?.expectedObservationDate})->accepted=${staleCpi?.accepted}, actual=${staleCpi?.formattedActual}`,
+    });
+  } catch (err: any) {
+    results.push({
+      id: 'w',
+      name: 'FRED Stale-Observation Rejection',
+      passed: false,
+      expected: 'Rejects older observation periods',
+      actual: `Exception: ${err.message}`,
+    });
+  }
+
   const passedCount = results.filter((r) => r.passed).length;
   const failedCount = results.length - passedCount;
 
@@ -1059,6 +1399,141 @@ export function runPhase5TestSuite(): Phase5TestSuiteReport {
 }
 
 if (process.argv[1] && process.argv[1].includes('phase5Tests')) {
+  // -------------------------------------------------------------
+  // ROUND 14 ITEM 1: LIVE DATA STORE CLEANUP (BEFORE & AFTER)
+  // -------------------------------------------------------------
+  console.log('=== ROUND 14 ITEM 1: TEST DATA CLEANUP (LIVE STORE BEFORE & AFTER) ===');
+  const liveMetaFile = path.join(process.cwd(), 'data', 'news_actuals_meta.json');
+  const liveManualFile = path.resolve(DATA_DIR, 'news_manual.json');
+
+  const beforeMeta = fs.existsSync(liveMetaFile) ? fs.readFileSync(liveMetaFile, 'utf-8').trim() : '{}';
+  const beforeManual = fs.existsSync(liveManualFile) ? fs.readFileSync(liveManualFile, 'utf-8').trim() : '{}';
+
+  console.log('[BEFORE CLEANUP] data/news_actuals_meta.json:');
+  console.log(beforeMeta);
+  console.log('[BEFORE CLEANUP] /app/data/news_manual.json:');
+  console.log(beforeManual);
+
+  // Remove any test entry ("EVT-2026-10-22-USD-unemployment_claims" 210K) from live stores
+  if (fs.existsSync(liveMetaFile)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(liveMetaFile, 'utf-8')) || {};
+      delete parsed['EVT-2026-10-22-USD-unemployment_claims'];
+      fs.writeFileSync(liveMetaFile, JSON.stringify(parsed, null, 2), 'utf-8');
+    } catch {}
+  }
+  if (fs.existsSync(liveManualFile)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(liveManualFile, 'utf-8')) || {};
+      delete parsed['EVT-2026-10-22-USD-unemployment_claims'];
+      fs.writeFileSync(liveManualFile, JSON.stringify(parsed, null, 2), 'utf-8');
+    } catch {}
+  }
+
+  const afterMeta = fs.existsSync(liveMetaFile) ? fs.readFileSync(liveMetaFile, 'utf-8').trim() : '{}';
+  const afterManual = fs.existsSync(liveManualFile) ? fs.readFileSync(liveManualFile, 'utf-8').trim() : '{}';
+
+  console.log('[AFTER CLEANUP] data/news_actuals_meta.json:');
+  console.log(afterMeta);
+  console.log('[AFTER CLEANUP] /app/data/news_manual.json:');
+  console.log(afterManual);
+
+  // -------------------------------------------------------------
+  // ROUND 14 ITEM 3: WORDING OUTPUT PROOF
+  // -------------------------------------------------------------
+  console.log('\n=== ROUND 14 ITEM 3: WORDING (ABOVE/BELOW/IN LINE + GOLD READING SEPARATELY) ===');
+  const rClaims = computeActualReactionReading('Unemployment Claims', '200K', 200000, '210K', 210000);
+  const rPmi = computeActualReactionReading('Flash Manufacturing PMI', '55.4', 55.4, '56.2', 56.2);
+  console.log(`Claims above forecast (210K vs 200K): ${rClaims?.combinedLabel} | Full: "${rClaims?.fullReadingLine}"`);
+  console.log(`PMI above forecast (56.2 vs 55.4):    ${rPmi?.combinedLabel} | Full: "${rPmi?.fullReadingLine}"`);
+
+  // -------------------------------------------------------------
+  // ROUND 14 ITEM 4: RECORDED FRED SAMPLE RESPONSES & CONVERSIONS
+  // -------------------------------------------------------------
+  console.log('\n=== ROUND 14 ITEM 4: RECORDED FRED API RESPONSES & CONVERSIONS ===');
+  const recordedSamples = [
+    {
+      label: 'ICSA (Unemployment Claims, Release 2026-10-22 -> Week ending Sat 2026-10-17)',
+      title: 'Unemployment Claims',
+      releaseTimeUtc: '2026-10-22T12:30:00.000Z',
+      rawResponse: {
+        observations: [
+          { realtime_start: '2026-10-22', date: '2026-10-17', value: '242000' },
+          { realtime_start: '2026-10-15', date: '2026-10-10', value: '241000' },
+        ],
+      },
+    },
+    {
+      label: 'UNRATE (Unemployment Rate, Release 2026-10-02 -> Ref month 2026-09)',
+      title: 'Unemployment Rate',
+      releaseTimeUtc: '2026-10-02T12:30:00.000Z',
+      rawResponse: {
+        observations: [
+          { realtime_start: '2026-10-02', date: '2026-09-01', value: '4.1' },
+          { realtime_start: '2026-09-04', date: '2026-08-01', value: '4.2' },
+        ],
+      },
+    },
+    {
+      label: 'CPIAUCSL -> CPI m/m (Release 2026-10-14 -> Ref month 2026-09)',
+      title: 'CPI m/m',
+      releaseTimeUtc: '2026-10-14T12:30:00.000Z',
+      rawResponse: {
+        observations: [
+          { realtime_start: '2026-10-14', date: '2026-09-01', value: '315.664' },
+          { realtime_start: '2026-09-11', date: '2026-08-01', value: '314.796' },
+          { realtime_start: '2025-10-12', date: '2025-09-01', value: '307.789' },
+        ],
+      },
+    },
+    {
+      label: 'CPIAUCSL -> CPI y/y (Release 2026-10-14 -> Ref month 2026-09)',
+      title: 'CPI y/y',
+      releaseTimeUtc: '2026-10-14T12:30:00.000Z',
+      rawResponse: {
+        observations: [
+          { realtime_start: '2026-10-14', date: '2026-09-01', value: '315.664' },
+          { realtime_start: '2026-09-11', date: '2026-08-01', value: '314.796' },
+          { realtime_start: '2025-10-12', date: '2025-09-01', value: '307.789' },
+        ],
+      },
+    },
+    {
+      label: 'PAYEMS -> Non-Farm Employment Change (Release 2026-10-02 -> Ref month 2026-09)',
+      title: 'Non-Farm Employment Change',
+      releaseTimeUtc: '2026-10-02T12:30:00.000Z',
+      rawResponse: {
+        observations: [
+          { realtime_start: '2026-10-02', date: '2026-09-01', value: '159105' },
+          { realtime_start: '2026-10-02', date: '2026-08-01', value: '158925' },
+        ],
+      },
+    },
+    {
+      label: 'STALE ICSA (Release 2026-10-22 expects 2026-10-17, latest is 2026-10-10)',
+      title: 'Unemployment Claims',
+      releaseTimeUtc: '2026-10-22T12:30:00.000Z',
+      rawResponse: {
+        observations: [
+          { realtime_start: '2026-10-15', date: '2026-10-10', value: '241000' },
+        ],
+      },
+    },
+  ];
+
+  for (const sample of recordedSamples) {
+    const conv = convertFredObservationsForEvent(sample.title, sample.releaseTimeUtc, sample.rawResponse);
+    console.log(`\n--- ${sample.label} ---`);
+    console.log(`Raw FRED JSON: ${JSON.stringify(sample.rawResponse)}`);
+    console.log(`Conversion:    accepted=${conv?.accepted} | actual=${conv?.formattedActual} | formula: ${conv?.formulaSteps}`);
+    if (conv?.note) {
+      console.log(`Note:          ${conv.note}`);
+    }
+  }
+
+  // -------------------------------------------------------------
+  // FULL TEST SUITE EXECUTION (23 TESTS)
+  // -------------------------------------------------------------
   const report = runPhase5TestSuite();
   console.log(`\n=== SARRAF Phase 5A Test Suite ===`);
   console.log(`Status: ${report.allPassed ? 'PASS' : 'FAIL'} (${report.passedCount}/${report.totalTests} passed)\n`);
