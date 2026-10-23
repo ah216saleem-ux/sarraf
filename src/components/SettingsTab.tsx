@@ -83,6 +83,18 @@ export const SettingsTab: React.FC = () => {
     }
   };
 
+  const [loginHistory, setLoginHistory] = useState<any[]>([]);
+
+  const fetchLoginHistory = useCallback(async () => {
+    try {
+      const res = await fetch('/api/auth/login-history');
+      if (res.ok) {
+        const json = await res.json();
+        setLoginHistory(json.history || []);
+      }
+    } catch {}
+  }, []);
+
   const fetchSettings = useCallback(async () => {
     try {
       const res = await fetch('/api/settings');
@@ -100,7 +112,8 @@ export const SettingsTab: React.FC = () => {
   useEffect(() => {
     fetchSettings();
     fetchTelegramStatus();
-  }, [fetchSettings, fetchTelegramStatus]);
+    fetchLoginHistory();
+  }, [fetchSettings, fetchTelegramStatus, fetchLoginHistory]);
 
   const handleSave = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -513,7 +526,7 @@ export const SettingsTab: React.FC = () => {
             {auditLog.length === 0 ? (
               <p className="text-neutral-500 text-center py-4">No settings changes recorded yet.</p>
             ) : (
-              <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+              <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
                 {auditLog.slice(0, 10).map((a) => (
                   <div key={a.id} className="p-2.5 rounded-lg bg-black/40 border border-white/5 space-y-1">
                     <div className="flex justify-between items-center text-[10px] text-neutral-400">
@@ -523,6 +536,48 @@ export const SettingsTab: React.FC = () => {
                     <div className="text-[11px] text-neutral-300">
                       <span className="text-neutral-500">{String(a.oldValue)}</span> &rarr;{' '}
                       <strong className="text-white">{String(a.newValue)}</strong>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Login Security & Session Audit Log */}
+          <div className="glass-panel p-5 rounded-2xl border border-white/10 space-y-3">
+            <div className="flex items-center justify-between pb-2 border-b border-white/10">
+              <h3 className="text-sm font-bold text-white tracking-wider flex items-center gap-2">
+                <Shield className="w-4 h-4 text-[#FFD97A]" />
+                <span>LOGIN SECURITY AUDIT TRAIL</span>
+              </h3>
+              <button
+                type="button"
+                onClick={fetchLoginHistory}
+                className="text-[10px] font-mono text-[#FFD97A] hover:underline"
+              >
+                Refresh
+              </button>
+            </div>
+
+            {loginHistory.length === 0 ? (
+              <p className="text-neutral-500 text-center py-4 text-xs font-mono">No login events recorded.</p>
+            ) : (
+              <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1 font-mono text-xs">
+                {loginHistory.slice(-10).reverse().map((entry) => (
+                  <div key={entry.id} className="p-2.5 rounded-lg bg-black/40 border border-white/5 space-y-1">
+                    <div className="flex justify-between items-center text-[10px]">
+                      <span className={`font-bold px-1.5 py-0.5 rounded ${
+                        entry.status === 'SUCCESS'
+                          ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800/40'
+                          : 'bg-rose-950/60 text-rose-300 border border-rose-800/40'
+                      }`}>
+                        {entry.status}
+                      </span>
+                      <span className="text-neutral-500">{new Date(entry.timestamp).toLocaleTimeString()}</span>
+                    </div>
+                    <div className="flex justify-between items-center text-[11px] text-neutral-300 pt-0.5">
+                      <span>User: <strong className="text-white">{entry.identifier}</strong> ({entry.role})</span>
+                      <span className="text-neutral-500 text-[10px]">IP: {entry.ip}</span>
                     </div>
                   </div>
                 ))}

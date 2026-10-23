@@ -21,7 +21,7 @@ export interface LoggedReleaseEntry {
   actual: number | null;
   forecast: number | null;
   previous: number | null;
-  verdictAtTMinus60m: 'BULLISH' | 'BEARISH' | 'WAIT' | null;
+  verdictAtTMinus60m: 'BULLISH' | 'BEARISH' | 'WAIT' | 'SKIP' | 'RELEASED' | null;
   scoreAtTMinus60m: number | null;
   scoreDisplayAtTMinus60m: string | null;
   confidenceAtTMinus60m: number | null;

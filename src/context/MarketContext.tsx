@@ -50,6 +50,8 @@ export interface UserSession {
   email: string;
   accountType: string;
   terminalId: string;
+  role?: string;
+  isAdmin?: boolean;
 }
 
 interface MarketContextType {
@@ -310,14 +312,19 @@ export const MarketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
 
     setIsLoginModalOpen(false);
-    setIsTunnelActive(true);
     setUser(data.user);
-
-    await new Promise((resolve) => setTimeout(resolve, 2400));
     setIsLoggedIn(true);
-    setIsTunnelActive(false);
+
+    // If initial login from guest, show smooth particle tunnel
+    if (!isLoggedIn) {
+      setIsTunnelActive(true);
+      setTimeout(() => {
+        setIsTunnelActive(false);
+      }, 1200);
+    }
+
     return true;
-  }, []);
+  }, [isLoggedIn]);
 
   // Logout clears session on server and client
   const logout = useCallback(async () => {

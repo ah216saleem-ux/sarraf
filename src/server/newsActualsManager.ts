@@ -306,7 +306,7 @@ function syncLiveNewsManualStore(
       // ignore
     }
   } else {
-    setManualActualValue(eventId, actualValue, source, note);
+    setManualActualValue(eventId, actualValue, source === 'FEED' ? 'MANUAL' : (source as any), note);
   }
 }
 

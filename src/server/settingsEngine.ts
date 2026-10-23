@@ -353,10 +353,24 @@ export function importSettingsJson(
 // -------------------------------------------------------------
 // 4. ADMIN AUTHENTICATION (ENVIRONMENT VARIABLES WITH PERSISTENT BACKUP)
 // -------------------------------------------------------------
-// 4. ADMIN AUTHENTICATION (ENVIRONMENT VARIABLES ONLY)
+// 4. ADMIN & USER AUTHENTICATION
 // -------------------------------------------------------------
 
-function getEnvAdmin(): { username: string; hash: string } | null {
+export interface AuthVerificationResult {
+  authenticated: boolean;
+  role?: 'admin' | 'user';
+  isAdmin?: boolean;
+  username?: string;
+  accountType?: string;
+  terminalId?: string;
+}
+
+const DEFAULT_ADMIN_USER = "gmcf7";
+const DEFAULT_ADMIN_PASS = "9663059aA@";
+const DEFAULT_USER_USER = "Gmcf7";
+const DEFAULT_USER_PASS = "Sarraf69";
+
+function getEnvAdmin(): { username: string; hash: string } {
   let envUser = process.env.ADMIN_USERNAME?.trim();
   let envHash = process.env.ADMIN_PASSWORD_HASH?.trim();
 
@@ -386,51 +400,58 @@ function getEnvAdmin(): { username: string; hash: string } | null {
     }
   }
 
-  if (!envUser || !envHash) {
-    try {
-      const fallbackPath = path.resolve(DATA_DIR, 'admin_credentials.json');
-      if (fs.existsSync(fallbackPath)) {
-        const data = JSON.parse(fs.readFileSync(fallbackPath, 'utf8'));
-        if (data.username && data.hash) {
-          envUser = String(data.username).trim();
-          envHash = String(data.hash).trim();
+  if (!envUser) envUser = DEFAULT_ADMIN_USER;
+  if (!envHash) envHash = DEFAULT_ADMIN_PASS;
+
+  process.env.ADMIN_USERNAME = envUser;
+  process.env.ADMIN_PASSWORD_HASH = envHash;
+
+  return { username: envUser, hash: envHash };
+}
+
+function getEnvUser(): { username: string; pass: string } {
+  let userUser = process.env.USER_USERNAME?.trim();
+  let userPass = process.env.USER_PASSWORD_HASH?.trim();
+
+  if (!userUser || !userPass) {
+    const envPaths = [
+      path.resolve(process.cwd(), '.env'),
+      path.resolve('/app/applet', '.env'),
+      path.resolve('/', '.env')
+    ];
+    for (const envPath of envPaths) {
+      try {
+        if (fs.existsSync(envPath)) {
+          const content = fs.readFileSync(envPath, 'utf8');
+          for (const line of content.split('\n')) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('USER_USERNAME=')) {
+              userUser = trimmed.slice('USER_USERNAME='.length).trim();
+            }
+            if (trimmed.startsWith('USER_PASSWORD_HASH=')) {
+              userPass = trimmed.slice('USER_PASSWORD_HASH='.length).trim();
+            }
+          }
         }
-      }
-    } catch {}
+      } catch {}
+      if (userUser && userPass) break;
+    }
   }
 
-  if (!envUser) envUser = "Gmcf7";
-  if (!envHash) envHash = "9663059aaAA@@";
+  if (!userUser) userUser = DEFAULT_USER_USER;
+  if (!userPass) userPass = DEFAULT_USER_PASS;
 
-  if (envUser && envHash) {
-    process.env.ADMIN_USERNAME = envUser;
-    process.env.ADMIN_PASSWORD_HASH = envHash;
+  process.env.USER_USERNAME = userUser;
+  process.env.USER_PASSWORD_HASH = userPass;
 
-    // Auto-heal missing .env and admin_credentials.json
-    try {
-      const envPath = path.resolve(process.cwd(), '.env');
-      if (!fs.existsSync(envPath)) {
-        fs.writeFileSync(envPath, `PORT=3000\nNODE_ENV=production\nDATA_DIR=./data\nADMIN_USERNAME=${envUser}\nADMIN_PASSWORD_HASH=${envHash}\n`);
-      }
-      const credPath = path.resolve(DATA_DIR, 'admin_credentials.json');
-      if (!fs.existsSync(credPath)) {
-        fs.writeFileSync(credPath, JSON.stringify({ username: envUser, hash: envHash }, null, 2));
-      }
-    } catch {}
-
-    return { username: envUser, hash: envHash };
-  }
-
-  return null;
+  return { username: userUser, pass: userPass };
 }
 
 /**
  * Checks if admin authentication is configured via environment variables.
- * Returns false when ADMIN_USERNAME or ADMIN_PASSWORD_HASH are missing.
  */
 export function isAdminConfigured(): boolean {
-  const admin = getEnvAdmin();
-  return Boolean(admin && admin.username && admin.hash);
+  return true;
 }
 
 /**
@@ -438,7 +459,7 @@ export function isAdminConfigured(): boolean {
  */
 export function getAdminUsername(): string | null {
   const admin = getEnvAdmin();
-  return admin?.username || null;
+  return admin?.username || DEFAULT_ADMIN_USER;
 }
 
 /**
@@ -456,9 +477,8 @@ function timingSafeStringEqual(a: string, b: string): boolean {
  * Constant-time username comparison against configured admin.
  */
 export function verifyAdminUsername(username: string): boolean {
+  if (!username) return false;
   const admin = getEnvAdmin();
-  if (!admin || !admin.username || !username) return false;
-
   const inputUser = username.trim().toLowerCase();
   const envUser = admin.username.toLowerCase();
 
@@ -466,19 +486,15 @@ export function verifyAdminUsername(username: string): boolean {
 }
 
 /**
- * Constant-time credential verification using configured environment variables.
+ * Constant-time credential verification strictly for ADMIN account.
  * Supports:
- *  - bcrypt ($2a$, $2b$, $2y$)
- *  - scrypt (scrypt:salt:hash or salt:hash)
- * Strictly matches env ADMIN_USERNAME and ADMIN_PASSWORD_HASH.
- * Never prints or leaks credentials to logs.
+ *  - Primary: 9663059aA@
+ *  - Backward compatibility: 9663059aaAA@@
+ *  - Hashed / configured env password
  */
 export function verifyAdminCredentials(username: string, password: string): boolean {
+  if (!username || !password) return false;
   const admin = getEnvAdmin();
-
-  if (!admin || !admin.username || !admin.hash || !username || !password) {
-    return false;
-  }
 
   const cleanInputUser = username.trim().toLowerCase();
   const cleanConfUser = admin.username.toLowerCase();
@@ -486,17 +502,24 @@ export function verifyAdminCredentials(username: string, password: string): bool
   const isMatchUser = timingSafeStringEqual(cleanInputUser, cleanConfUser);
 
   if (!isMatchUser) {
-    // Constant-time placeholder verify to mitigate username enumeration timing
     try {
       crypto.scryptSync(password, 'static-salt', 64);
     } catch {}
     return false;
   }
 
-  const configuredHash = admin.hash;
+  // Exact password match for admin credentials
+  if (
+    timingSafeStringEqual(password.trim(), "9663059aA@") ||
+    timingSafeStringEqual(password.trim(), "9663059aaAA@@") ||
+    timingSafeStringEqual(password.trim(), admin.hash.trim())
+  ) {
+    return true;
+  }
 
-  // Password Hash verification
+  // Password Hash verification (bcrypt / scrypt)
   try {
+    const configuredHash = admin.hash;
     if (configuredHash.startsWith('$2a$') || configuredHash.startsWith('$2b$') || configuredHash.startsWith('$2y$')) {
       return bcrypt.compareSync(password, configuredHash);
     }
@@ -509,26 +532,67 @@ export function verifyAdminCredentials(username: string, password: string): bool
         const computed = crypto.scryptSync(password, salt, 64).toString('hex');
         return timingSafeStringEqual(computed, expectedHex);
       }
-    } else if (configuredHash.includes(':')) {
-      const [salt, expectedHex] = configuredHash.split(':');
-      if (salt && expectedHex) {
-        const computed = crypto.scryptSync(password, salt, 64).toString('hex');
-        return timingSafeStringEqual(computed, expectedHex);
-      }
-    } else {
-      return timingSafeStringEqual(password.trim(), configuredHash.trim());
     }
-  } catch {
-    // Ignore error safely, return false
-  }
+  } catch {}
 
   return false;
 }
 
 export function verifyAdminPassword(password: string): boolean {
-  const admin = getEnvAdmin();
-  if (!admin || !admin.username) return false;
-  return verifyAdminCredentials(admin.username, password);
+  if (!password) return false;
+  return (
+    timingSafeStringEqual(password.trim(), "9663059aA@") ||
+    timingSafeStringEqual(password.trim(), "9663059aaAA@@") ||
+    verifyAdminCredentials("gmcf7", password)
+  );
+}
+
+/**
+ * Verifies credentials for both standard USER and MASTER ADMIN accounts:
+ * - Admin: username 'gmcf7' + password '9663059aA@' -> role: 'admin'
+ * - User: username 'Gmcf7' + password 'Sarraf69' -> role: 'user'
+ */
+export function verifyUserOrAdminCredentials(username: string, password: string): AuthVerificationResult {
+  if (!username || !password) {
+    return { authenticated: false };
+  }
+
+  const cleanUser = username.trim().toLowerCase();
+  const trimmedPass = password.trim();
+
+  // 1. Check Master Admin Credentials
+  const adminConfig = getEnvAdmin();
+  if (
+    cleanUser === adminConfig.username.toLowerCase() &&
+    verifyAdminCredentials(adminConfig.username, trimmedPass)
+  ) {
+    return {
+      authenticated: true,
+      role: 'admin',
+      isAdmin: true,
+      username: 'gmcf7',
+      accountType: 'SARRAF Master Desk (Admin)',
+      terminalId: 'SRF-ADMIN-XAU',
+    };
+  }
+
+  // 2. Check Standard User Credentials
+  const userConfig = getEnvUser();
+  if (
+    cleanUser === userConfig.username.toLowerCase() &&
+    (timingSafeStringEqual(trimmedPass, 'Sarraf69') || timingSafeStringEqual(trimmedPass, userConfig.pass))
+  ) {
+    return {
+      authenticated: true,
+      role: 'user',
+      isAdmin: false,
+      username: 'Gmcf7',
+      accountType: 'SARRAF Trader Desk (Standard)',
+      terminalId: 'SRF-USER-XAU',
+    };
+  }
+
+  return { authenticated: false };
 }
 
 export function recordSuccessfulLogin(ip: string): { isNewIp: boolean } {
@@ -559,4 +623,67 @@ export function changeAdminPassword(oldPassword: string, newPassword: string, em
     success: false,
     error: 'Password management is disabled in environment mode. Update ADMIN_PASSWORD_HASH in environment variables.',
   };
+}
+
+export interface LoginHistoryRecord {
+  id: string;
+  timestamp: string;
+  identifier: string; // Sanitized username, NEVER password
+  role: 'admin' | 'user' | 'unknown';
+  status: 'SUCCESS' | 'FAILED_INVALID_CREDENTIALS' | 'FAILED_RATE_LIMITED';
+  ip: string;
+  isNewIp?: boolean;
+}
+
+const LOGIN_HISTORY_FILE = path.resolve(DATA_DIR, 'login_history.json');
+
+export function recordLoginAttempt(
+  identifier: string,
+  role: 'admin' | 'user' | 'unknown',
+  status: 'SUCCESS' | 'FAILED_INVALID_CREDENTIALS' | 'FAILED_RATE_LIMITED',
+  ip: string,
+  isNewIp: boolean = false
+): LoginHistoryRecord {
+  ensureDataDir();
+  const entry: LoginHistoryRecord = {
+    id: `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+    timestamp: new Date().toISOString(),
+    identifier: (identifier || 'unknown').slice(0, 50),
+    role,
+    status,
+    ip: ip || 'unknown',
+    isNewIp,
+  };
+
+  let history: LoginHistoryRecord[] = [];
+  try {
+    if (fs.existsSync(LOGIN_HISTORY_FILE)) {
+      history = JSON.parse(fs.readFileSync(LOGIN_HISTORY_FILE, 'utf-8')) || [];
+    }
+  } catch {
+    history = [];
+  }
+
+  history.push(entry);
+  if (history.length > 200) {
+    history = history.slice(-200);
+  }
+
+  try {
+    writeJsonAtomic(LOGIN_HISTORY_FILE, history);
+  } catch (err) {
+    console.error('[AUTH] Failed to save login history:', err);
+  }
+
+  return entry;
+}
+
+export function getLoginHistory(): LoginHistoryRecord[] {
+  ensureDataDir();
+  try {
+    if (fs.existsSync(LOGIN_HISTORY_FILE)) {
+      return JSON.parse(fs.readFileSync(LOGIN_HISTORY_FILE, 'utf-8')) || [];
+    }
+  } catch {}
+  return [];
 }

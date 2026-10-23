@@ -29,6 +29,7 @@ import {
   FileText,
   Compass,
   Waves,
+  Lock,
 } from 'lucide-react';
 import {
   formatNewSignalMessage,
@@ -44,6 +45,58 @@ import { SarrafAtlasView } from '../atlas/SarrafAtlasView';
 import { SpyOptionsView } from '../spy/SpyOptionsView';
 import { BtcTideView } from '../btcTide/BtcTideView';
 import { useCommandFeed } from '../command/data/useCommandFeed';
+
+const AdminLockScreen: React.FC<{ tabName: string; onSwitchAccount: () => void; currentUserEmail?: string }> = ({
+  tabName,
+  onSwitchAccount,
+  currentUserEmail,
+}) => {
+  return (
+    <div className="flex flex-col items-center justify-center py-16 px-4 sm:px-6 text-center max-w-lg mx-auto animate-fade-in">
+      <div className="relative mb-6">
+        <div className="w-20 h-20 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-[0_0_40px_rgba(232,184,74,0.2)]">
+          <Lock className="w-10 h-10 text-[#FFD97A]" />
+        </div>
+        <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-black border border-amber-500/50 flex items-center justify-center">
+          <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+        </div>
+      </div>
+
+      <div className="text-[11px] font-mono font-bold tracking-[0.25em] text-[#FFD97A] uppercase mb-1">
+        ADMIN CLEARANCE REQUIRED
+      </div>
+      <h3 className="text-2xl font-bold text-white mb-3 font-mono tracking-tight">
+        {tabName} IS LOCKED
+      </h3>
+      <p className="text-xs text-neutral-400 leading-relaxed mb-6 font-mono">
+        This terminal module contains critical engine parameters, automated dispatch controls, and deployment safety switches reserved exclusively for the Master Administrator.
+      </p>
+
+      <div className="w-full p-4 rounded-xl bg-black/60 border border-white/10 text-left font-mono text-xs space-y-2 mb-6">
+        <div className="flex items-center justify-between">
+          <span className="text-neutral-500 text-[11px]">ACCESS LEVEL:</span>
+          <span className="text-neutral-200 font-bold">Standard Trader Desk</span>
+        </div>
+        <div className="flex items-center justify-between border-t border-white/5 pt-2">
+          <span className="text-neutral-500 text-[11px]">REQUIRED CLEARANCE:</span>
+          <span className="text-amber-400 font-bold">Master Administrator Only</span>
+        </div>
+      </div>
+
+      <button
+        onClick={onSwitchAccount}
+        className="px-6 py-3 rounded-xl bg-gradient-to-r from-[#B88628] via-[#E8B84A] to-[#FFD97A] text-black font-bold text-xs font-mono tracking-[0.15em] uppercase hover:brightness-110 active:scale-98 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-[0_0_25px_rgba(232,184,74,0.3)]"
+      >
+        <ShieldCheck className="w-4 h-4" />
+        <span>ENTER ADMIN PASSKEY</span>
+      </button>
+
+      <span className="mt-4 text-[10px] font-mono text-neutral-600">
+        SECURITY PROTOCOL: DESK SEPARATION · NON-ADMIN ACCESS BLOCKED
+      </span>
+    </div>
+  );
+};
 
 const DashboardPriceHeader: React.FC<{ fallbackPrice: number | null; fallbackStatus: string }> = React.memo(
   ({ fallbackPrice, fallbackStatus }) => {
@@ -95,7 +148,8 @@ const DashboardPriceHeader: React.FC<{ fallbackPrice: number | null; fallbackSta
 );
 
 export const DashboardView: React.FC = () => {
-  const { priceData, user, logout, macroEvents } = useMarket();
+  const { priceData, user, logout, macroEvents, openLoginModal } = useMarket();
+  const isAdmin = Boolean(user?.role === 'admin' && user?.isAdmin);
   const [sarrafSection, setSarrafSection] = useState<'COMMAND' | 'DECK' | 'ATLAS'>('COMMAND');
   const [activeMainTab, setActiveMainTab] = useState<
     | 'OVERVIEW'
@@ -247,6 +301,10 @@ export const DashboardView: React.FC = () => {
 
   // Signal Actions
   const handleTogglePause = async () => {
+    if (!isAdmin) {
+      setActionMessage('⚠️ Admin clearance required to pause or resume the signal manager.');
+      return;
+    }
     if (!signalState) return;
     setActionLoading(true);
     const endpoint = signalState.isPaused ? '/api/signal/resume' : '/api/signal/pause';
@@ -261,6 +319,10 @@ export const DashboardView: React.FC = () => {
   };
 
   const handleManualClose = async () => {
+    if (!isAdmin) {
+      setActionMessage('⚠️ Admin clearance required to manual-close an active signal.');
+      return;
+    }
     setActionLoading(true);
     try {
       const res = await fetch('/api/signal/close', { method: 'POST' });
@@ -273,6 +335,10 @@ export const DashboardView: React.FC = () => {
   };
 
   const handleSkipCooldown = async () => {
+    if (!isAdmin) {
+      setActionMessage('⚠️ Admin clearance required to skip cooldown.');
+      return;
+    }
     setActionLoading(true);
     try {
       const res = await fetch('/api/signal/skip-cooldown', { method: 'POST' });
@@ -531,8 +597,19 @@ export const DashboardView: React.FC = () => {
               SARRAF
             </span>
             <span className="font-mono text-[10px] text-[#FFD97A] px-2 py-0.5 rounded bg-[#E8B84A]/10 border border-[#E8B84A]/25">
-              TERMINAL // {user?.terminalId || 'SRF-8891-XAU'}
+              TERMINAL // {user?.terminalId || (isAdmin ? 'SRF-ADMIN-XAU' : 'SRF-USER-XAU')}
             </span>
+            {isAdmin ? (
+              <span className="font-mono text-[9px] px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold flex items-center gap-1 shadow-[0_0_10px_rgba(232,184,74,0.2)]">
+                <ShieldCheck className="w-3 h-3 text-amber-400" />
+                MASTER ADMIN
+              </span>
+            ) : (
+              <span className="font-mono text-[9px] px-2 py-0.5 rounded bg-blue-500/15 border border-blue-500/30 text-blue-300 font-semibold flex items-center gap-1">
+                <Lock className="w-2.5 h-2.5 text-blue-400" />
+                TRADER (USER)
+              </span>
+            )}
           </div>
 
           {/* Navigation Tabs */}
@@ -560,6 +637,7 @@ export const DashboardView: React.FC = () => {
             </button>
             <button
               onClick={() => setActiveMainTab('TELEGRAM')}
+              title={!isAdmin ? 'Admin Clearance Required' : undefined}
               className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'TELEGRAM'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
@@ -568,6 +646,7 @@ export const DashboardView: React.FC = () => {
             >
               <Send className="w-3.5 h-3.5 shrink-0" />
               <span>TELEGRAM</span>
+              {!isAdmin && <Lock className="w-2.5 h-2.5 text-amber-400/80 shrink-0 ml-0.5" />}
             </button>
             <button
               ref={spyNavTabRef}
@@ -598,6 +677,7 @@ export const DashboardView: React.FC = () => {
             </button>
             <button
               onClick={() => setActiveMainTab('GOOGLE_CHAT')}
+              title={!isAdmin ? 'Admin Clearance Required' : undefined}
               className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'GOOGLE_CHAT'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
@@ -610,9 +690,11 @@ export const DashboardView: React.FC = () => {
                 }`}
               />
               <span>GOOGLE CHAT</span>
+              {!isAdmin && <Lock className="w-2.5 h-2.5 text-amber-400/80 shrink-0 ml-0.5" />}
             </button>
             <button
               onClick={() => setActiveMainTab('AI_CHAT')}
+              title={!isAdmin ? 'Admin Clearance Required' : undefined}
               className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'AI_CHAT'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
@@ -621,9 +703,11 @@ export const DashboardView: React.FC = () => {
             >
               <Bot className="w-3.5 h-3.5 shrink-0" />
               <span>AI</span>
+              {!isAdmin && <Lock className="w-2.5 h-2.5 text-amber-400/80 shrink-0 ml-0.5" />}
             </button>
             <button
               onClick={() => setActiveMainTab('SETTINGS')}
+              title={!isAdmin ? 'Admin Clearance Required' : undefined}
               className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'SETTINGS'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
@@ -636,6 +720,7 @@ export const DashboardView: React.FC = () => {
                 }`}
               />
               <span>SETTINGS</span>
+              {!isAdmin && <Lock className="w-2.5 h-2.5 text-amber-400/80 shrink-0 ml-0.5" />}
             </button>
             <button
               onClick={() => setActiveMainTab('PERFORMANCE')}
@@ -650,6 +735,7 @@ export const DashboardView: React.FC = () => {
             </button>
             <button
               onClick={() => setActiveMainTab('CHECKLIST')}
+              title={!isAdmin ? 'Admin Clearance Required' : undefined}
               className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'CHECKLIST'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
@@ -662,12 +748,16 @@ export const DashboardView: React.FC = () => {
                 }`}
               />
               <span>GO-LIVE</span>
+              {!isAdmin && <Lock className="w-2.5 h-2.5 text-amber-400/80 shrink-0 ml-0.5" />}
             </button>
             <button
               onClick={() => {
                 setActiveMainTab('TESTS');
-                handleRunAllTests();
+                if (isAdmin) {
+                  handleRunAllTests();
+                }
               }}
+              title={!isAdmin ? 'Admin Clearance Required' : undefined}
               className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                 activeMainTab === 'TESTS'
                   ? 'bg-[#E8B84A] text-black font-bold shadow-[0_0_10px_rgba(232,184,74,0.3)]'
@@ -676,6 +766,7 @@ export const DashboardView: React.FC = () => {
             >
               <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
               <span>TESTS</span>
+              {!isAdmin && <Lock className="w-2.5 h-2.5 text-amber-400/80 shrink-0 ml-0.5" />}
             </button>
           </div>
 
@@ -775,6 +866,7 @@ export const DashboardView: React.FC = () => {
                 </button>
                 <button
                   onClick={() => setSarrafSection('DECK')}
+                  title={!isAdmin ? 'Admin Clearance Required' : undefined}
                   className={`flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer shrink-0 whitespace-nowrap ${
                     sarrafSection === 'DECK'
                       ? 'bg-[#E8B84A] text-black font-extrabold border-[#E8B84A] shadow-[0_0_15px_rgba(232,184,74,0.35)]'
@@ -782,6 +874,7 @@ export const DashboardView: React.FC = () => {
                   }`}
                 >
                   <span>TRADING DECK</span>
+                  {!isAdmin && <Lock className="w-2.5 h-2.5 text-amber-400/80 shrink-0 ml-0.5" />}
                 </button>
                 <button
                   onClick={() => setSarrafSection('ATLAS')}
@@ -815,6 +908,8 @@ export const DashboardView: React.FC = () => {
               <SarrafCommandView />
             ) : sarrafSection === 'ATLAS' ? (
               <SarrafAtlasView />
+            ) : !isAdmin ? (
+              <AdminLockScreen tabName="TRADING DECK" onSwitchAccount={openLoginModal} />
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
             {/* Left Column (8 cols): Interactive Chart & Live Signals */}
@@ -1343,8 +1438,11 @@ export const DashboardView: React.FC = () => {
         {/* TAB: BTC TIDE (Real-time Flow & Cumulative Delta) */}
         {activeMainTab === 'BTC_TIDE' && <BtcTideView />}
 
-        {/* TAB 2: TELEGRAM COMMAND CENTER (Phase 4 Centerpiece) */}
+        {/* TAB 2: TELEGRAM COMMAND CENTER (Phase 4 Centerpiece - Admin Only) */}
         {activeMainTab === 'TELEGRAM' && (
+          !isAdmin ? (
+            <AdminLockScreen tabName="TELEGRAM DISPATCH" onSwitchAccount={openLoginModal} currentUserEmail={user?.email} />
+          ) : (
           <div className="space-y-6">
             {/* Command Center Header Controls */}
             <div className="glass-panel p-5 rounded-2xl border border-[#E8B84A]/30 flex flex-wrap items-center justify-between gap-4">
@@ -1646,6 +1744,7 @@ export const DashboardView: React.FC = () => {
               </div>
             </div>
           </div>
+          )
         )}
 
         {/* TAB: SPY S&P 500 OPTIONS QUANT MODULE */}
@@ -1654,128 +1753,149 @@ export const DashboardView: React.FC = () => {
         {/* TAB 3: REAL FOREX FACTORY NEWS RADAR */}
         {activeMainTab === 'NEWS' && <NewsTab currentPrice={currentPrice} />}
 
-        {/* TAB 4: GOOGLE CHAT COLLABORATION & CONTINUOUS LEARNING */}
+        {/* TAB 4: GOOGLE CHAT COLLABORATION & CONTINUOUS LEARNING (Admin Only) */}
         {activeMainTab === 'GOOGLE_CHAT' && (
-          <GoogleChatHub currentPrice={currentPrice} activeSignal={activeSig} />
+          !isAdmin ? (
+            <AdminLockScreen tabName="GOOGLE CHAT WAR ROOM" onSwitchAccount={openLoginModal} currentUserEmail={user?.email} />
+          ) : (
+            <GoogleChatHub currentPrice={currentPrice} activeSignal={activeSig} />
+          )
         )}
 
-        {/* TAB 5: AI STRATEGIST CHAT (Section 6) */}
+        {/* TAB 5: AI STRATEGIST CHAT (Admin Only) */}
         {activeMainTab === 'AI_CHAT' && (
-          <div className="glass-panel p-5 rounded-2xl border border-[#E8B84A]/30 max-w-4xl mx-auto flex flex-col h-[75vh]">
-            <div className="flex items-center justify-between pb-3 border-b border-white/10">
-              <div className="flex items-center gap-2.5">
-                <Bot className="w-5 h-5 text-[#FFD97A]" />
-                <div>
-                  <h3 className="font-mono text-sm font-bold text-white tracking-wider">
-                    SARRAF SARRAF AI STRATEGIST
-                  </h3>
-                  <span className="font-mono text-[10px] text-neutral-400 block">
-                    Real-time market context synchronized with XAU/USD live order flow
-                  </span>
+          !isAdmin ? (
+            <AdminLockScreen tabName="SARRAF AI STRATEGIST" onSwitchAccount={openLoginModal} currentUserEmail={user?.email} />
+          ) : (
+            <div className="glass-panel p-5 rounded-2xl border border-[#E8B84A]/30 max-w-4xl mx-auto flex flex-col h-[75vh]">
+              <div className="flex items-center justify-between pb-3 border-b border-white/10">
+                <div className="flex items-center gap-2.5">
+                  <Bot className="w-5 h-5 text-[#FFD97A]" />
+                  <div>
+                    <h3 className="font-mono text-sm font-bold text-white tracking-wider">
+                      SARRAF SARRAF AI STRATEGIST
+                    </h3>
+                    <span className="font-mono text-[10px] text-neutral-400 block">
+                      Real-time market context synchronized with XAU/USD live order flow
+                    </span>
+                  </div>
                 </div>
+                <span className="text-[10px] font-mono text-neutral-400 bg-black/40 px-2 py-1 rounded border border-white/10">
+                  Model: gemini-3.8-flash
+                </span>
               </div>
-              <span className="text-[10px] font-mono text-neutral-400 bg-black/40 px-2 py-1 rounded border border-white/10">
-                Model: gemini-3.8-flash
-              </span>
-            </div>
 
-            {/* Chat message stream */}
-            <div className="flex-1 overflow-y-auto py-4 space-y-3 font-mono text-xs">
-              {chatMessages.map((msg, idx) => (
-                <div
-                  key={idx}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
+              {/* Chat message stream */}
+              <div className="flex-1 overflow-y-auto py-4 space-y-3 font-mono text-xs">
+                {chatMessages.map((msg, idx) => (
                   <div
-                    className={`max-w-[80%] p-3.5 rounded-2xl ${
-                      msg.role === 'user'
-                        ? 'bg-[#E8B84A]/20 border border-[#E8B84A]/40 text-white rounded-br-none'
-                        : 'bg-black/60 border border-white/10 text-neutral-200 rounded-bl-none'
-                    }`}
+                    key={idx}
+                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
                   >
-                    <div className="flex items-center justify-between gap-4 mb-1 text-[10px] text-neutral-400">
-                      <span>{msg.role === 'user' ? 'DESK TRADER' : 'SARRAF AI'}</span>
-                      <span>{msg.time}</span>
+                    <div
+                      className={`max-w-[80%] p-3.5 rounded-2xl ${
+                        msg.role === 'user'
+                          ? 'bg-[#E8B84A]/20 border border-[#E8B84A]/40 text-white rounded-br-none'
+                          : 'bg-black/60 border border-white/10 text-neutral-200 rounded-bl-none'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-4 mb-1 text-[10px] text-neutral-400">
+                        <span>{msg.role === 'user' ? 'DESK TRADER' : 'SARRAF AI'}</span>
+                        <span>{msg.time}</span>
+                      </div>
+                      <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
                     </div>
-                    <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
                   </div>
-                </div>
-              ))}
-              {isChatLoading && (
-                <div className="flex justify-start font-mono text-xs">
-                  <div className="bg-black/60 border border-white/10 p-3 rounded-2xl rounded-bl-none text-[#FFD97A] flex items-center gap-2">
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Analyzing macro structure & order flow...</span>
+                ))}
+                {isChatLoading && (
+                  <div className="flex justify-start font-mono text-xs">
+                    <div className="bg-black/60 border border-white/10 p-3 rounded-2xl rounded-bl-none text-[#FFD97A] flex items-center gap-2">
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Analyzing macro structure & order flow...</span>
+                    </div>
                   </div>
-                </div>
-              )}
-              <div ref={chatBottomRef} />
-            </div>
+                )}
+                <div ref={chatBottomRef} />
+              </div>
 
-            {/* Pre-seeded suggestion pills */}
-            <div className="py-2 border-t border-white/5 flex flex-wrap gap-2 font-mono text-[11px]">
-              <button
-                onClick={() => setChatInput('Analyze current gold trend, HTF bias and key swing points.')}
-                className="px-2.5 py-1 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-300 hover:text-white cursor-pointer"
-              >
-                Analyze Gold HTF Structure
-              </button>
-              <button
-                onClick={() => setChatInput('What are the upcoming USD high-impact events on the radar?')}
-                className="px-2.5 py-1 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-300 hover:text-white cursor-pointer"
-              >
-                Upcoming USD Releases
-              </button>
-              <button
-                onClick={() => setChatInput('Explain the current dealing range equilibrium and discount zones.')}
-                className="px-2.5 py-1 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-300 hover:text-white cursor-pointer"
-              >
-                Dealing Range & Discount Zones
-              </button>
-            </div>
+              {/* Pre-seeded suggestion pills */}
+              <div className="py-2 border-t border-white/5 flex flex-wrap gap-2 font-mono text-[11px]">
+                <button
+                  onClick={() => setChatInput('Analyze current gold trend, HTF bias and key swing points.')}
+                  className="px-2.5 py-1 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-300 hover:text-white cursor-pointer"
+                >
+                  Analyze Gold HTF Structure
+                </button>
+                <button
+                  onClick={() => setChatInput('What are the upcoming USD high-impact events on the radar?')}
+                  className="px-2.5 py-1 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-300 hover:text-white cursor-pointer"
+                >
+                  Upcoming USD Releases
+                </button>
+                <button
+                  onClick={() => setChatInput('Explain the current dealing range equilibrium and discount zones.')}
+                  className="px-2.5 py-1 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-300 hover:text-white cursor-pointer"
+                >
+                  Dealing Range & Discount Zones
+                </button>
+              </div>
 
-            {/* Chat Input Bar */}
-            <form onSubmit={handleSendChatMessage} className="pt-2 flex gap-2 font-mono text-xs">
-              <input
-                type="text"
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                placeholder="Ask SARRAF AI about macro bullion structure, liquidity, or key levels..."
-                className="flex-1 bg-black/60 border border-white/15 rounded-xl px-4 py-2.5 text-white placeholder-neutral-500 focus:outline-none focus:border-[#E8B84A]"
-              />
-              <button
-                type="submit"
-                disabled={isChatLoading || !chatInput.trim()}
-                className="px-4 py-2.5 rounded-xl bg-[#E8B84A] text-black font-bold hover:bg-[#FFD97A] transition-colors cursor-pointer disabled:opacity-50"
-              >
-                <Send className="w-4 h-4" />
-              </button>
-            </form>
+              {/* Chat Input Bar */}
+              <form onSubmit={handleSendChatMessage} className="pt-2 flex gap-2 font-mono text-xs">
+                <input
+                  type="text"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  placeholder="Ask SARRAF AI about macro bullion structure, liquidity, or key levels..."
+                  className="flex-1 bg-black/60 border border-white/15 rounded-xl px-4 py-2.5 text-white placeholder-neutral-500 focus:outline-none focus:border-[#E8B84A]"
+                />
+                <button
+                  type="submit"
+                  disabled={isChatLoading || !chatInput.trim()}
+                  className="px-4 py-2.5 rounded-xl bg-[#E8B84A] text-black font-bold hover:bg-[#FFD97A] transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </form>
 
-            <div className="pt-2 text-center text-[10px] font-mono text-neutral-500">
-              Not financial advice. Read-only terminal intelligence.
+              <div className="pt-2 text-center text-[10px] font-mono text-neutral-500">
+                Not financial advice. Read-only terminal intelligence.
+              </div>
             </div>
-          </div>
+          )
         )}
 
         {/* TAB 6: SETTINGS (Admin Only) */}
-        {activeMainTab === 'SETTINGS' && <SettingsTab />}
+        {activeMainTab === 'SETTINGS' && (
+          !isAdmin ? (
+            <AdminLockScreen tabName="ENGINE SETTINGS" onSwitchAccount={openLoginModal} currentUserEmail={user?.email} />
+          ) : (
+            <SettingsTab />
+          )
+        )}
 
-        {/* TAB 7: PERFORMANCE DESK (Admin Only) */}
+        {/* TAB 7: PERFORMANCE DESK (Accessible to all traders) */}
         {activeMainTab === 'PERFORMANCE' && <PerformanceTab />}
 
         {/* TAB 8: GO-LIVE READINESS CHECKLIST (Admin Only) */}
         {activeMainTab === 'CHECKLIST' && (
-          <GoLiveChecklistTab
-            onSwitchLive={() => setIsDryRunModalOpen(true)}
-            telegramStatus={telegramStatus}
-            engineState={priceData.engineState}
-            priceStatus={priceData.status}
-          />
+          !isAdmin ? (
+            <AdminLockScreen tabName="GO-LIVE SAFETY CHECKLIST" onSwitchAccount={openLoginModal} currentUserEmail={user?.email} />
+          ) : (
+            <GoLiveChecklistTab
+              onSwitchLive={() => setIsDryRunModalOpen(true)}
+              telegramStatus={telegramStatus}
+              engineState={priceData.engineState}
+              priceStatus={priceData.status}
+            />
+          )
         )}
 
-        {/* TAB 9: VERIFICATION TEST SUITES (Phases 3, 4, and 5) */}
+        {/* TAB 9: VERIFICATION TEST SUITES (Phases 3, 4, and 5 - Admin Only) */}
         {activeMainTab === 'TESTS' && (
+          !isAdmin ? (
+            <AdminLockScreen tabName="SYSTEM TEST SUITES" onSwitchAccount={openLoginModal} currentUserEmail={user?.email} />
+          ) : (
           <div className="glass-panel p-5 rounded-2xl border border-[#E8B84A]/30 space-y-6">
             <div className="flex flex-wrap items-center justify-between pb-3 border-b border-white/10 gap-3">
               <div>
@@ -2104,6 +2224,7 @@ export const DashboardView: React.FC = () => {
               </div>
             </div>
           </div>
+          )
         )}
       </main>
 

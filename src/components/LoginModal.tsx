@@ -11,14 +11,25 @@ export const LoginModal: React.FC = () => {
 
   if (!isLoginModalOpen) return null;
 
+  const handleClose = () => {
+    setError(null);
+    setIsLoading(false);
+    closeLoginModal();
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!email.trim() || !password) return;
     setIsLoading(true);
     setError(null);
     try {
-      await login(email, password);
+      await login(email.trim(), password);
+      setEmail('');
+      setPassword('');
+      closeLoginModal();
     } catch (err: any) {
-      setError(err.message || 'Invalid credentials. Please try again.');
+      setError(err.message || 'Invalid credentials. Access denied.');
+    } finally {
       setIsLoading(false);
     }
   };
@@ -32,7 +43,7 @@ export const LoginModal: React.FC = () => {
 
         {/* Close button */}
         <button
-          onClick={closeLoginModal}
+          onClick={handleClose}
           className="absolute top-5 right-5 text-neutral-400 hover:text-white transition-colors p-1 rounded-lg hover:bg-white/5 cursor-pointer"
         >
           <X className="w-5 h-5" />
@@ -48,14 +59,14 @@ export const LoginModal: React.FC = () => {
             SARRAF Terminal Login
           </h3>
           <p className="text-xs text-neutral-400">
-            Enter your terminal credentials to authenticate with the server.
+            Enter your credentials to access your designated terminal workstation.
           </p>
         </div>
 
         {/* Admin not configured banner */}
         {!adminConfigured && (
           <div className="mb-4 p-3 rounded-lg bg-amber-950/60 border border-amber-600/50 text-xs font-mono text-amber-300">
-            ⚠️ Admin login is not configured. Please set ADMIN_USERNAME and ADMIN_PASSWORD_HASH in environment variables.
+            ⚠️ Terminal authentication is not configured. Please verify environment settings.
           </div>
         )}
 
@@ -69,7 +80,7 @@ export const LoginModal: React.FC = () => {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-1.5">
             <label className="block text-[11px] font-mono tracking-wider text-neutral-300 uppercase">
-              Username / Terminal Email
+              Username / Terminal ID
             </label>
             <div className="relative">
               <Mail className="w-4 h-4 text-[#E8B84A]/70 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -79,7 +90,7 @@ export const LoginModal: React.FC = () => {
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 autoComplete="username"
-                placeholder="Admin username"
+                placeholder="Enter username or terminal ID"
                 className="w-full bg-black/60 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-xs font-mono text-white placeholder-neutral-600 focus:outline-none focus:border-[#FFD97A] transition-colors"
               />
             </div>
@@ -87,7 +98,7 @@ export const LoginModal: React.FC = () => {
 
           <div className="space-y-1.5">
             <label className="block text-[11px] font-mono tracking-wider text-neutral-300 uppercase">
-              Master Passkey
+              Passkey / Password
             </label>
             <div className="relative">
               <Lock className="w-4 h-4 text-[#E8B84A]/70 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -97,7 +108,7 @@ export const LoginModal: React.FC = () => {
                 onChange={(e) => setPassword(e.target.value)}
                 required
                 autoComplete="current-password"
-                placeholder="Enter passkey"
+                placeholder="Enter password or passkey"
                 className="w-full bg-black/60 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-xs font-mono text-white placeholder-neutral-600 focus:outline-none focus:border-[#FFD97A] transition-colors"
               />
             </div>
@@ -124,7 +135,7 @@ export const LoginModal: React.FC = () => {
           </div>
         </form>
 
-        <div className="mt-5 text-center text-[10px] font-mono text-neutral-500">
+        <div className="mt-4 text-center text-[10px] font-mono text-neutral-500">
           TLS 1.3 256-BIT ENCRYPTION · PROPRIETARY DESK ACCESS
         </div>
       </div>

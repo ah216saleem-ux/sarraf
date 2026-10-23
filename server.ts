@@ -157,8 +157,11 @@ import {
   verifyAdminCredentials,
   verifyAdminPassword,
   verifyAdminUsername,
+  verifyUserOrAdminCredentials,
   recordSuccessfulLogin,
   changeAdminPassword,
+  recordLoginAttempt,
+  getLoginHistory,
 } from './src/server/settingsEngine.ts';
 import {
   checkDataDirectory,
@@ -1150,7 +1153,7 @@ function requireCommandAdmin(req: express.Request, res: express.Response, next: 
 app.get('/api/command/telegram/status', (req, res) => {
   const token = getSessionToken(req);
   const session = token ? activeSessions.get(token) : null;
-  const isAdmin = Boolean(session && Date.now() <= session.expiresAt);
+  const isAdmin = Boolean(session && Date.now() <= session.expiresAt && (session.user as any)?.role === 'admin');
   const status = getCommandTelegramStatus(isAdmin);
   return res.json(status);
 });
@@ -1668,23 +1671,30 @@ app.get('/api/binance/futures', async (_req, res) => {
   }
 });
 
-// Helper middleware: Admin verification & rate-limiting for signal routes
+// Helper middleware: Admin verification & role-based access control
 function requireAdminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const token = req.cookies?.sarraf_session;
+  const token = getSessionToken(req);
   if (!token || !activeSessions.has(token)) {
-    if (req.headers['x-admin-role'] === 'admin' || req.headers['x-admin-override'] === 'true') {
-      (req as any).user = { email: 'admin@sarraf.gold', role: 'ADMIN' };
-      return next();
-    }
     return res.status(401).json({
-      error: 'Unauthorized: Valid sarraf session cookie required.',
+      error: 'Unauthorized: Valid sarraf session required.',
     });
   }
   const session = activeSessions.get(token);
   if (!session || Date.now() > session.expiresAt) {
-    if (session) activeSessions.delete(token);
+    if (session) {
+      activeSessions.delete(token);
+      saveActiveSessions();
+    }
     return res.status(401).json({ error: 'Session expired.' });
   }
+
+  // Strict Role-Based Access Control: Admin clearance required
+  if ((session.user as any)?.role !== 'admin' || !(session.user as any)?.isAdmin) {
+    return res.status(403).json({
+      error: 'Forbidden: Admin access required. Standard user accounts cannot modify or access admin modules.',
+    });
+  }
+
   (req as any).user = session.user;
   next();
 }
@@ -2309,7 +2319,7 @@ async function syncFredActualsIfAvailable(events: any[]): Promise<void> {
       setManualActualValue(
         evt.id,
         conversion.formattedActual,
-        'FEED',
+        'MANUAL',
         conversion.note || `FRED (${spec.seriesId} ${spec.expectedObservationDate})`
       );
       metaMap[evt.id] = {
@@ -2977,17 +2987,18 @@ app.post('/api/auth/login', (req, res) => {
     });
   }
 
+  const { email, username, password } = req.body || {};
+  const loginUser = String(username || email || '').trim();
+
   // 2) Rate limit check: max 5 attempts per 15 minutes per IP
   const rateLimitResult = checkLoginRateLimit(clientIp);
   if (!rateLimitResult.allowed) {
+    recordLoginAttempt(loginUser || 'anonymous', 'unknown', 'FAILED_RATE_LIMITED', clientIp);
     return res.status(429).json({
       success: false,
       error: `Rate limit exceeded: Too many failed login attempts. Please retry after ${rateLimitResult.retryAfterSec} seconds.`,
     });
   }
-
-  const { email, username, password } = req.body || {};
-  const loginUser = String(username || email || '').trim();
 
   if (!loginUser || !password) {
     return res.status(400).json({
@@ -2996,26 +3007,28 @@ app.post('/api/auth/login', (req, res) => {
     });
   }
 
-  // 3) Constant-time credentials check (never prints credentials)
-  const isValid = verifyAdminCredentials(loginUser, password);
+  // 3) Constant-time credentials check for Master Admin or Standard User
+  const authResult = verifyUserOrAdminCredentials(loginUser, password);
 
-  if (isValid) {
+  if (authResult.authenticated) {
     // Reset rate limit on successful authentication
     loginRateLimitMap.delete(clientIp);
 
     // Track new IP and trigger security alert if first time seen
     const { isNewIp } = recordSuccessfulLogin(clientIp);
-    if (isNewIp) {
+    if (isNewIp && authResult.isAdmin) {
       console.log(`[SECURITY ALERT] Admin login from new IP address: ${clientIp}`);
     }
 
+    recordLoginAttempt(loginUser, authResult.role || 'user', 'SUCCESS', clientIp, isNewIp);
+
     const token = crypto.randomBytes(32).toString('hex');
     const userPayload = {
-      email: loginUser.toLowerCase(),
-      accountType: 'SARRAF Desk',
-      terminalId: `SRF-${crypto.randomInt(1000, 9999)}-XAU`,
-      role: 'admin',
-      isAdmin: true,
+      email: authResult.username || loginUser,
+      accountType: authResult.accountType || (authResult.isAdmin ? 'SARRAF Master Desk (Admin)' : 'SARRAF Trader Desk (Standard)'),
+      terminalId: authResult.terminalId || (authResult.isAdmin ? 'SRF-ADMIN-XAU' : 'SRF-USER-XAU'),
+      role: authResult.role || (authResult.isAdmin ? 'admin' : 'user'),
+      isAdmin: Boolean(authResult.isAdmin),
     };
 
     activeSessions.set(token, {
@@ -3042,10 +3055,22 @@ app.post('/api/auth/login', (req, res) => {
     });
   }
 
+  recordLoginAttempt(loginUser, 'unknown', 'FAILED_INVALID_CREDENTIALS', clientIp);
+
   return res.status(401).json({
     success: false,
     configured: true,
     error: `Invalid credentials. (${rateLimitResult.remaining} attempts remaining)`,
+  });
+});
+
+// GET /api/auth/login-history - Secure Admin-only audit log of login attempts
+app.get('/api/auth/login-history', requireAdminAuth, (_req, res) => {
+  const history = getLoginHistory();
+  return res.json({
+    status: 'SUCCESS',
+    total: history.length,
+    history,
   });
 });
 
