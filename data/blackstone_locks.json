@@ -1,0 +1,192 @@
+[
+  {
+    "engineVersion": 4,
+    "sessionDate": "2026-10-23",
+    "openTimeIso": "2026-10-22T22:00:00.000Z",
+    "openTimeDubai": "02:00 Dubai",
+    "lockTimeIso": "2026-10-23T00:00:00.000Z",
+    "lockTimeDubai": "04:00 Dubai",
+    "lockedAtIso": "2026-10-24T20:53:31.080Z",
+    "lockReferencePrice": 4023.72,
+    "h1TradingDaysCount": 8,
+    "historyStatus": "Building history",
+    "openingGap": {
+      "prevClose": 4025.35,
+      "openPrice": 4023.89,
+      "gapDollars": -1.46,
+      "gapPercent": -0.036,
+      "direction": "DOWN"
+    },
+    "openingRange": {
+      "high": 4032.61,
+      "low": 4021.39,
+      "width": 11.22,
+      "openPrice": 4023.89,
+      "closePrice": 4023.72,
+      "candlesCount": 24
+    },
+    "dayState": {
+      "label": "NORMAL",
+      "openingRangeWidth": 11.22,
+      "todayHigh": 4034.24,
+      "todayLow": 3975.53,
+      "todayRangeSoFar": 58.71,
+      "storedDaysCount": 7,
+      "adr20": null,
+      "dayBudgetPercent": null,
+      "dayBudgetDisplay": "Building history"
+    },
+    "zones": [
+      {
+        "key": "SELL_2026-10-22T17:00:00.000Z",
+        "side": "sell side",
+        "level": 4046.92,
+        "low": 4045.42,
+        "high": 4048.42,
+        "proximal": 4045.42,
+        "distal": 4048.42,
+        "grade": "B",
+        "score": 68,
+        "touches": 0,
+        "departureDollars": 20.07,
+        "baseWidthDollars": 3,
+        "baseStartIso": "2026-10-22T17:00:00.000Z",
+        "formedAtIso": "2026-10-22T19:00:00.000Z",
+        "isNew": false,
+        "promoted": false,
+        "sources": [],
+        "id": "CROWN_3",
+        "name": "Crown 3",
+        "initialSide": "sell side",
+        "isSarrafCore": false,
+        "tag": null,
+        "tags": []
+      },
+      {
+        "key": "SELL_2026-10-23T13:00:00.000Z",
+        "id": "CROWN_2",
+        "name": "Crown 2",
+        "level": 4030.43,
+        "low": 4026.62,
+        "high": 4034.24,
+        "proximal": 4026.62,
+        "distal": 4034.24,
+        "side": "sell side",
+        "initialSide": "sell side",
+        "grade": "A",
+        "score": 86,
+        "touches": 0,
+        "departureDollars": 28.31,
+        "baseWidthDollars": 7.62,
+        "baseStartIso": "2026-10-23T13:00:00.000Z",
+        "formedAtIso": "2026-10-23T16:00:00.000Z",
+        "isNew": true,
+        "promoted": false,
+        "sources": [
+          "Today Open (4023.89)",
+          "OR High (4032.61)",
+          "Asia High (4032.61)",
+          "London High (4032.36)"
+        ],
+        "isSarrafCore": true,
+        "tag": "Sarraf Core",
+        "tags": [
+          "Sarraf Core",
+          "NEW"
+        ]
+      },
+      {
+        "key": "SELL_2026-10-23T14:00:00.000Z",
+        "id": "CROWN_1",
+        "name": "Crown 1",
+        "level": 4019.43,
+        "low": 4015.43,
+        "high": 4023.43,
+        "proximal": 4015.43,
+        "distal": 4023.43,
+        "side": "sell side",
+        "initialSide": "sell side",
+        "grade": "B",
+        "score": 67,
+        "touches": 0,
+        "departureDollars": 17.12,
+        "baseWidthDollars": 8,
+        "baseStartIso": "2026-10-23T14:00:00.000Z",
+        "formedAtIso": "2026-10-23T17:00:00.000Z",
+        "isNew": true,
+        "promoted": false,
+        "sources": [
+          "PDL (4021.09)",
+          "Today Open (4023.89)",
+          "OR Low (4021.39)"
+        ],
+        "isSarrafCore": false,
+        "tag": null,
+        "tags": [
+          "NEW"
+        ]
+      },
+      {
+        "key": "BUY_2026-10-23T12:00:00.000Z",
+        "id": "ROOT_1",
+        "name": "Root 1",
+        "level": 3979.53,
+        "low": 3975.53,
+        "high": 3983.53,
+        "proximal": 3983.53,
+        "distal": 3975.53,
+        "side": "buy side",
+        "initialSide": "buy side",
+        "grade": "B",
+        "score": 57,
+        "touches": 0,
+        "departureDollars": 20.13,
+        "baseWidthDollars": 8,
+        "baseStartIso": "2026-10-23T12:00:00.000Z",
+        "formedAtIso": "2026-10-23T15:00:00.000Z",
+        "isNew": true,
+        "promoted": false,
+        "sources": [],
+        "isSarrafCore": false,
+        "tag": null,
+        "tags": [
+          "NEW"
+        ]
+      }
+    ],
+    "grade": {
+      "CROWN_3": "B",
+      "CROWN_2": "A",
+      "CROWN_1": "B",
+      "ROOT_1": "B"
+    },
+    "score": {
+      "CROWN_3": 68,
+      "CROWN_2": 86,
+      "CROWN_1": 67,
+      "ROOT_1": 57
+    },
+    "touches": {
+      "CROWN_3": 0,
+      "CROWN_2": 0,
+      "CROWN_1": 0,
+      "ROOT_1": 0
+    },
+    "sources": {
+      "CROWN_3": [],
+      "CROWN_2": [
+        "Today Open (4023.89)",
+        "OR High (4032.61)",
+        "Asia High (4032.61)",
+        "London High (4032.36)"
+      ],
+      "CROWN_1": [
+        "PDL (4021.09)",
+        "Today Open (4023.89)",
+        "OR Low (4021.39)"
+      ],
+      "ROOT_1": []
+    },
+    "retiredZones": []
+  }
+]

@@ -309,11 +309,201 @@ export function normalizeThreeWayProbabilities(
   return { holdProb, cutProb, hikeProb, rawSumPct };
 }
 
+export interface RawKalshiStrikeEntry {
+  ticker: string;
+  strike: number;
+  yes_bid: number;
+  yes_ask: number;
+}
+
+export interface KalshiBucketRow {
+  rangeLabel: string;
+  midpoint: number;
+  prob: number;
+  weightedContribution: number;
+}
+
+export interface KalshiBucketEvCalculation {
+  accepted: boolean;
+  ev: number | null;
+  strikesCount: number;
+  isMonotonic: boolean;
+  dropReason?: string;
+  buckets: KalshiBucketRow[];
+  probSum: number;
+  rawJsonSample?: RawKalshiStrikeEntry[];
+}
+
+export const KXCPI_26OCT_RECORDED_SAMPLE: RawKalshiStrikeEntry[] = [
+  { ticker: 'KXCPI-26OCT-2.6', strike: 2.6, yes_bid: 0.92, yes_ask: 0.94 },
+  { ticker: 'KXCPI-26OCT-2.8', strike: 2.8, yes_bid: 0.70, yes_ask: 0.74 },
+  { ticker: 'KXCPI-26OCT-3.0', strike: 3.0, yes_bid: 0.44, yes_ask: 0.48 },
+  { ticker: 'KXCPI-26OCT-3.2', strike: 3.2, yes_bid: 0.22, yes_ask: 0.26 },
+  { ticker: 'KXCPI-26OCT-3.4', strike: 3.4, yes_bid: 0.06, yes_ask: 0.10 },
+];
+
 /**
- * Computes Expected Value E[X] from a Kalshi binary "greater than floor_strike" ladder:
- * E[X] = s_min + sum_i P(X > s_i) * (s_{i+1} - s_i)
+ * Round 15 Item 4: Kalshi EV Bucket Calculation
+ * "above X" contracts have cumulative yes prices that must not increase with strike.
+ * P(>x_i) >= P(>x_{i+1}).
+ * Bucket probabilities: P(>x_i) - P(>x_{i+1}) with both left & right tails.
+ * Ladder must have >= 5 strikes and non-increasing prices, otherwise drop input (ev: null).
  */
-function computeKalshiStrikeLadderEv(markets: any[]): { ev: number | null; eventTicker: string; sampleTitle: string } {
+export function computeKalshiBucketLadderEv(
+  strikesInput: RawKalshiStrikeEntry[] | any[]
+): KalshiBucketEvCalculation {
+  if (!Array.isArray(strikesInput) || strikesInput.length === 0) {
+    return {
+      accepted: false,
+      ev: null,
+      strikesCount: 0,
+      isMonotonic: false,
+      dropReason: 'Empty ladder input',
+      buckets: [],
+      probSum: 0,
+    };
+  }
+
+  const parsed = strikesInput
+    .map((item) => {
+      const strike =
+        typeof item.strike === 'number'
+          ? item.strike
+          : typeof item.floor_strike === 'number'
+          ? item.floor_strike
+          : parseFloat(item.strike ?? item.floor_strike ?? 'NaN');
+      const bid =
+        typeof item.yes_bid === 'number'
+          ? item.yes_bid
+          : parseFloat(item.yes_bid_dollars ?? item.yes_bid ?? '0');
+      const ask =
+        typeof item.yes_ask === 'number'
+          ? item.yes_ask
+          : parseFloat(item.yes_ask_dollars ?? item.yes_ask ?? '0');
+      const ticker = String(item.ticker || item.event_ticker || '');
+      let prob = 0;
+      if (bid > 0 && ask > 0) {
+        prob = (bid + ask) / 2;
+      } else if (item.yes_price !== undefined) {
+        prob = Number(item.yes_price);
+      } else if (item.last_price_dollars) {
+        prob = parseFloat(item.last_price_dollars);
+      } else {
+        prob = Math.max(bid, ask);
+      }
+      return {
+        ticker,
+        strike,
+        yes_bid: bid,
+        yes_ask: ask,
+        prob: Math.max(0, Math.min(1, prob)),
+      };
+    })
+    .filter((p) => Number.isFinite(p.strike))
+    .sort((a, b) => a.strike - b.strike);
+
+  // Assertion 1: Ladder must have at least 5 strikes
+  if (parsed.length < 5) {
+    return {
+      accepted: false,
+      ev: null,
+      strikesCount: parsed.length,
+      isMonotonic: true,
+      dropReason: `Fewer than 5 strikes on ladder (${parsed.length} < 5): input dropped.`,
+      buckets: [],
+      probSum: 0,
+      rawJsonSample: parsed.map((p) => ({
+        ticker: p.ticker,
+        strike: p.strike,
+        yes_bid: p.yes_bid,
+        yes_ask: p.yes_ask,
+      })),
+    };
+  }
+
+  // Assertion 2: "above X" contracts have cumulative yes prices that must not increase with strike
+  for (let i = 0; i < parsed.length - 1; i++) {
+    if (parsed[i + 1].prob > parsed[i].prob + 0.0001) {
+      return {
+        accepted: false,
+        ev: null,
+        strikesCount: parsed.length,
+        isMonotonic: false,
+        dropReason: `Price monotonicity violated at strike ${parsed[i].strike} (${parsed[i].prob}) -> ${parsed[i + 1].strike} (${parsed[i + 1].prob}): cumulative yes prices must be non-increasing. Input dropped.`,
+        buckets: [],
+        probSum: 0,
+        rawJsonSample: parsed.map((p) => ({
+          ticker: p.ticker,
+          strike: p.strike,
+          yes_bid: p.yes_bid,
+          yes_ask: p.yes_ask,
+        })),
+      };
+    }
+  }
+
+  // Compute bucket probabilities as P(>x_i) - P(>x_{i+1}) with both tails:
+  const n = parsed.length;
+  const leftStep = parsed[1].strike - parsed[0].strike;
+  const rightStep = parsed[n - 1].strike - parsed[n - 2].strike;
+  const buckets: KalshiBucketRow[] = [];
+
+  // Left tail: X <= x_0. Probability = 1 - P(>x_0)
+  const leftProb = Number((1 - parsed[0].prob).toFixed(4));
+  const leftMidpoint = Number((parsed[0].strike - leftStep / 2).toFixed(4));
+  buckets.push({
+    rangeLabel: `X <= ${parsed[0].strike}`,
+    midpoint: leftMidpoint,
+    prob: leftProb,
+    weightedContribution: Number((leftMidpoint * leftProb).toFixed(4)),
+  });
+
+  // Interior buckets: x_i < X <= x_{i+1}. Probability = P(>x_i) - P(>x_{i+1})
+  for (let i = 0; i < n - 1; i++) {
+    const p1 = parsed[i].prob;
+    const p2 = parsed[i + 1].prob;
+    const bucketProb = Number((p1 - p2).toFixed(4));
+    const midpoint = Number(((parsed[i].strike + parsed[i + 1].strike) / 2).toFixed(4));
+    buckets.push({
+      rangeLabel: `${parsed[i].strike} < X <= ${parsed[i + 1].strike}`,
+      midpoint,
+      prob: bucketProb,
+      weightedContribution: Number((midpoint * bucketProb).toFixed(4)),
+    });
+  }
+
+  // Right tail: X > x_{n-1}. Probability = P(>x_{n-1})
+  const rightProb = Number(parsed[n - 1].prob.toFixed(4));
+  const rightMidpoint = Number((parsed[n - 1].strike + rightStep / 2).toFixed(4));
+  buckets.push({
+    rangeLabel: `X > ${parsed[n - 1].strike}`,
+    midpoint: rightMidpoint,
+    prob: rightProb,
+    weightedContribution: Number((rightMidpoint * rightProb).toFixed(4)),
+  });
+
+  const probSum = Number(buckets.reduce((acc, b) => acc + b.prob, 0).toFixed(4));
+  const ev = Number(buckets.reduce((acc, b) => acc + b.weightedContribution, 0).toFixed(4));
+
+  return {
+    accepted: true,
+    ev,
+    strikesCount: n,
+    isMonotonic: true,
+    buckets,
+    probSum,
+    rawJsonSample: parsed.map((p) => ({
+      ticker: p.ticker,
+      strike: p.strike,
+      yes_bid: p.yes_bid,
+      yes_ask: p.yes_ask,
+    })),
+  };
+}
+
+export function computeKalshiStrikeLadderEv(
+  markets: any[]
+): { ev: number | null; eventTicker: string; sampleTitle: string; dropReason?: string } {
   if (!Array.isArray(markets) || markets.length === 0) {
     return { ev: null, eventTicker: '', sampleTitle: '' };
   }
@@ -327,25 +517,20 @@ function computeKalshiStrikeLadderEv(markets: any[]): { ev: number | null; event
     .filter((m) => m.event_ticker === nearestEvent && typeof m.floor_strike === 'number')
     .sort((a, b) => a.floor_strike - b.floor_strike);
 
-  if (ladder.length < 2) return { ev: null, eventTicker: nearestEvent || '', sampleTitle: sortedByClose[0].title || '' };
-
-  let ev = ladder[0].floor_strike;
-  for (let i = 0; i < ladder.length; i++) {
-    const m = ladder[i];
-    const bid = parseFloat(m.yes_bid_dollars ?? m.last_price_dollars ?? '0');
-    const ask = parseFloat(m.yes_ask_dollars ?? m.last_price_dollars ?? '0');
-    const prob = bid > 0 && ask > 0 ? (bid + ask) / 2 : parseFloat(m.last_price_dollars || '0');
-    const step =
-      i < ladder.length - 1
-        ? ladder[i + 1].floor_strike - m.floor_strike
-        : ladder[i].floor_strike - ladder[i - 1].floor_strike;
-    ev += Math.max(0, Math.min(1, prob)) * Math.max(0, step);
+  const bucketRes = computeKalshiBucketLadderEv(ladder);
+  if (!bucketRes.accepted || bucketRes.ev === null) {
+    return {
+      ev: null,
+      eventTicker: nearestEvent || '',
+      sampleTitle: sortedByClose[0].title || '',
+      dropReason: bucketRes.dropReason,
+    };
   }
 
   return {
-    ev: Number(ev.toFixed(4)),
+    ev: bucketRes.ev,
     eventTicker: nearestEvent,
-    sampleTitle: ladder[0].title || '',
+    sampleTitle: ladder[0]?.title || sortedByClose[0]?.title || '',
   };
 }
 

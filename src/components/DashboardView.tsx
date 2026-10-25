@@ -42,6 +42,7 @@ import { PerformanceTab } from './PerformanceTab';
 import { GoLiveChecklistTab } from './GoLiveChecklistTab';
 import { SarrafCommandView } from '../command/SarrafCommandView';
 import { SarrafAtlasView } from '../atlas/SarrafAtlasView';
+import { BlackstoneView } from '../blackstone/BlackstoneView';
 import { SpyOptionsView } from '../spy/SpyOptionsView';
 import { BtcTideView } from '../btcTide/BtcTideView';
 import { useCommandFeed } from '../command/data/useCommandFeed';
@@ -147,10 +148,30 @@ const DashboardPriceHeader: React.FC<{ fallbackPrice: number | null; fallbackSta
   }
 );
 
+export type SarrafSubView = 'COMMAND' | 'DECK' | 'ATLAS' | 'blackstone';
+
+interface SarrafSubPillItem {
+  id: SarrafSubView;
+  label: string;
+  badge?: string;
+  icon?: 'zap' | 'compass';
+  adminLockIndicator?: boolean;
+  roles: Array<'admin' | 'trader'>;
+}
+
+const SARRAF_SUB_PILLS: SarrafSubPillItem[] = [
+  { id: 'COMMAND', label: 'SARRAF COMMAND', badge: 'LIVE', icon: 'zap', roles: ['admin', 'trader'] },
+  { id: 'DECK', label: 'TRADING DECK', adminLockIndicator: true, roles: ['admin', 'trader'] },
+  { id: 'ATLAS', label: 'SARRAF ATLAS', badge: 'ZONES', icon: 'compass', roles: ['admin', 'trader'] },
+  { id: 'blackstone', label: 'BLACKSTONE', badge: 'PLAN', roles: ['admin', 'trader'] },
+];
+
 export const DashboardView: React.FC = () => {
   const { priceData, user, logout, macroEvents, openLoginModal } = useMarket();
   const isAdmin = Boolean(user?.role === 'admin' && user?.isAdmin);
-  const [sarrafSection, setSarrafSection] = useState<'COMMAND' | 'DECK' | 'ATLAS'>('COMMAND');
+  const [sarrafSection, setSarrafSection] = useState<SarrafSubView>('COMMAND');
+  const currentRole: 'admin' | 'trader' = isAdmin ? 'admin' : 'trader';
+  const visibleSarrafPills = SARRAF_SUB_PILLS.filter((pill) => pill.roles.includes(currentRole));
   const [activeMainTab, setActiveMainTab] = useState<
     | 'OVERVIEW'
     | 'BTC_TIDE'
@@ -837,69 +858,58 @@ export const DashboardView: React.FC = () => {
       )}
 
       {/* Main Terminal View Switcher */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6">
+      <main className="flex-1 min-w-0 max-w-7xl w-full mx-auto p-4 sm:p-6">
         {/* TAB 1: OVERVIEW (Main Trading Deck & SARRAF COMMAND) */}
         {activeMainTab === 'OVERVIEW' && (
-          <div className="space-y-4">
+          <div className="space-y-4 min-w-0">
             {/* Section Switcher inside Sarraf Tab */}
-            <div className="flex items-center justify-between border-b border-white/10 pb-3 gap-2">
-              <div className="flex items-center gap-2 font-mono text-xs select-none overflow-x-auto max-w-full w-full sm:w-auto pb-1 sm:pb-0">
-                <button
-                  onClick={() => setSarrafSection('COMMAND')}
-                  className={`flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer shrink-0 whitespace-nowrap ${
-                    sarrafSection === 'COMMAND'
-                      ? 'bg-[#E8B84A] text-black font-extrabold border-[#E8B84A] shadow-[0_0_15px_rgba(232,184,74,0.35)]'
-                      : 'bg-black/60 text-neutral-300 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
-                  }`}
-                >
-                  <Zap className="w-3.5 h-3.5 shrink-0" />
-                  <span>SARRAF COMMAND</span>
-                  <span
-                    className={`text-[9px] px-1.5 py-0.5 rounded font-bold tracking-wider ${
-                      sarrafSection === 'COMMAND'
-                        ? 'bg-black/85 text-[#FFD97A] border border-black/40'
-                        : 'bg-[#E8B84A]/15 text-[#FFD97A] border border-[#E8B84A]/30'
-                    }`}
-                  >
-                    LIVE
-                  </span>
-                </button>
-                <button
-                  onClick={() => setSarrafSection('DECK')}
-                  title={!isAdmin ? 'Admin Clearance Required' : undefined}
-                  className={`flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer shrink-0 whitespace-nowrap ${
-                    sarrafSection === 'DECK'
-                      ? 'bg-[#E8B84A] text-black font-extrabold border-[#E8B84A] shadow-[0_0_15px_rgba(232,184,74,0.35)]'
-                      : 'bg-black/60 text-neutral-300 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
-                  }`}
-                >
-                  <span>TRADING DECK</span>
-                  {!isAdmin && <Lock className="w-2.5 h-2.5 text-amber-400/80 shrink-0 ml-0.5" />}
-                </button>
-                <button
-                  onClick={() => setSarrafSection('ATLAS')}
-                  className={`flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer shrink-0 whitespace-nowrap ${
-                    sarrafSection === 'ATLAS'
-                      ? 'bg-[#E8B84A] text-black font-extrabold border-[#E8B84A] shadow-[0_0_15px_rgba(232,184,74,0.35)]'
-                      : 'bg-black/60 text-neutral-300 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
-                  }`}
-                >
-                  <Compass className="w-3.5 h-3.5 shrink-0" />
-                  <span>SARRAF ATLAS</span>
-                  <span
-                    className={`text-[9px] px-1.5 py-0.5 rounded font-bold tracking-wider ${
-                      sarrafSection === 'ATLAS'
-                        ? 'bg-black/85 text-[#FFD97A] border border-black/40'
-                        : 'bg-[#E8B84A]/15 text-[#FFD97A] border border-[#E8B84A]/30'
-                    }`}
-                  >
-                    ZONES
-                  </span>
-                </button>
+            <div className="flex items-center justify-between border-b border-white/10 pb-3 gap-2 min-w-0 w-full">
+              <div
+                className="flex items-center gap-2 font-mono text-xs select-none overflow-x-auto min-w-0 flex-1 pr-6 pb-1.5 sm:pb-0"
+                style={{ WebkitOverflowScrolling: 'touch' }}
+              >
+                {visibleSarrafPills.map((pill) => {
+                  const isSelected = sarrafSection === pill.id;
+                  return (
+                    <button
+                      key={pill.id}
+                      type="button"
+                      onClick={(e) => {
+                        setSarrafSection(pill.id);
+                        e.currentTarget.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+                      }}
+                      title={pill.adminLockIndicator && !isAdmin ? 'Admin Clearance Required' : undefined}
+                      className={`flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-xl border transition-all cursor-pointer shrink-0 whitespace-nowrap ${
+                        isSelected
+                          ? 'bg-[#E8B84A] text-black font-extrabold border-[#E8B84A] shadow-[0_0_15px_rgba(232,184,74,0.35)]'
+                          : 'bg-black/60 text-neutral-300 border-white/10 hover:text-white hover:border-[#E8B84A]/30'
+                      }`}
+                    >
+                      {pill.icon === 'zap' && <Zap className="w-3.5 h-3.5 shrink-0" />}
+                      {pill.icon === 'compass' && <Compass className="w-3.5 h-3.5 shrink-0" />}
+                      <span>{pill.label}</span>
+                      {pill.badge && (
+                        <span
+                          className={`text-[9px] px-1.5 py-0.5 rounded font-bold tracking-wider ${
+                            isSelected
+                              ? 'bg-black/85 text-[#FFD97A] border border-black/40'
+                              : 'bg-[#E8B84A]/15 text-[#FFD97A] border border-[#E8B84A]/30'
+                          }`}
+                        >
+                          {pill.badge}
+                        </span>
+                      )}
+                      {pill.adminLockIndicator && !isAdmin && (
+                        <Lock className="w-2.5 h-2.5 text-amber-400/80 shrink-0 ml-0.5" />
+                      )}
+                    </button>
+                  );
+                })}
+                <div className="w-3 shrink-0" aria-hidden="true" />
               </div>
 
-              <span className="text-[10px] font-mono text-neutral-500 hidden sm:inline shrink-0">
-                SECTION: {sarrafSection === 'COMMAND' ? 'SARRAF COMMAND' : sarrafSection === 'DECK' ? 'TRADING DECK' : 'SARRAF ATLAS'}
+              <span className="text-[10px] font-mono text-neutral-500 hidden md:inline shrink-0 pl-2">
+                SECTION: {sarrafSection === 'COMMAND' ? 'SARRAF COMMAND' : sarrafSection === 'DECK' ? 'TRADING DECK' : sarrafSection === 'ATLAS' ? 'SARRAF ATLAS' : 'BLACKSTONE'}
               </span>
             </div>
 
@@ -908,6 +918,8 @@ export const DashboardView: React.FC = () => {
               <SarrafCommandView />
             ) : sarrafSection === 'ATLAS' ? (
               <SarrafAtlasView />
+            ) : sarrafSection === 'blackstone' ? (
+              <BlackstoneView />
             ) : !isAdmin ? (
               <AdminLockScreen tabName="TRADING DECK" onSwitchAccount={openLoginModal} />
             ) : (

@@ -97,6 +97,7 @@ export interface NewsEvent {
     sampleSize: number;
   } | null;
   newsDecision?: NewsDecisionObject | null;
+  calendarOrigin?: 'FEED' | 'STATIC CALENDAR';
 }
 
 export interface NewsFeedStatus {
@@ -353,7 +354,43 @@ export function generateEventId(raw: RawForexFactoryEvent): string {
   return `EVT-${dateIso}-${raw.country}-${cleanTitle}`;
 }
 
-export function transformRawEvent(raw: RawForexFactoryEvent, existingArchive?: NewsEvent[]): NewsEvent {
+// Static calendar releases not from Forex Factory feed (Round 15 Item 3)
+// CPI Nov 12, NFP Nov 6, FOMC Oct 28
+export const STATIC_CALENDAR_EVENTS: Array<RawForexFactoryEvent & { calendarOrigin: 'STATIC CALENDAR' }> = [
+  {
+    title: 'FOMC Statement & Rate Decision',
+    country: 'USD',
+    date: '2026-10-28T18:00:00.000Z',
+    impact: 'High',
+    forecast: '4.75%',
+    previous: '5.00%',
+    calendarOrigin: 'STATIC CALENDAR',
+  },
+  {
+    title: 'Non-Farm Employment Change',
+    country: 'USD',
+    date: '2026-11-06T13:30:00.000Z',
+    impact: 'High',
+    forecast: '165K',
+    previous: '142K',
+    calendarOrigin: 'STATIC CALENDAR',
+  },
+  {
+    title: 'CPI m/m & y/y',
+    country: 'USD',
+    date: '2026-11-12T13:30:00.000Z',
+    impact: 'High',
+    forecast: '0.2%',
+    previous: '0.2%',
+    calendarOrigin: 'STATIC CALENDAR',
+  },
+];
+
+export function transformRawEvent(
+  raw: RawForexFactoryEvent,
+  existingArchive?: NewsEvent[],
+  origin: 'FEED' | 'STATIC CALENDAR' = 'FEED'
+): NewsEvent {
   const dateObj = new Date(raw.date);
   const timeUtc = isNaN(dateObj.getTime()) ? new Date().toISOString() : dateObj.toISOString();
   const eventTimeMs = new Date(timeUtc).getTime();
@@ -435,6 +472,7 @@ export function transformRawEvent(raw: RawForexFactoryEvent, existingArchive?: N
     minutesUntil,
     isReleased,
     isInsideLockWindow: false,
+    calendarOrigin: origin,
   };
 }
 
@@ -499,15 +537,42 @@ export async function fetchForexFactoryCalendar(): Promise<boolean> {
     // Filter for USD events only
     const usdEvents = allRaw.filter((e) => e.country === 'USD');
 
-    // Transform and de-duplicate
+    // Transform and de-duplicate feed events (marked as 'FEED')
     const seenIds = new Set<string>();
     const newTransformed: NewsEvent[] = [];
 
     for (const raw of usdEvents) {
-      const transformed = transformRawEvent(raw, archive);
+      const transformed = transformRawEvent(raw, archive, 'FEED');
       if (!seenIds.has(transformed.id)) {
         seenIds.add(transformed.id);
         newTransformed.push(transformed);
+      }
+    }
+
+    // Merge static calendar events when not present in feed ("Prefer the feed when it has the event")
+    // Static calendar: CPI Nov 12, NFP Nov 6 and FOMC Oct 28
+    for (const staticRaw of STATIC_CALENDAR_EVENTS) {
+      const staticDateStr = staticRaw.date.slice(0, 10);
+      const isFomc = staticRaw.title.toLowerCase().includes('fomc');
+      const isNfp = staticRaw.title.toLowerCase().includes('non-farm') || staticRaw.title.toLowerCase().includes('nfp');
+      const isCpi = staticRaw.title.toLowerCase().includes('cpi');
+
+      const feedHasEvent = newTransformed.some((feedEvt) => {
+        const feedDateStr = feedEvt.timeUtc.slice(0, 10);
+        if (feedDateStr !== staticDateStr) return false;
+        const feedT = feedEvt.title.toLowerCase();
+        if (isFomc && (feedT.includes('fomc') || feedT.includes('rate decision') || feedT.includes('fed funds'))) return true;
+        if (isNfp && (feedT.includes('non-farm') || feedT.includes('nfp') || feedT.includes('payroll'))) return true;
+        if (isCpi && feedT.includes('cpi')) return true;
+        return false;
+      });
+
+      if (!feedHasEvent) {
+        const transformedStatic = transformRawEvent(staticRaw, archive, 'STATIC CALENDAR');
+        if (!seenIds.has(transformedStatic.id)) {
+          seenIds.add(transformedStatic.id);
+          newTransformed.push(transformedStatic);
+        }
       }
     }
 
@@ -740,8 +805,30 @@ export function getNewsFeedStatus(displayTz: string = 'UTC'): NewsFeedStatus {
 }
 
 export function getNewsEventsForUI(): NewsEvent[] {
-  // Returns formatted and refreshed authentic Forex Factory events (zero synthetic fallback events)
   getNewsFeedStatus();
+
+  // Ensure static calendar events are present if not in feed (prefer feed when present)
+  for (const staticRaw of STATIC_CALENDAR_EVENTS) {
+    const staticDateStr = staticRaw.date.slice(0, 10);
+    const isFomc = staticRaw.title.toLowerCase().includes('fomc');
+    const isNfp = staticRaw.title.toLowerCase().includes('non-farm') || staticRaw.title.toLowerCase().includes('nfp');
+    const isCpi = staticRaw.title.toLowerCase().includes('cpi');
+
+    const feedHasEvent = cachedEvents.some((feedEvt) => {
+      const feedDateStr = feedEvt.timeUtc.slice(0, 10);
+      if (feedDateStr !== staticDateStr) return false;
+      const feedT = feedEvt.title.toLowerCase();
+      if (isFomc && (feedT.includes('fomc') || feedT.includes('rate decision') || feedT.includes('fed funds'))) return true;
+      if (isNfp && (feedT.includes('non-farm') || feedT.includes('nfp') || feedT.includes('payroll'))) return true;
+      if (isCpi && feedT.includes('cpi')) return true;
+      return false;
+    });
+
+    if (!feedHasEvent && !cachedEvents.some((e) => e.id === generateEventId(staticRaw))) {
+      cachedEvents.push(transformRawEvent(staticRaw, undefined, 'STATIC CALENDAR'));
+    }
+  }
+
   const rawList = cachedEvents;
   return rawList.map((evt) => {
     const eventTimeMs = new Date(evt.timeUtc).getTime();
@@ -854,6 +941,7 @@ export function getNewsEventsForUI(): NewsEvent[] {
       actualSource,
       goldImpact,
       goldImpactExplanation,
+      calendarOrigin: evt.calendarOrigin || 'FEED',
     };
 
     const nd = newsDecision(enrichedEventBase, {

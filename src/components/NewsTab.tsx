@@ -49,6 +49,7 @@ interface NewsEventItem {
   minutesUntil: number;
   isReleased: boolean;
   isInsideLockWindow: boolean;
+  calendarOrigin?: 'FEED' | 'STATIC CALENDAR';
   newsDecision?: {
     word: 'BULLISH' | 'BEARISH' | 'WAIT' | 'SKIP' | 'RELEASED';
     confidence: number;
@@ -1362,11 +1363,26 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
 
                       <div className="min-w-0 flex-1 overflow-hidden">
                         {/* Item 4: Long names in list rows truncate with an ellipsis on one line */}
-                        <div
-                          className="text-xs sm:text-sm font-medium truncate whitespace-nowrap font-['Sora'] min-w-0"
-                          style={{ color: palette.text }}
-                        >
-                          {evt.title}
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className="text-xs sm:text-sm font-medium truncate whitespace-nowrap font-['Sora'] min-w-0"
+                            style={{ color: palette.text }}
+                          >
+                            {evt.title}
+                          </span>
+                          {evt.calendarOrigin === 'STATIC CALENDAR' && (
+                            <span
+                              className="shrink-0 text-[8px] font-mono uppercase px-1.5 py-0.2 rounded border tracking-wider font-semibold"
+                              style={{
+                                color: palette.gold,
+                                borderColor: `${palette.gold}66`,
+                                backgroundColor: `${palette.gold}15`,
+                              }}
+                              title="Static calendar entry (not from live feed)"
+                            >
+                              STATIC CALENDAR
+                            </span>
+                          )}
                         </div>
                         <div
                           className="font-mono text-[10px] truncate whitespace-nowrap"
@@ -1456,7 +1472,7 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
               className="font-mono text-[10px] uppercase tracking-[0.14em] min-w-0 truncate"
               style={{ color: palette.muted }}
             >
-              RELEASE TIMELINE · {activeSelectedEvent?.title || 'EVENT'}
+              RELEASE TIMELINE · {activeSelectedEvent?.calendarOrigin === 'STATIC CALENDAR' ? '[STATIC CALENDAR] ' : ''}{activeSelectedEvent?.title || 'EVENT'}
             </span>
             <span
               className="shrink-0 font-mono text-[10px] uppercase tracking-[0.14em]"

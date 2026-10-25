@@ -1,0 +1,15 @@
+{
+  "sessionDate": "2026-10-23",
+  "mode": "AUTO",
+  "pinnedZoneId": null,
+  "activeTrade": null,
+  "todaySignals": [],
+  "tradesCountToday": 0,
+  "stoppedTradesCountToday": 0,
+  "levelTradeCounts": {},
+  "blockedLevels": {},
+  "retestZones": [],
+  "lastBrokenZoneId": "SELL_2026-10-23T01:00:00.000Z",
+  "transitionMessage": "Sell Reaction Zone broke. Plan moved to Root 1.",
+  "transitionMessageExpiresMs": 1792876089857
+}

@@ -351,9 +351,28 @@ export function processManualActualRequest(
     customDataDir?: string;
     nowIso?: string;
     nowMs?: number;
+    secFetchSite?: string;
+    origin?: string;
+    host?: string;
+    isCrossSite?: boolean;
   }
 ): ManualActualResponse {
-  // 1. Authentication check -> 401
+  // 1. Cross-site / CSRF check -> 403 Forbidden
+  if (
+    options?.isCrossSite ||
+    options?.secFetchSite === 'cross-site' ||
+    (options?.origin && options?.host && !options.origin.includes(options.host) && !options.origin.includes('localhost'))
+  ) {
+    return {
+      statusCode: 403,
+      body: {
+        status: 'ERROR',
+        error: 'Forbidden: Cross-site request rejected (CSRF protection active).',
+      },
+    };
+  }
+
+  // 2. Authentication check -> 401
   if (!session || !session.authenticated || !session.user) {
     return {
       statusCode: 401,
@@ -364,7 +383,7 @@ export function processManualActualRequest(
     };
   }
 
-  // 2. Authorization check (admin role required) -> 403
+  // 3. Authorization check (admin role required) -> 403
   if (String(session.user.role || '').toLowerCase() !== 'admin') {
     return {
       statusCode: 403,
@@ -603,7 +622,7 @@ export function computeActualReactionReading(
 // -------------------------------------------------------------
 // ITEM 4: FRED CORRECTNESS (Reference Period + Series Conversions)
 // -------------------------------------------------------------
-export type SupportedFredSeries = 'ICSA' | 'UNRATE' | 'CPIAUCSL' | 'PAYEMS';
+export type SupportedFredSeries = 'ICSA' | 'UNRATE' | 'CPIAUCSL' | 'CPIAUCNS' | 'PAYEMS';
 
 export interface FredEventSpec {
   seriesId: SupportedFredSeries;
@@ -676,7 +695,7 @@ export function getExpectedFredSpecForEvent(
     };
   }
 
-  // 4. Headline CPI m/m or CPI y/y (CPIAUCSL)
+  // 4a. Headline CPI m/m (CPIAUCSL - Seasonally Adjusted)
   if (t === 'cpi m/m' || (t.includes('cpi') && t.includes('m/m') && !t.includes('core'))) {
     return {
       seriesId: 'CPIAUCSL',
@@ -687,9 +706,10 @@ export function getExpectedFredSpecForEvent(
     };
   }
 
+  // 4b. Headline CPI y/y (CPIAUCNS - Not Seasonally Adjusted)
   if (t === 'cpi y/y' || (t.includes('cpi') && t.includes('y/y') && !t.includes('core'))) {
     return {
-      seriesId: 'CPIAUCSL',
+      seriesId: 'CPIAUCNS',
       mode: 'CPI_YOY_PCT',
       unit: '%',
       expectedObservationDate: expectedMonthlyDate,
@@ -839,7 +859,7 @@ export function convertFredObservationsForEvent(
     };
   }
 
-  // Case 4: CPIAUCSL y/y %
+  // Case 4: CPIAUCNS y/y % (Not Seasonally Adjusted)
   if (spec.mode === 'CPI_YOY_PCT') {
     const prevYearDate = getPreviousMonthObservationDate(spec.expectedObservationDate, 12);
     const prevYearObs = observations.find((o) => o.date === prevYearDate);
@@ -850,14 +870,14 @@ export function convertFredObservationsForEvent(
     ) {
       return {
         accepted: false,
-        seriesId: 'CPIAUCSL',
+        seriesId: 'CPIAUCNS',
         expectedObservationDate: spec.expectedObservationDate,
         latestObservationDate,
         numericValue: null,
         formattedActual: null,
         unit: '%',
         formulaSteps: `Missing 12-month-prior index (${prevYearDate}) required to compute CPI y/y %.`,
-        rejectionReason: `Missing 12-month-prior CPIAUCSL observation (${prevYearDate}).`,
+        rejectionReason: `Missing 12-month-prior CPIAUCNS observation (${prevYearDate}).`,
       };
     }
     const prevYearVal = Number(prevYearObs.value);
@@ -865,13 +885,13 @@ export function convertFredObservationsForEvent(
     const yoyPct = Number(rawYoy.toFixed(1));
     return {
       accepted: true,
-      seriesId: 'CPIAUCSL',
+      seriesId: 'CPIAUCNS',
       expectedObservationDate: spec.expectedObservationDate,
       latestObservationDate,
       numericValue: yoyPct,
       formattedActual: `${yoyPct.toFixed(1)}%`,
       unit: '%',
-      formulaSteps: `CPI y/y % = ((${targetVal} [${targetObs.date}] - ${prevYearVal} [${prevYearObs.date}]) / ${prevYearVal}) * 100 = ${rawYoy.toFixed(3)}% -> ${yoyPct.toFixed(1)}%`,
+      formulaSteps: `CPI y/y % (CPIAUCNS) = ((${targetVal} [${targetObs.date}] - ${prevYearVal} [${prevYearObs.date}]) / ${prevYearVal}) * 100 = ${rawYoy.toFixed(3)}% -> ${yoyPct.toFixed(1)}%`,
     };
   }
 

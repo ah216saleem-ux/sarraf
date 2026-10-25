@@ -85,6 +85,14 @@ import {
   getAtlasAlertLogs,
 } from './server/atlas/atlasEngine.ts';
 import {
+  initBlackstoneEngine,
+  getBlackstoneState,
+  getBlackstoneCandles,
+  setPlanPinMode,
+} from './src/server/blackstoneEngine.ts';
+import { getBlackstoneTapeState } from './src/server/blackstoneTapeEngine.ts';
+import { getZoneRecordsSummary, getBacktestState } from './src/server/blackstoneRecordEngine.ts';
+import {
   getCommandTelegramStatus,
   updateCommandTelegramSettings,
   sendTestMessage,
@@ -1103,6 +1111,67 @@ app.get('/api/atlas/alerts/status', (_req, res) => {
   return res.json({
     alertsEnabled: getAtlasAlertsEnabled(),
     alertLogs: getAtlasAlertLogs(),
+  });
+});
+
+// -------------------------------------------------------------
+// BLACKSTONE SERVER-SIDE ZONE ENGINE & DAILY LOCK ENDPOINTS
+// -------------------------------------------------------------
+
+// GET /api/blackstone/state - Server-computed zones, daily lock, opening gap/range, day state, and lock history
+app.get('/api/blackstone/state', (req, res) => {
+  const token = getSessionToken(req);
+  const session = token ? activeSessions.get(token) : null;
+  const isAdmin = Boolean(
+    session &&
+      Date.now() <= session.expiresAt &&
+      ((session.user as any)?.role === 'admin' || (session.user as any)?.isAdmin === true)
+  );
+  const state = getBlackstoneState(Date.now(), isAdmin);
+  return res.json(state);
+});
+
+// GET /api/blackstone/candles - Server candles for M5 (base) and M15, M30, H1 (built from M5)
+app.get('/api/blackstone/candles', (req, res) => {
+  const tf = typeof req.query.tf === 'string' ? req.query.tf : 'M5';
+  const result = getBlackstoneCandles(tf);
+  return res.json(result);
+});
+
+// POST /api/blackstone/plan/pin - Set plan mode AUTO vs MANUAL (pinned zone)
+app.post('/api/blackstone/plan/pin', (req, res) => {
+  const { mode, zoneId } = req.body || {};
+  const selectedMode = mode === 'MANUAL' ? 'MANUAL' : 'AUTO';
+  setPlanPinMode(selectedMode, zoneId || null);
+  const token = getSessionToken(req);
+  const session = token ? activeSessions.get(token) : null;
+  const isAdmin = Boolean(
+    session &&
+      Date.now() <= session.expiresAt &&
+      ((session.user as any)?.role === 'admin' || (session.user as any)?.isAdmin === true)
+  );
+  const state = getBlackstoneState(Date.now(), isAdmin);
+  return res.json({ success: true, plan: state.plan });
+});
+
+// GET /api/blackstone/tape - Live tick tape, 30m activity per min, 60-tick pressure bar
+app.get('/api/blackstone/tape', (_req, res) => {
+  return res.json(getBlackstoneTapeState());
+});
+
+// GET /api/blackstone/zone-records - Real stored zone tests (Today, 30d, 60d, 90d, ratings)
+app.get('/api/blackstone/zone-records', (_req, res) => {
+  return res.json({
+    status: 'SUCCESS',
+    records: getZoneRecordsSummary(),
+  });
+});
+
+// GET /api/blackstone/backtest - Real history (30d, 60d, 90d), trade log & rules in use
+app.get('/api/blackstone/backtest', (_req, res) => {
+  return res.json({
+    status: 'SUCCESS',
+    backtest: getBacktestState(),
   });
 });
 
@@ -2511,6 +2580,10 @@ app.post('/api/news/manual-actual', (req, res) => {
   const currentEvents = getNewsEventsForUI();
   const matchedEvent = currentEvents.find((e) => e.id === eventId);
 
+  const secFetchSite = (req.headers['sec-fetch-site'] as string) || '';
+  const origin = (req.headers.origin as string) || '';
+  const host = (req.headers.host as string) || '';
+
   const outcome = processManualActualRequest(sessionCtx, {
     eventId,
     eventTitle: eventTitle || matchedEvent?.title || eventId,
@@ -2519,6 +2592,11 @@ app.post('/api/news/manual-actual', (req, res) => {
     numberValue,
     unit,
     note,
+  }, {
+    secFetchSite,
+    origin,
+    host,
+    isCrossSite: secFetchSite === 'cross-site',
   });
 
   if (outcome.statusCode !== 200) {
@@ -2545,10 +2623,19 @@ app.delete('/api/news/manual-actual', (req, res) => {
   const currentEvents = getNewsEventsForUI();
   const matchedEvent = currentEvents.find((e) => e.id === eventId);
 
+  const secFetchSite = (req.headers['sec-fetch-site'] as string) || '';
+  const origin = (req.headers.origin as string) || '';
+  const host = (req.headers.host as string) || '';
+
   const outcome = processManualActualRequest(sessionCtx, {
     eventId: String(eventId || ''),
     eventTitle: matchedEvent?.title || String(eventId || ''),
     action: 'delete',
+  }, {
+    secFetchSite,
+    origin,
+    host,
+    isCrossSite: secFetchSite === 'cross-site',
   });
 
   if (outcome.statusCode !== 200) {
@@ -3037,10 +3124,10 @@ app.post('/api/auth/login', (req, res) => {
     });
     saveActiveSessions();
 
-    // Store login session in httpOnly cookie with 12h expiry
+    // Store login session in httpOnly cookie with 12h expiry (HttpOnly, Secure in prod, SameSite=Strict)
     res.cookie('sarraf_session', token, {
       httpOnly: true,
-      sameSite: 'lax',
+      sameSite: 'strict',
       secure: process.env.NODE_ENV === 'production',
       maxAge: SESSION_TTL_MS,
       path: '/',
@@ -3088,7 +3175,7 @@ app.get('/api/auth/me', (req, res) => {
       activeSessions.delete(token);
       saveActiveSessions();
     }
-    res.clearCookie('sarraf_session', { httpOnly: true, sameSite: 'lax', path: '/' });
+    res.clearCookie('sarraf_session', { httpOnly: true, sameSite: 'strict', path: '/' });
     return res.json({ authenticated: false, configured, user: null });
   }
 
@@ -3110,7 +3197,7 @@ app.post('/api/auth/logout', (req, res) => {
 
   res.clearCookie('sarraf_session', {
     httpOnly: true,
-    sameSite: 'lax',
+    sameSite: 'strict',
     path: '/',
   });
 
@@ -3168,8 +3255,14 @@ async function startServer() {
   await backfillCandleGaps();
   await bootstrapHistoricalCandles();
 
-  // 7b. Initialize Sarraf Atlas engine
+  // 7b. Initialize Sarraf Atlas engine & Blackstone zone engine
   initAtlasEngine();
+  initBlackstoneEngine();
+  setInterval(() => {
+    try {
+      getBlackstoneState();
+    } catch {}
+  }, 15 * 1000);
 
   // 8. Fetch real Forex Factory news calendar and start 15-minute background refresh
   await fetchForexFactoryCalendar();

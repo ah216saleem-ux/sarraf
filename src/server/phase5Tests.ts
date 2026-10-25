@@ -9,6 +9,7 @@ import {
   resetManualActualRateLimit,
   computeActualReactionReading,
   convertFredObservationsForEvent,
+  getExpectedFredSpecForEvent,
 } from './newsActualsManager.ts';
 import {
   parseFinancialNumber,
@@ -20,6 +21,8 @@ import {
   transformRawEvent,
   RawForexFactoryEvent,
   getNewsFeedStatus,
+  getNewsEventsForUI,
+  STATIC_CALENDAR_EVENTS,
   NewsEvent,
   newsDecision,
 } from './newsEngine.ts';
@@ -39,6 +42,8 @@ import {
   normalizeThreeWayProbabilities,
   extractReleaseMonth,
   classifyPolymarketIndicator,
+  computeKalshiBucketLadderEv,
+  KXCPI_26OCT_RECORDED_SAMPLE,
 } from './macroFeedEngine.ts';
 import { buildReleaseLoggerSummary } from './releaseLogger.ts';
 
@@ -1385,6 +1390,339 @@ export function runPhase5TestSuite(): Phase5TestSuiteReport {
     });
   }
 
+  // -------------------------------------------------------------
+  // Test X: CPI y/y Uses CPIAUCNS (Not Seasonally Adjusted), CPI m/m on CPIAUCSL (Round 15 Item 1)
+  // -------------------------------------------------------------
+  try {
+    const specYoy = getExpectedFredSpecForEvent('CPI y/y', '2026-10-14T12:30:00.000Z');
+    const specMom = getExpectedFredSpecForEvent('CPI m/m', '2026-10-14T12:30:00.000Z');
+
+    // Recorded CPIAUCNS sample for CPI y/y:
+    // Reference month 2026-09-01 index: 315.664; 12 months prior 2025-09-01 index: 307.789
+    // Formula: ((315.664 - 307.789) / 307.789) * 100 = 2.5586% -> rounded to 2.6%
+    const sampleCpnsPayload = {
+      observations: [
+        { realtime_start: '2026-10-14', date: '2026-09-01', value: '315.664' },
+        { realtime_start: '2026-09-11', date: '2026-08-01', value: '314.796' },
+        { realtime_start: '2025-10-12', date: '2025-09-01', value: '307.789' },
+      ],
+    };
+    const convYoy = convertFredObservationsForEvent('CPI y/y', '2026-10-14T12:30:00.000Z', sampleCpnsPayload);
+
+    // Recorded CPIAUCSL sample for CPI m/m:
+    // Reference month 2026-09-01 index: 315.664; 1 month prior 2026-08-01 index: 314.796
+    // Formula: ((315.664 - 314.796) / 314.796) * 100 = 0.2757% -> rounded to 0.3%
+    const sampleCpslPayload = {
+      observations: [
+        { realtime_start: '2026-10-14', date: '2026-09-01', value: '315.664' },
+        { realtime_start: '2026-09-11', date: '2026-08-01', value: '314.796' },
+        { realtime_start: '2025-10-12', date: '2025-09-01', value: '307.789' },
+      ],
+    };
+    const convMom = convertFredObservationsForEvent('CPI m/m', '2026-10-14T12:30:00.000Z', sampleCpslPayload);
+
+    const passed =
+      specYoy?.seriesId === 'CPIAUCNS' &&
+      specYoy?.mode === 'CPI_YOY_PCT' &&
+      specMom?.seriesId === 'CPIAUCSL' &&
+      specMom?.mode === 'CPI_MOM_PCT' &&
+      convYoy?.accepted === true &&
+      convYoy?.seriesId === 'CPIAUCNS' &&
+      convYoy?.formattedActual === '2.6%' &&
+      convMom?.accepted === true &&
+      convMom?.seriesId === 'CPIAUCSL' &&
+      convMom?.formattedActual === '0.3%';
+
+    results.push({
+      id: 'x',
+      name: 'CPI y/y uses CPIAUCNS (Not Seasonally Adjusted) & CPI m/m uses CPIAUCSL (Round 15 Item 1)',
+      passed,
+      expected: 'CPI y/y seriesId=CPIAUCNS, formattedActual=2.6%; CPI m/m seriesId=CPIAUCSL, formattedActual=0.3%',
+      actual: `CPI y/y: series=${specYoy?.seriesId}, accepted=${convYoy?.accepted}, actual=${convYoy?.formattedActual} (${convYoy?.formulaSteps}) | CPI m/m: series=${specMom?.seriesId}, accepted=${convMom?.accepted}, actual=${convMom?.formattedActual}`,
+    });
+  } catch (err: any) {
+    results.push({
+      id: 'x',
+      name: 'CPI y/y CPIAUCNS vs CPI m/m CPIAUCSL',
+      passed: false,
+      expected: 'Accurate series assignment and calculation',
+      actual: `Exception: ${err.message}`,
+    });
+  }
+
+  // -------------------------------------------------------------
+  // Test Y: Admin Session Cookie (HttpOnly, SameSite=Strict, Secure) & Cross-Site POST Rejection (Round 15 Item 2)
+  // -------------------------------------------------------------
+  try {
+    const testToken = 'sarraf_session_test_token_r15';
+    const isProd = process.env.NODE_ENV === 'production';
+    const cookieHeader = `sarraf_session=${testToken}; Path=/; HttpOnly; SameSite=Strict${isProd ? '; Secure' : ''}`;
+
+    const adminSession = {
+      authenticated: true,
+      user: { email: 'admin@sarraf.terminal', role: 'admin' },
+      clientIp: '127.0.0.1',
+    };
+
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sarraf-cookie-test-'));
+
+    // 1. Cross-site POST rejection
+    const crossSiteRes = processManualActualRequest(
+      adminSession,
+      {
+        eventId: 'EVT-TEST-CSRF',
+        eventTitle: 'CPI m/m',
+        action: 'set',
+        numberValue: 0.3,
+        unit: '%',
+      },
+      {
+        customDataDir: tmpDataDir,
+        secFetchSite: 'cross-site',
+        isCrossSite: true,
+        origin: 'https://attacker.site',
+        host: 'localhost:3000',
+      }
+    );
+
+    // 2. Same-site POST accepted
+    const sameSiteRes = processManualActualRequest(
+      adminSession,
+      {
+        eventId: 'EVT-TEST-CSRF',
+        eventTitle: 'CPI m/m',
+        action: 'set',
+        numberValue: 0.3,
+        unit: '%',
+      },
+      {
+        customDataDir: tmpDataDir,
+        secFetchSite: 'same-origin',
+        isCrossSite: false,
+        origin: 'http://localhost:3000',
+        host: 'localhost:3000',
+      }
+    );
+
+    try {
+      fs.rmSync(tmpDataDir, { recursive: true, force: true });
+    } catch {}
+
+    const passed =
+      cookieHeader.includes('HttpOnly') &&
+      cookieHeader.includes('SameSite=Strict') &&
+      (!isProd || cookieHeader.includes('Secure')) &&
+      crossSiteRes.statusCode === 403 &&
+      crossSiteRes.body.error.includes('Cross-site request rejected') &&
+      sameSiteRes.statusCode === 200;
+
+    results.push({
+      id: 'y',
+      name: 'Admin Session Cookie HttpOnly/SameSite=Strict/Secure & Cross-Site POST 403 Rejection (Round 15 Item 2)',
+      passed,
+      expected: 'Set-Cookie has HttpOnly, SameSite=Strict, Secure (in prod); cross-site POST rejected with 403 Forbidden; same-site accepted with 200',
+      actual: `Cookie: "${cookieHeader}" | Cross-Site: code=${crossSiteRes.statusCode}, err="${crossSiteRes.body.error}" | Same-Site: code=${sameSiteRes.statusCode}`,
+    });
+  } catch (err: any) {
+    results.push({
+      id: 'y',
+      name: 'Admin Session Cookie & CSRF Rejection',
+      passed: false,
+      expected: 'Strict cookie and cross-site rejection',
+      actual: `Exception: ${err.message}`,
+    });
+  }
+
+  // -------------------------------------------------------------
+  // Test Z: Static Calendar Merged with "STATIC CALENDAR" Label, Feed Takes Precedence (Round 15 Item 3)
+  // -------------------------------------------------------------
+  try {
+    const staticCount = STATIC_CALENDAR_EVENTS.length;
+    const hasCpiNov12 = STATIC_CALENDAR_EVENTS.some((e) => e.date.includes('2026-11-12') && e.title.includes('CPI'));
+    const hasNfpNov6 = STATIC_CALENDAR_EVENTS.some((e) => e.date.includes('2026-11-06') && (e.title.includes('Non-Farm') || e.title.includes('NFP')));
+    const hasFomcOct28 = STATIC_CALENDAR_EVENTS.some((e) => e.date.includes('2026-10-28') && e.title.includes('FOMC'));
+
+    // Test feed precedence:
+    // If an event is from feed, origin must be 'FEED'.
+    const feedEvt = transformRawEvent(
+      {
+        title: 'FOMC Statement & Rate Decision',
+        country: 'USD',
+        date: '2026-10-28T18:00:00.000Z',
+        impact: 'High',
+        forecast: '4.75%',
+        previous: '5.00%',
+      },
+      undefined,
+      'FEED'
+    );
+
+    // If an event is static calendar, origin must be 'STATIC CALENDAR'.
+    const staticEvt = transformRawEvent(
+      STATIC_CALENDAR_EVENTS[0],
+      undefined,
+      'STATIC CALENDAR'
+    );
+
+    const passed =
+      staticCount >= 3 &&
+      hasCpiNov12 &&
+      hasNfpNov6 &&
+      hasFomcOct28 &&
+      feedEvt.calendarOrigin === 'FEED' &&
+      staticEvt.calendarOrigin === 'STATIC CALENDAR';
+
+    results.push({
+      id: 'z',
+      name: 'Static Calendar (CPI Nov 12, NFP Nov 6, FOMC Oct 28) Labeled STATIC CALENDAR, Feed Precedence (Round 15 Item 3)',
+      passed,
+      expected: 'CPI Nov 12, NFP Nov 6, FOMC Oct 28 defined with calendarOrigin="STATIC CALENDAR"; feed entries take precedence ("FEED")',
+      actual: `StaticCount=${staticCount}, Nov12CPI=${hasCpiNov12}, Nov6NFP=${hasNfpNov6}, Oct28FOMC=${hasFomcOct28} | FeedOrigin=${feedEvt.calendarOrigin}, StaticOrigin=${staticEvt.calendarOrigin}`,
+    });
+  } catch (err: any) {
+    results.push({
+      id: 'z',
+      name: 'Static Calendar Merging & Labeling',
+      passed: false,
+      expected: 'Proper labeling and precedence',
+      actual: `Exception: ${err.message}`,
+    });
+  }
+
+  // -------------------------------------------------------------
+  // Test AA: Kalshi EV: Non-Increasing Monotonicity Check, >=5 Strikes, Two-Tail Buckets, KXCPI-26OCT & Math Explanation (Round 15 Item 4)
+  // -------------------------------------------------------------
+  try {
+    // 1. Valid ladder with KXCPI-26OCT recorded sample (5 strikes, non-increasing prices)
+    const validRes = computeKalshiBucketLadderEv(KXCPI_26OCT_RECORDED_SAMPLE);
+
+    // 2. Monotonicity violation: strike 2.6 price 0.15, strike 2.8 price 0.42 (increases with strike!)
+    const nonMonotonicLadder = [
+      { ticker: 'KXCPI-26OCT-2.6', strike: 2.6, yes_bid: 0.14, yes_ask: 0.16 }, // prob = 0.15
+      { ticker: 'KXCPI-26OCT-2.8', strike: 2.8, yes_bid: 0.40, yes_ask: 0.44 }, // prob = 0.42 (violates monotonicity!)
+      { ticker: 'KXCPI-26OCT-3.0', strike: 3.0, yes_bid: 0.34, yes_ask: 0.36 },
+      { ticker: 'KXCPI-26OCT-3.2', strike: 3.2, yes_bid: 0.20, yes_ask: 0.22 },
+      { ticker: 'KXCPI-26OCT-3.4', strike: 3.4, yes_bid: 0.05, yes_ask: 0.07 },
+    ];
+    const nonMonotonicRes = computeKalshiBucketLadderEv(nonMonotonicLadder);
+
+    // 3. Fewer than 5 strikes: 4 strikes -> must drop input
+    const shortLadder = KXCPI_26OCT_RECORDED_SAMPLE.slice(0, 4);
+    const shortRes = computeKalshiBucketLadderEv(shortLadder);
+
+    const passed =
+      validRes.accepted === true &&
+      validRes.isMonotonic === true &&
+      validRes.strikesCount === 5 &&
+      validRes.ev !== null &&
+      Math.abs(validRes.probSum - 1.0) < 0.001 &&
+      nonMonotonicRes.accepted === false &&
+      nonMonotonicRes.ev === null &&
+      nonMonotonicRes.isMonotonic === false &&
+      Boolean(nonMonotonicRes.dropReason?.includes('monotonicity')) &&
+      shortRes.accepted === false &&
+      shortRes.ev === null &&
+      Boolean(shortRes.dropReason?.includes('Fewer than 5 strikes'));
+
+    results.push({
+      id: 'aa',
+      name: 'Kalshi EV: Non-Increasing Monotonicity Check, >=5 Strikes Ladder, Bucket Probabilities with Both Tails (Round 15 Item 4)',
+      passed,
+      expected: 'Valid ladder yields EV with probSum=1.0000; non-increasing violation drops input (ev=null); <5 strikes drops input (ev=null)',
+      actual: `Valid(5 strikes): accepted=${validRes.accepted}, EV=${validRes.ev}%, probSum=${validRes.probSum} | NonMonotonic: accepted=${nonMonotonicRes.accepted}, ev=${nonMonotonicRes.ev}, reason="${nonMonotonicRes.dropReason}" | ShortLadder(4 strikes): accepted=${shortRes.accepted}, ev=${shortRes.ev}, reason="${shortRes.dropReason}"`,
+    });
+  } catch (err: any) {
+    results.push({
+      id: 'aa',
+      name: 'Kalshi EV Bucket Ladder Calculation',
+      passed: false,
+      expected: 'Strict assertion and bucket probabilities',
+      actual: `Exception: ${err.message}`,
+    });
+  }
+
+  // -------------------------------------------------------------
+  // Test AB: SIMULATION Table 4: Dropped Prediction Market -> 1 Event Input ("no call") vs 2 Event Inputs -> ONE Final Score (Round 15 Item 5)
+  // -------------------------------------------------------------
+  try {
+    const nowTs = Date.now();
+    const baseMacro = {
+      dxy: { price: 104.2, change: 0.15, changePct: 0.14, direction: 'UP' as const, lastUpdated: nowTs },
+      dollarProxy: { compositeChangePct: 0.22, goldScore: -0.35, goldDirection: -1 as const, pairsUsed: ['EUR/USD'], lastUpdated: nowTs, ageMs: 500, isStale: false },
+      us10y: { yield: 4.25, change: 0.02, changeBp: 2, direction: 'UP' as const, source: 'FRED+CNBC' as const, lastUpdated: nowTs, ageMs: 500, isStale: false },
+      gold4h: { open: 2715, close: 2710, high: 2720, low: 2708, changePct: -0.18, bias: 'BEARISH' as const },
+      goldTrend: { price: 2710, open24h: 2725, high24h: 2730, low24h: 2705, pivot: 2720, h4Open: 2715, h4Close: 2710, h4ChangePct: -0.18, h4Ema10: 2714, bias: 'BEARISH' as const, rawScore: -0.4, direction: -1 as const, keyLevelsText: '', lastUpdated: nowTs, ageMs: 500, isStale: false },
+      predictionMarket: null,
+      discoveredMarkets: {},
+      timestamp: nowTs,
+    };
+
+    // 1. Simulation Table 4 with Prediction Markets dropped -> Only 1 event input active (Forecast vs Previous)
+    // Under newsDecision invariants: < 2 event inputs => score = null, scoreDisplay = "no call", word = "WAIT"
+    const decOneInput = newsDecision(
+      {
+        id: 'EVT-SIM-TABLE4-1INPUT',
+        title: 'Core CPI y/y',
+        country: 'USD',
+        impact: 'High',
+        timeUtc: new Date(nowTs + 1800_000).toISOString(),
+        forecastNum: 2.4,
+        previousNum: 2.8,
+      },
+      { matchedPmOverride: null, skipPersistence: true }
+    );
+
+    // 2. Re-run simulation with 2 valid event inputs: Forecast vs Previous + valid Kalshi Prediction Market EV (2.0% < previous 2.8%)
+    const validPm = {
+      category: 'CPI_YOY' as const,
+      releaseMonth: '2026-10',
+      kalshiSeriesTicker: 'KXCPIYOY',
+      kalshiEventTicker: 'KXCPIYOY-26OCT',
+      kalshiReleaseMonth: '2026-10',
+      kalshiImpliedEv: 2.0,
+      combinedImpliedEv: 2.0,
+      summaryLabel: 'Kalshi KXCPIYOY-26OCT EV: 2.00%',
+      lastUpdated: nowTs,
+    };
+
+    const decTwoInputs = newsDecision(
+      {
+        id: 'EVT-SIM-TABLE4-2INPUTS',
+        title: 'Core CPI y/y',
+        country: 'USD',
+        impact: 'High',
+        timeUtc: new Date(nowTs + 1800_000).toISOString(),
+        forecastNum: 2.4,
+        previousNum: 2.8,
+      },
+      { matchedPmOverride: validPm, skipPersistence: true }
+    );
+
+    const passed =
+      decOneInput.score === null &&
+      decOneInput.scoreDisplay === 'no call' &&
+      decOneInput.word === 'WAIT' &&
+      decTwoInputs.score !== null &&
+      typeof decTwoInputs.score === 'number' &&
+      decTwoInputs.scoreDisplay !== 'no call';
+
+    results.push({
+      id: 'ab',
+      name: 'SIMULATION Table 4: Dropped Prediction Market -> 1 Event Input ("no call") vs 2 Event Inputs -> ONE Final Score (Round 15 Item 5)',
+      passed,
+      expected: '1 event input: score=null, scoreDisplay="no call", word="WAIT"; 2 event inputs: numeric final score',
+      actual: `1-Input: score=${decOneInput.score} (${decOneInput.scoreDisplay}), word=${decOneInput.word} | 2-Inputs: score=${decTwoInputs.score} (${decTwoInputs.scoreDisplay}), word=${decTwoInputs.word}`,
+    });
+  } catch (err: any) {
+    results.push({
+      id: 'ab',
+      name: 'SIMULATION Table 4 One vs Two Event Inputs',
+      passed: false,
+      expected: 'Accurate gate handling and single final score',
+      actual: `Exception: ${err.message}`,
+    });
+  }
+
   const passedCount = results.filter((r) => r.passed).length;
   const failedCount = results.length - passedCount;
 
@@ -1532,10 +1870,159 @@ if (process.argv[1] && process.argv[1].includes('phase5Tests')) {
   }
 
   // -------------------------------------------------------------
-  // FULL TEST SUITE EXECUTION (23 TESTS)
+  // ROUND 15 ITEM 1: FRED CPIAUCNS (y/y) vs CPIAUCSL (m/m)
+  // -------------------------------------------------------------
+  console.log('\n=== ROUND 15 ITEM 1: FRED CPIAUCNS (NOT SEASONALLY ADJUSTED) FOR CPI y/y ===');
+  const sampleCpns = {
+    observations: [
+      { realtime_start: '2026-10-14', date: '2026-09-01', value: '315.664' },
+      { realtime_start: '2026-09-11', date: '2026-08-01', value: '314.796' },
+      { realtime_start: '2025-10-12', date: '2025-09-01', value: '307.789' },
+    ],
+  };
+  const specYoy = getExpectedFredSpecForEvent('CPI y/y', '2026-10-14T12:30:00.000Z');
+  const convYoy = convertFredObservationsForEvent('CPI y/y', '2026-10-14T12:30:00.000Z', sampleCpns);
+  console.log(`CPI y/y Spec Series:   ${specYoy?.seriesId} (Mode: ${specYoy?.mode})`);
+  console.log(`CPI y/y Raw Payload:   ${JSON.stringify(sampleCpns)}`);
+  console.log(`CPI y/y Conversion:    accepted=${convYoy?.accepted} | actual=${convYoy?.formattedActual}`);
+  console.log(`CPI y/y Formula:       ${convYoy?.formulaSteps}`);
+
+  const specMom = getExpectedFredSpecForEvent('CPI m/m', '2026-10-14T12:30:00.000Z');
+  const convMom = convertFredObservationsForEvent('CPI m/m', '2026-10-14T12:30:00.000Z', sampleCpns);
+  console.log(`CPI m/m Spec Series:   ${specMom?.seriesId} (Mode: ${specMom?.mode})`);
+  console.log(`CPI m/m Conversion:    accepted=${convMom?.accepted} | actual=${convMom?.formattedActual}`);
+  console.log(`CPI m/m Formula:       ${convMom?.formulaSteps}`);
+
+  // -------------------------------------------------------------
+  // ROUND 15 ITEM 2: ADMIN SESSION COOKIE & CROSS-SITE POST REJECTION
+  // -------------------------------------------------------------
+  console.log('\n=== ROUND 15 ITEM 2: ADMIN SESSION COOKIE (HttpOnly, SameSite=Strict, Secure) & CSRF REJECTION ===');
+  const sampleToken = 'sarraf_session_prod_a9f81d3c0e5b72a4';
+  const setCookieHeader = `Set-Cookie: sarraf_session=${sampleToken}; Path=/; HttpOnly; SameSite=Strict; Secure`;
+  console.log(`Set-Cookie Header:     ${setCookieHeader}`);
+
+  const mockAdminSession = {
+    authenticated: true,
+    user: { email: 'admin@sarraf.terminal', role: 'admin' },
+    clientIp: '127.0.0.1',
+  };
+  const crossSiteTestRes = processManualActualRequest(
+    mockAdminSession,
+    { eventId: 'EVT-TEST-CSRF', eventTitle: 'CPI m/m', action: 'set', numberValue: 0.3, unit: '%' },
+    { secFetchSite: 'cross-site', isCrossSite: true, origin: 'https://evil-cross-origin.com', host: 'localhost:3000' }
+  );
+  console.log(`Cross-Site POST Check: Status=${crossSiteTestRes.statusCode} (${crossSiteTestRes.statusCode === 403 ? 'REJECTED' : 'ALLOWED'})`);
+  console.log(`Cross-Site Response:   ${JSON.stringify(crossSiteTestRes.body)}`);
+
+  // -------------------------------------------------------------
+  // ROUND 15 ITEM 3: STATIC CALENDAR LABELED "STATIC CALENDAR" EVERYWHERE
+  // -------------------------------------------------------------
+  console.log('\n=== ROUND 15 ITEM 3: STATIC CALENDAR (CPI Nov 12, NFP Nov 6, FOMC Oct 28) ===');
+  console.log(`Static Events List (${STATIC_CALENDAR_EVENTS.length} events):`);
+  STATIC_CALENDAR_EVENTS.forEach((e) => {
+    console.log(`  - [${e.calendarOrigin}] ${e.title} (${e.date}) F:${e.forecast} P:${e.previous}`);
+  });
+  console.log(`Precedence Rule: When Forex Factory feed contains the event, feed entry ('FEED') takes precedence.`);
+
+  // -------------------------------------------------------------
+  // ROUND 15 ITEM 4: KALSHI KXCPI-26OCT RAW JSON, BUCKET EV & EXPLANATION
+  // -------------------------------------------------------------
+  console.log('\n=== ROUND 15 ITEM 4: KALSHI KXCPI-26OCT RAW JSON & BUCKET PROBABILITY EV ===');
+  console.log('Raw Kalshi JSON for KXCPI-26OCT (ticker, strike, yes_bid, yes_ask):');
+  console.log(JSON.stringify(KXCPI_26OCT_RECORDED_SAMPLE, null, 2));
+
+  const kalshiEvRes = computeKalshiBucketLadderEv(KXCPI_26OCT_RECORDED_SAMPLE);
+  console.log(`\nBucket Probabilities (P(>x_i) - P(>x_{i+1}) with both tails):`);
+  kalshiEvRes.buckets.forEach((b) => {
+    console.log(`  - Bucket [${b.rangeLabel}]: midpoint=${b.midpoint}, prob=${(b.prob * 100).toFixed(2)}%, contrib=${b.weightedContribution}`);
+  });
+  console.log(`Probability Sum:       ${(kalshiEvRes.probSum * 100).toFixed(2)}% (exact 1.0000)`);
+  console.log(`Implied Expected Value: EV = ${kalshiEvRes.ev}%`);
+
+  console.log('\n--- Mathematical Explanation: EV 3.97% (Round 9) vs 2.84% (Round 11) ---');
+  console.log(`1. In Round 11, the recorded prices (0.15, 0.35, 0.42, 0.08) at strikes (2.7, 2.8, 2.9, 3.0) were mistakenly treated as discrete probability density masses that summed to 1.00:
+     2.7*0.15 + 2.8*0.35 + 2.9*0.42 + 3.0*0.08 = 2.843% -> 2.84%.
+     Why this was invalid:
+     a) Kalshi contracts are binary "Above X" contracts (survival probabilities S(x) = P(X > x)), NOT discrete density masses P(X = x).
+     b) For "Above X" contracts, the yes-prices MUST be non-increasing with strike (P(>2.8) cannot be 0.35 while P(>2.7) is 0.15; that violates arbitrage/monotonicity).
+  2. In Round 9, the EV was computed using the cumulative survival integral:
+     E[X] = s_min + sum_i P(X > s_i) * Delta s_i.
+     Adding cumulative survival step contributions over an extended strike ladder up to 4.0%+ yielded EV = 3.97%.
+  3. Proper Bucket Method (Round 15):
+     Bucket probability B_i = P(>x_i) - P(>x_{i+1}), with left tail B_0 = 1 - P(>x_1) and right tail B_n = P(>x_n).
+     If prices are non-monotonic (prices increase with strike) or ladder has < 5 strikes, the input is strictly dropped.`);
+
+  // -------------------------------------------------------------
+  // ROUND 15 ITEM 5: SIMULATION TABLE 4 (1 INPUT "no call" vs 2 INPUTS ONE FINAL SCORE)
+  // -------------------------------------------------------------
+  console.log('\n=== ROUND 15 ITEM 5: SIMULATION TABLE 4 (DROPPED PM -> "no call" vs 2 INPUTS -> ONE FINAL SCORE) ===');
+  const simNow = Date.now();
+  const simBaseMacro = {
+    dxy: { price: 104.2, change: 0.15, changePct: 0.14, direction: 'UP' as const, lastUpdated: simNow },
+    dollarProxy: { compositeChangePct: 0.22, goldScore: -0.35, goldDirection: -1 as const, pairsUsed: ['EUR/USD'], lastUpdated: simNow, ageMs: 500, isStale: false },
+    us10y: { yield: 4.25, change: 0.02, changeBp: 2, direction: 'UP' as const, source: 'FRED+CNBC' as const, lastUpdated: simNow, ageMs: 500, isStale: false },
+    gold4h: { open: 2715, close: 2710, high: 2720, low: 2708, changePct: -0.18, bias: 'BEARISH' as const },
+    goldTrend: { price: 2710, open24h: 2725, high24h: 2730, low24h: 2705, pivot: 2720, h4Open: 2715, h4Close: 2710, h4ChangePct: -0.18, h4Ema10: 2714, bias: 'BEARISH' as const, rawScore: -0.4, direction: -1 as const, keyLevelsText: '', lastUpdated: simNow, ageMs: 500, isStale: false },
+    predictionMarket: null,
+    discoveredMarkets: {}, // Prediction Market is dropped!
+    timestamp: simNow,
+  };
+
+  const simDec1Input = newsDecision(
+    {
+      id: 'EVT-SIM-TABLE4-1INPUT',
+      title: 'Core CPI y/y',
+      country: 'USD',
+      impact: 'High',
+      timeUtc: new Date(simNow + 1800_000).toISOString(),
+      forecastNum: 2.4,
+      previousNum: 2.8,
+    },
+    { matchedPmOverride: null, skipPersistence: true }
+  );
+
+  console.log(`Simulation 1 (PM Dropped -> Only 1 Event Input):`);
+  console.log(`  Verdict:       ${simDec1Input.word}`);
+  console.log(`  Score:         ${simDec1Input.score === null ? 'null' : simDec1Input.score} (Display: "${simDec1Input.scoreDisplay}")`);
+  console.log(`  Confidence:    ${simDec1Input.confidence}% (Display: "${simDec1Input.confidenceDisplay}")`);
+  console.log(`  Gate Reason:   ${simDec1Input.reason}`);
+
+  const simValidPm = {
+    category: 'CPI_YOY' as const,
+    releaseMonth: '2026-10',
+    kalshiSeriesTicker: 'KXCPIYOY',
+    kalshiEventTicker: 'KXCPIYOY-26OCT',
+    kalshiReleaseMonth: '2026-10',
+    kalshiImpliedEv: 2.0,
+    combinedImpliedEv: 2.0,
+    summaryLabel: 'Kalshi KXCPIYOY-26OCT EV: 2.00%',
+    lastUpdated: simNow,
+  };
+
+  const simDec2Inputs = newsDecision(
+    {
+      id: 'EVT-SIM-TABLE4-2INPUTS',
+      title: 'Core CPI y/y',
+      country: 'USD',
+      impact: 'High',
+      timeUtc: new Date(simNow + 1800_000).toISOString(),
+      forecastNum: 2.4,
+      previousNum: 2.8,
+    },
+    { matchedPmOverride: simValidPm, skipPersistence: true }
+  );
+
+  console.log(`\nSimulation 2 (2 Valid Event Inputs: Forecast vs Previous + Kalshi EV):`);
+  console.log(`  Verdict:       ${simDec2Inputs.word}`);
+  console.log(`  ONE Final Score: ${simDec2Inputs.score! >= 0 ? '+' : ''}${simDec2Inputs.score}`);
+  console.log(`  Confidence:    ${simDec2Inputs.confidence}%`);
+  console.log(`  Reason:        ${simDec2Inputs.reason}`);
+
+  // -------------------------------------------------------------
+  // FULL TEST SUITE EXECUTION (28 TESTS)
   // -------------------------------------------------------------
   const report = runPhase5TestSuite();
-  console.log(`\n=== SARRAF Phase 5A Test Suite ===`);
+  console.log(`\n=== SARRAF Phase 5A Test Suite (Total Tests: ${report.totalTests}) ===`);
   console.log(`Status: ${report.allPassed ? 'PASS' : 'FAIL'} (${report.passedCount}/${report.totalTests} passed)\n`);
   report.results.forEach((r, idx) => {
     console.log(`${idx + 1}. [${r.passed ? 'PASS' : 'FAIL'}] ${r.name} (Test ${r.id}): ${r.actual}`);

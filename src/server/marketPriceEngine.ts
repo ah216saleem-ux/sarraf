@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { DATA_DIR, writeJsonAtomic } from './deploymentSafety.ts';
 import { getCandleStore } from './candleEngine.ts';
+import { recordBlackstoneTapeTick } from './blackstoneTapeEngine.ts';
 
 export const LAST_TICK_FILE = path.resolve(DATA_DIR, 'lastTick.json');
 
@@ -390,7 +391,7 @@ export function recordLiveTick(tick: {
     direction,
     timestamp: tick.timestamp || new Date().toISOString(),
     lastReceivedAt: now,
-    source: tick.source || 'biquote.io (MetaTrader 5)',
+    source: tick.source || 'Ahmad server',
     marketState: tick.marketState,
   };
 
@@ -400,6 +401,18 @@ export function recordLiveTick(tick: {
   while (tickBuffer5m.length > 0 && tickBuffer5m[0].lastReceivedAt < cutoff) {
     tickBuffer5m.shift();
   }
+
+  // Push to Blackstone live tape engine
+  try {
+    recordBlackstoneTapeTick({
+      price: lastValidTick.price,
+      bid: lastValidTick.bid,
+      ask: lastValidTick.ask,
+      spread: lastValidTick.spread,
+      timestamp: lastValidTick.timestamp,
+      lastReceivedAt: now,
+    });
+  } catch {}
 
   return lastValidTick;
 }

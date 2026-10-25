@@ -137,6 +137,45 @@ export function buildM5FromM1(m1Candles: Candle[]): Candle[] {
   return result.sort((a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime());
 }
 
+// Aggregate M15, M30, or H1 candles directly from M5 base candles
+export function buildTimeframeFromM5(m5Candles: Candle[], periodMinutes: 15 | 30 | 60): Candle[] {
+  if (!m5Candles || m5Candles.length === 0) return [];
+  const periodMs = periodMinutes * 60 * 1000;
+  const expectedM5Bars = periodMinutes / 5;
+  const sortedM5 = [...m5Candles].sort(
+    (a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime()
+  );
+  const map = new Map<number, Candle[]>();
+  for (const bar of sortedM5) {
+    const t = new Date(bar.openTime).getTime();
+    if (isNaN(t)) continue;
+    const floored = Math.floor(t / periodMs) * periodMs;
+    if (!map.has(floored)) map.set(floored, []);
+    map.get(floored)!.push(bar);
+  }
+  const bucketKeys = Array.from(map.keys()).sort((a, b) => a - b);
+  const nowBucket = Math.floor(Date.now() / periodMs) * periodMs;
+  const result: Candle[] = [];
+  for (let i = 0; i < bucketKeys.length; i++) {
+    const bucketMs = bucketKeys[i];
+    const bars = map.get(bucketMs)!;
+    const isLatestBucket = i === bucketKeys.length - 1;
+    const allM5Closed = bars.every((b) => b.isClosed);
+    const isClosed = !isLatestBucket || (bucketMs < nowBucket && allM5Closed) || (bars.length >= expectedM5Bars && allM5Closed);
+    result.push({
+      openTime: new Date(bucketMs).toISOString(),
+      open: bars[0].open,
+      high: Math.max(...bars.map((b) => b.high)),
+      low: Math.min(...bars.map((b) => b.low)),
+      close: bars[bars.length - 1].close,
+      volume: bars.reduce((sum, b) => sum + (b.volume || 1), 0),
+      isClosed,
+      usableForZones: true,
+    });
+  }
+  return result;
+}
+
 // Aggregate H4 candles from H1 candles aligned to broker session boundaries
 export function buildH4FromH1(h1Candles: Candle[]): Candle[] {
   if (!h1Candles || h1Candles.length === 0) return [];
@@ -261,6 +300,13 @@ export function saveCandlesToDisk() {
     ensureDataDir();
     store.lastUpdated = new Date().toISOString();
     writeJsonAtomic(DATA_FILE, store);
+    const localDataDir = path.resolve(process.cwd(), 'data');
+    if (localDataDir !== DATA_DIR) {
+      if (!fs.existsSync(localDataDir)) {
+        fs.mkdirSync(localDataDir, { recursive: true });
+      }
+      writeJsonAtomic(path.resolve(localDataDir, 'candles.json'), store);
+    }
     lastSaveTime = Date.now();
   } catch (err: any) {
     console.error('[CANDLE ENGINE] Failed to save candles to disk:', err.message);
@@ -322,7 +368,7 @@ function updateTimeframeCandles(
   return didClose;
 }
 
-// Process new tick from live feed into all 7 timeframes
+// Process new tick from live feed into all 7 timeframes (M5 base; build M15, M30, H1 from it)
 export function processTick(price: number, timestampMs: number) {
   const c1 = updateTimeframeCandles(store.M1, 1, price, timestampMs);
   const c5 = updateTimeframeCandles(store.M5, 5, price, timestampMs);
@@ -331,6 +377,12 @@ export function processTick(price: number, timestampMs: number) {
   const c60 = updateTimeframeCandles(store.H1, 60, price, timestampMs);
   const c240 = updateTimeframeCandles(store.H4, 240, price, timestampMs);
   const c1440 = updateTimeframeCandles(store.D1, 1440, price, timestampMs);
+
+  if (c5 && store.M5.length > 0) {
+    store.M15 = mergeCandleSeries(store.M15, buildTimeframeFromM5(store.M5, 15));
+    store.M30 = mergeCandleSeries(store.M30, buildTimeframeFromM5(store.M5, 30));
+    store.H1 = mergeCandleSeries(store.H1, buildTimeframeFromM5(store.M5, 60));
+  }
 
   const anyClosed = c1 || c5 || c15 || c30 || c60 || c240 || c1440;
   if (anyClosed || Date.now() - lastSaveTime > 25000) {
