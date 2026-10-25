@@ -1,0 +1,884 @@
+// src/doji/DojiChart.tsx
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import {
+  createChart,
+  IChartApi,
+  ISeriesApi,
+  LineStyle,
+  CrosshairMode,
+  ColorType,
+  IPriceLine,
+} from 'lightweight-charts';
+import { RawBar, DojiTimeframe, DojiZone, computeEma, computeAtr14 } from './dojiEngine';
+import { DojiTrade } from './dojiSignalEngine';
+
+interface DojiChartProps {
+  bars: RawBar[];
+  timeframe: DojiTimeframe;
+  livePrice: number;
+  showZones: boolean;
+  showEma9: boolean;
+  zones: DojiZone[];
+  activeTrade?: DojiTrade | null;
+  latestTrigger: number;
+  resetTrigger: number;
+  fitZonesTrigger: number;
+  focusedZoneRequest?: { zone: DojiZone; seq: number } | null;
+}
+
+interface CandlePoint {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export const DojiChart: React.FC<DojiChartProps> = ({
+  bars,
+  timeframe,
+  livePrice,
+  showZones,
+  showEma9,
+  zones,
+  activeTrade,
+  latestTrigger,
+  resetTrigger,
+  fitZonesTrigger,
+  focusedZoneRequest,
+}) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const emaSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const tradeLinesRef = useRef<IPriceLine[]>([]);
+
+  const zonesRef = useRef<DojiZone[]>(zones);
+  zonesRef.current = zones;
+  const showZonesRef = useRef<boolean>(showZones);
+  showZonesRef.current = showZones;
+  const timeframeRef = useRef<DojiTimeframe>(timeframe);
+  timeframeRef.current = timeframe;
+  const livePriceRef = useRef<number>(livePrice);
+  livePriceRef.current = livePrice;
+  const activeTradeRef = useRef<DojiTrade | null | undefined>(activeTrade);
+  activeTradeRef.current = activeTrade;
+  const currentAtrRef = useRef<number>(3.5);
+  const uniqueCandlesRef = useRef<CandlePoint[]>([]);
+  const initializedTfRef = useRef<DojiTimeframe | null>(null);
+
+  const scaleModeRef = useRef<{
+    mode: 'normal' | 'fit_zones' | 'focus_zone';
+    targetZone?: DojiZone | null;
+  }>({ mode: 'normal', targetZone: null });
+
+  const [offscreenAbove, setOffscreenAbove] = useState<DojiZone[]>([]);
+  const [offscreenBelow, setOffscreenBelow] = useState<DojiZone[]>([]);
+  const offscreenKeyRef = useRef<string>('');
+  const aboveCycleIdxRef = useRef<number>(0);
+  const belowCycleIdxRef = useRef<number>(0);
+
+  const findCandleIndexForTime = useCallback((timeSec: number): number => {
+    const candles = uniqueCandlesRef.current;
+    if (candles.length === 0) return 0;
+    for (let i = 0; i < candles.length; i++) {
+      if (candles[i].time >= timeSec) {
+        return i;
+      }
+    }
+    return candles.length - 1;
+  }, []);
+
+  const setLast90CandlesView = useCallback(() => {
+    const chart = chartRef.current;
+    const candleSeries = candleSeriesRef.current;
+    const total = uniqueCandlesRef.current.length;
+    if (!chart || total === 0) return;
+
+    scaleModeRef.current = { mode: 'normal', targetZone: null };
+    aboveCycleIdxRef.current = 0;
+    belowCycleIdxRef.current = 0;
+
+    const from = Math.max(0, total - 90);
+    const to = Math.max(0, total - 1) + 8;
+
+    chart.timeScale().setVisibleLogicalRange({ from, to });
+    chart.priceScale('right').applyOptions({ autoScale: true });
+    if (candleSeries) {
+      candleSeries.applyOptions({});
+    }
+  }, []);
+
+  const fitAllZonesView = useCallback(() => {
+    const chart = chartRef.current;
+    const candleSeries = candleSeriesRef.current;
+    const total = uniqueCandlesRef.current.length;
+    if (!chart || total === 0) return;
+
+    const currentTfZones = zonesRef.current.filter((z) => z.timeframe === timeframeRef.current);
+    scaleModeRef.current = { mode: 'fit_zones', targetZone: null };
+
+    let earliestIdx = Math.max(0, total - 90);
+    for (const z of currentTfZones) {
+      const idx = findCandleIndexForTime(z.openTimeSec);
+      earliestIdx = Math.min(earliestIdx, Math.max(0, idx - 4));
+    }
+
+    const to = Math.max(0, total - 1) + 8;
+    chart.timeScale().setVisibleLogicalRange({ from: earliestIdx, to });
+    chart.priceScale('right').applyOptions({ autoScale: true });
+    if (candleSeries) {
+      candleSeries.applyOptions({});
+    }
+  }, [findCandleIndexForTime]);
+
+  const scrollToZone = useCallback(
+    (zone: DojiZone) => {
+      const chart = chartRef.current;
+      const candleSeries = candleSeriesRef.current;
+      const total = uniqueCandlesRef.current.length;
+      if (!chart || total === 0) return;
+
+      scaleModeRef.current = { mode: 'focus_zone', targetZone: zone };
+
+      const zIdx = findCandleIndexForTime(zone.openTimeSec);
+      const from = Math.max(0, Math.min(zIdx - 6, total - 60));
+      const to = Math.max(zIdx + 20, total - 1 + 8);
+
+      chart.timeScale().setVisibleLogicalRange({ from, to });
+      chart.priceScale('right').applyOptions({ autoScale: true });
+      if (candleSeries) {
+        candleSeries.applyOptions({});
+      }
+    },
+    [findCandleIndexForTime]
+  );
+
+  // 1. Initialize Lightweight Chart
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const chartCreator = (window as any).LightweightCharts?.createChart || createChart;
+    const initWidth = containerRef.current.clientWidth || 800;
+    const initHeight = containerRef.current.clientHeight || 380;
+
+    const chart: IChartApi = chartCreator(containerRef.current, {
+      width: initWidth,
+      height: initHeight,
+      layout: {
+        background: { type: ColorType.Solid, color: '#0a0907' },
+        textColor: '#9d947e',
+        fontFamily: 'JetBrains Mono, monospace',
+        fontSize: 11,
+      },
+      grid: {
+        vertLines: { color: '#1a1711' },
+        horzLines: { color: '#1a1711' },
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: {
+          color: '#d9b25a',
+          width: 1,
+          style: LineStyle.Dashed,
+          labelBackgroundColor: '#1a1711',
+        },
+        horzLine: {
+          color: '#d9b25a',
+          width: 1,
+          style: LineStyle.Dashed,
+          labelBackgroundColor: '#d9b25a',
+        },
+      },
+      rightPriceScale: {
+        borderColor: '#2b261b',
+        textColor: '#f0eadb',
+        scaleMargins: { top: 0.12, bottom: 0.12 },
+        autoScale: true,
+      },
+      timeScale: {
+        borderColor: '#2b261b',
+        timeVisible: true,
+        secondsVisible: false,
+        rightOffset: 8,
+        barSpacing: 8,
+        minBarSpacing: 2,
+      },
+      localization: {
+        timeFormatter: (utcTimestamp: number) => {
+          const d = new Date(utcTimestamp * 1000);
+          return new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Asia/Dubai',
+            hour: '2-digit',
+            minute: '2-digit',
+            day: '2-digit',
+            month: 'short',
+          }).format(d);
+        },
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: { time: true, price: true },
+        mouseWheel: true,
+        pinch: true,
+      },
+    });
+
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: '#3fbf8f',
+      downColor: '#e5584f',
+      borderUpColor: '#3fbf8f',
+      borderDownColor: '#e5584f',
+      wickUpColor: '#3fbf8f',
+      wickDownColor: '#e5584f',
+      priceLineColor: '#d9b25a',
+      priceLineWidth: 1,
+      priceLineStyle: LineStyle.Dotted,
+      autoscaleInfoProvider: (original: () => any) => {
+        const res = original();
+        const modeInfo = scaleModeRef.current;
+        if (modeInfo.mode === 'normal' || !res || !res.priceRange) {
+          return res;
+        }
+
+        let minVal = res.priceRange.minValue;
+        let maxVal = res.priceRange.maxValue;
+
+        if (modeInfo.mode === 'fit_zones') {
+          const tfZones = zonesRef.current.filter((z) => z.timeframe === timeframeRef.current);
+          for (const z of tfZones) {
+            minVal = Math.min(minVal, z.low - 2);
+            maxVal = Math.max(maxVal, z.high + 2);
+          }
+        } else if (modeInfo.mode === 'focus_zone' && modeInfo.targetZone) {
+          const z = modeInfo.targetZone;
+          minVal = Math.min(minVal, z.low - 4);
+          maxVal = Math.max(maxVal, z.high + 4);
+        }
+
+        return {
+          ...res,
+          priceRange: {
+            minValue: minVal,
+            maxValue: maxVal,
+          },
+        };
+      },
+    });
+
+    const emaSeries = chart.addLineSeries({
+      color: '#d9b25a',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    });
+
+    chartRef.current = chart;
+    candleSeriesRef.current = candleSeries;
+    emaSeriesRef.current = emaSeries;
+
+    if (canvasRef.current) {
+      canvasRef.current.width = initWidth;
+      canvasRef.current.height = initHeight;
+    }
+
+    const resizeObserver = new ResizeObserver((entries) => {
+      if (!entries || entries.length === 0 || !containerRef.current) return;
+      const { width, height } = entries[0].contentRect;
+      const w = Math.floor(width);
+      const h = Math.floor(height);
+      if (w > 0 && h > 0) {
+        chart.applyOptions({ width: w, height: h });
+        if (canvasRef.current) {
+          canvasRef.current.width = w;
+          canvasRef.current.height = h;
+        }
+      }
+    });
+
+    resizeObserver.observe(containerRef.current);
+
+    return () => {
+      resizeObserver.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      candleSeriesRef.current = null;
+      emaSeriesRef.current = null;
+    };
+  }, []);
+
+  // 2. Load Candlesticks & EMA 9, set initial 90-candle view on timeframe load
+  useEffect(() => {
+    if (!candleSeriesRef.current || !emaSeriesRef.current || !bars || bars.length === 0) return;
+
+    const closedBars = bars.filter((b) => !b.isOpen);
+    currentAtrRef.current = computeAtr14(closedBars);
+
+    const formattedCandles: CandlePoint[] = bars.map((b) => {
+      const timeSec = Math.floor(new Date(b.openTime).getTime() / 1000) + 4 * 3600;
+      return {
+        time: timeSec,
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+      };
+    });
+
+    const uniqueCandles: CandlePoint[] = [];
+    const seenTimes = new Set<number>();
+    for (const c of formattedCandles) {
+      if (!seenTimes.has(c.time)) {
+        seenTimes.add(c.time);
+        uniqueCandles.push(c);
+      }
+    }
+
+    uniqueCandlesRef.current = uniqueCandles;
+    candleSeriesRef.current.setData(uniqueCandles as any);
+    candleSeriesRef.current.setMarkers([]);
+
+    if (showEma9) {
+      const emaPoints = computeEma(bars, 9);
+      const uniqueEma: { time: any; value: number }[] = [];
+      const seenEmaTimes = new Set<number>();
+      for (const p of emaPoints) {
+        if (!seenEmaTimes.has(p.time)) {
+          seenEmaTimes.add(p.time);
+          uniqueEma.push({ time: p.time as any, value: p.value });
+        }
+      }
+      emaSeriesRef.current.setData(uniqueEma);
+    } else {
+      emaSeriesRef.current.setData([]);
+    }
+
+    if (initializedTfRef.current !== timeframe) {
+      initializedTfRef.current = timeframe;
+      setLast90CandlesView();
+    }
+  }, [bars, timeframe, showEma9, setLast90CandlesView]);
+
+  // 3. Update Latest Candle Real-Time with Live Price
+  useEffect(() => {
+    if (!candleSeriesRef.current || !bars || bars.length === 0 || livePrice <= 0) return;
+
+    const lastBar = bars[bars.length - 1];
+    if (!lastBar) return;
+
+    const timeSec = (Math.floor(new Date(lastBar.openTime).getTime() / 1000) + 4 * 3600) as any;
+    candleSeriesRef.current.update({
+      time: timeSec,
+      open: lastBar.open,
+      high: Math.max(lastBar.high, livePrice),
+      low: Math.min(lastBar.low, livePrice),
+      close: livePrice,
+    });
+  }, [livePrice, bars]);
+
+  // 4. Draw Price Lines for Open Trade on Selected Timeframe
+  useEffect(() => {
+    if (!candleSeriesRef.current) return;
+
+    for (const line of tradeLinesRef.current) {
+      try {
+        candleSeriesRef.current.removePriceLine(line);
+      } catch {}
+    }
+    tradeLinesRef.current = [];
+
+    if (!activeTrade || activeTrade.status !== 'OPEN' || activeTrade.timeframe !== timeframe) {
+      return;
+    }
+
+    try {
+      const createdLines: IPriceLine[] = [];
+      const isAfterTp1 = activeTrade.tp1Hit || activeTrade.isBreakeven;
+
+      if (isAfterTp1) {
+        // After TP1: only "BE" line (grey) and remaining TPs
+        const beLine = candleSeriesRef.current.createPriceLine({
+          price: activeTrade.currentSl,
+          color: '#9d947e',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'BE',
+        });
+        createdLines.push(beLine);
+
+        if (!activeTrade.tp2Hit) {
+          const tp2Line = candleSeriesRef.current.createPriceLine({
+            price: activeTrade.tp2,
+            color: '#3fbf8f',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: 'TP2',
+          });
+          createdLines.push(tp2Line);
+        }
+
+        if (!activeTrade.tp3Hit) {
+          const tp3Line = candleSeriesRef.current.createPriceLine({
+            price: activeTrade.tp3,
+            color: '#3fbf8f',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: 'TP3',
+          });
+          createdLines.push(tp3Line);
+        }
+      } else {
+        // Before TP1: Entry, SL, TP1, TP2, TP3
+        const entryLine = candleSeriesRef.current.createPriceLine({
+          price: activeTrade.entryPrice,
+          color: '#d9b25a',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: 'Entry',
+        });
+
+        const slLine = candleSeriesRef.current.createPriceLine({
+          price: activeTrade.currentSl,
+          color: '#e5584f',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'SL',
+        });
+
+        const tp1Line = candleSeriesRef.current.createPriceLine({
+          price: activeTrade.tp1,
+          color: '#3fbf8f',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'TP1',
+        });
+
+        const tp2Line = candleSeriesRef.current.createPriceLine({
+          price: activeTrade.tp2,
+          color: '#3fbf8f',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'TP2',
+        });
+
+        const tp3Line = candleSeriesRef.current.createPriceLine({
+          price: activeTrade.tp3,
+          color: '#3fbf8f',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'TP3',
+        });
+
+        createdLines.push(entryLine, slLine, tp1Line, tp2Line, tp3Line);
+      }
+
+      tradeLinesRef.current = createdLines;
+    } catch {}
+  }, [activeTrade, timeframe]);
+
+  // 5. Render Dotted-Border Red Zone Rectangles (within 5 ATR), Top-Left Strength Labels & Off-Screen Edge Chips
+  useEffect(() => {
+    let animId: number;
+
+    const getXForTime = (chart: IChartApi, timeSec: number): number | null => {
+      const directX = chart.timeScale().timeToCoordinate(timeSec as any);
+      if (directX !== null) return directX;
+
+      const candles = uniqueCandlesRef.current;
+      if (candles.length === 0) return null;
+
+      let idx = -1;
+      for (let i = 0; i < candles.length; i++) {
+        if (candles[i].time >= timeSec) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx === -1) idx = candles.length - 1;
+      return chart.timeScale().logicalToCoordinate(idx as any);
+    };
+
+    const renderOverlay = () => {
+      const canvas = canvasRef.current;
+      const chart = chartRef.current;
+      const candleSeries = candleSeriesRef.current;
+
+      if (!canvas || !chart || !candleSeries) {
+        animId = requestAnimationFrame(renderOverlay);
+        return;
+      }
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        animId = requestAnimationFrame(renderOverlay);
+        return;
+      }
+
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
+
+      if (!showZonesRef.current) {
+        if (offscreenKeyRef.current !== '') {
+          offscreenKeyRef.current = '';
+          setOffscreenAbove([]);
+          setOffscreenBelow([]);
+        }
+        animId = requestAnimationFrame(renderOverlay);
+        return;
+      }
+
+      const candles = uniqueCandlesRef.current;
+      if (candles.length === 0) {
+        animId = requestAnimationFrame(renderOverlay);
+        return;
+      }
+
+      const plotWidth = chart.timeScale().width() || width - 60;
+      const plotHeight = Math.max(0, height - 26);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, plotWidth, plotHeight);
+      ctx.clip();
+
+      const lastCandle = candles[candles.length - 1];
+      const currentBarX = getXForTime(chart, lastCandle.time);
+      const currentTfZones = zonesRef.current.filter((z) => z.timeframe === timeframeRef.current);
+      const refPrice = livePriceRef.current > 0 ? livePriceRef.current : lastCandle.close;
+      const atr = currentAtrRef.current || 3.5;
+
+      // Active trade price line Y-coordinates for label collision check
+      const tradeLineYs: number[] = [];
+      const openTrade = activeTradeRef.current;
+      if (openTrade && openTrade.status === 'OPEN' && openTrade.timeframe === timeframeRef.current) {
+        const isAfterTp1 = openTrade.tp1Hit || openTrade.isBreakeven;
+        const levelPrices: number[] = isAfterTp1
+          ? [
+              openTrade.currentSl,
+              ...(openTrade.tp2Hit ? [] : [openTrade.tp2]),
+              ...(openTrade.tp3Hit ? [] : [openTrade.tp3]),
+            ]
+          : [
+              openTrade.entryPrice,
+              openTrade.currentSl,
+              openTrade.tp1,
+              openTrade.tp2,
+              openTrade.tp3,
+            ];
+        for (const p of levelPrices) {
+          const yCoord = candleSeries.priceToCoordinate(p);
+          if (yCoord !== null) {
+            tradeLineYs.push(yCoord);
+          }
+        }
+      }
+
+      interface PendingLabel {
+        text: string;
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+        color: string;
+        strength: number;
+      }
+
+      const pendingLabels: PendingLabel[] = [];
+      const aboveSet = new Map<string, DojiZone>();
+      const belowSet = new Map<string, DojiZone>();
+
+      ctx.font = '600 11px "JetBrains Mono", monospace';
+      ctx.textBaseline = 'top';
+
+      for (const zone of currentTfZones) {
+        const distFromLevel =
+          refPrice >= zone.low && refPrice <= zone.high
+            ? 0
+            : Math.min(Math.abs(refPrice - zone.high), Math.abs(refPrice - zone.low));
+        const isWithin5Atr =
+          zone.isWithin5Atr !== undefined ? zone.isWithin5Atr : distFromLevel <= 5 * atr;
+        const isFocused =
+          (scaleModeRef.current.mode === 'focus_zone' &&
+            scaleModeRef.current.targetZone?.id === zone.id) ||
+          scaleModeRef.current.mode === 'fit_zones';
+
+        const yHigh = candleSeries.priceToCoordinate(zone.high);
+        const yLow = candleSeries.priceToCoordinate(zone.low);
+
+        // Zones outside 5 ATR belong in the consolidated edge chip (and are only drawn if explicitly focused)
+        if (!isWithin5Atr) {
+          if (zone.distancePts >= 0) {
+            aboveSet.set(zone.id, zone);
+          } else {
+            belowSet.set(zone.id, zone);
+          }
+          if (!isFocused) {
+            continue;
+          }
+        }
+
+        if (yHigh === null || yLow === null) continue;
+
+        const rectTop = Math.min(yHigh, yLow);
+        const rectBottom = Math.max(yHigh, yLow);
+
+        // Check if zone is completely outside the currently visible vertical price range
+        if (rectBottom < 2) {
+          aboveSet.set(zone.id, zone);
+          continue;
+        }
+        if (rectTop > plotHeight - 2) {
+          belowSet.set(zone.id, zone);
+          continue;
+        }
+
+        const dojiX = getXForTime(chart, zone.openTimeSec);
+        if (dojiX === null || currentBarX === null) continue;
+
+        const rectStartX = Math.min(dojiX, currentBarX);
+        const rectEndX = Math.max(dojiX, currentBarX);
+
+        if (rectEndX < 0 || rectStartX > plotWidth) continue;
+
+        const clampedStartX = Math.max(0, rectStartX);
+        const clampedEndX = Math.min(plotWidth, rectEndX);
+        const rectWidth = Math.max(0, clampedEndX - clampedStartX);
+        const rectY = rectTop;
+        const rectHeight = Math.max(2, Math.abs(yLow - yHigh));
+
+        const isUsed = Boolean(zone.isUsed);
+
+        // 1) Light red fill from doji to current bar
+        ctx.fillStyle = isUsed ? 'rgba(229, 88, 79, 0.05)' : 'rgba(229, 88, 79, 0.10)';
+        ctx.fillRect(clampedStartX, rectY, rectWidth, rectHeight);
+
+        // 2) Dotted red border from doji to current bar (55% opacity when used, full red when unused)
+        ctx.save();
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = isUsed ? 'rgba(229, 88, 79, 0.55)' : '#e5584f';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(clampedStartX, rectY, rectWidth, rectHeight);
+        ctx.restore();
+
+        // 3) Hollow red border on the Doji candle itself
+        if (dojiX >= -10 && dojiX <= plotWidth + 10) {
+          ctx.save();
+          ctx.setLineDash([]);
+          ctx.strokeStyle = isUsed ? 'rgba(229, 88, 79, 0.55)' : '#e5584f';
+          ctx.lineWidth = 1.5;
+          const boxW = 7;
+          ctx.strokeRect(dojiX - boxW / 2, rectY - 1, boxW, rectHeight + 2);
+          ctx.restore();
+        }
+
+        // 4) Prepare strength label at top-left corner inside rectangle (or above if height < 20px)
+        const labelText = isUsed
+          ? `${zone.strength.toFixed(1)}/10 · used`
+          : `${zone.strength.toFixed(1)}/10`;
+        const textWidth = ctx.measureText(labelText).width;
+        const labelX = Math.max(4, clampedStartX + 5);
+        const labelY = rectHeight < 20 ? rectY - 14 : rectY + 3;
+
+        if (labelX + textWidth <= plotWidth && labelY >= 0 && labelY + 12 <= plotHeight) {
+          pendingLabels.push({
+            text: labelText,
+            x: labelX,
+            y: labelY,
+            w: textWidth,
+            h: 12,
+            color: zone.strengthColor,
+            strength: zone.strength,
+          });
+        }
+      }
+
+      // 5) Draw labels sorted by strength descending; hide if colliding with SL/TP lines or stronger zone labels
+      pendingLabels.sort((a, b) => b.strength - a.strength);
+      const placedBoxes: { x1: number; y1: number; x2: number; y2: number }[] = [];
+
+      for (const lbl of pendingLabels) {
+        const box = {
+          x1: lbl.x,
+          y1: lbl.y,
+          x2: lbl.x + lbl.w,
+          y2: lbl.y + lbl.h,
+        };
+
+        // Hide zone label if it collides with any active trade Entry/SL/BE/TP price line
+        const collidesWithPriceLine = tradeLineYs.some(
+          (lineY) => lineY >= box.y1 - 5 && lineY <= box.y2 + 5
+        );
+        if (collidesWithPriceLine) {
+          continue;
+        }
+
+        const collidesWithZoneLabel = placedBoxes.some(
+          (b) =>
+            !(
+              box.x2 + 4 < b.x1 ||
+              box.x1 - 4 > b.x2 ||
+              box.y2 + 3 < b.y1 ||
+              box.y1 - 3 > b.y2
+            )
+        );
+
+        if (!collidesWithZoneLabel) {
+          // Small dark background patch behind text so candles don't obscure it
+          ctx.fillStyle = 'rgba(10, 9, 7, 0.88)';
+          ctx.fillRect(lbl.x - 3, lbl.y - 1, lbl.w + 6, lbl.h + 2);
+          ctx.fillStyle = lbl.color;
+          ctx.fillText(lbl.text, lbl.x, lbl.y);
+          placedBoxes.push(box);
+        }
+      }
+
+      ctx.restore();
+
+      const aboveList = Array.from(aboveSet.values()).sort(
+        (a, b) => Math.abs(a.distancePts) - Math.abs(b.distancePts)
+      );
+      const belowList = Array.from(belowSet.values()).sort(
+        (a, b) => Math.abs(a.distancePts) - Math.abs(b.distancePts)
+      );
+
+      // Update off-screen chips state only when changed
+      const newKey =
+        aboveList.map((z) => `${z.id}:${z.distancePts}:${z.isUsed}`).join('|') +
+        '__' +
+        belowList.map((z) => `${z.id}:${z.distancePts}:${z.isUsed}`).join('|');
+
+      if (newKey !== offscreenKeyRef.current) {
+        offscreenKeyRef.current = newKey;
+        setOffscreenAbove(aboveList);
+        setOffscreenBelow(belowList);
+      }
+
+      animId = requestAnimationFrame(renderOverlay);
+    };
+
+    animId = requestAnimationFrame(renderOverlay);
+
+    return () => {
+      cancelAnimationFrame(animId);
+    };
+  }, []);
+
+  // 6. Controls Triggers
+  useEffect(() => {
+    if (latestTrigger > 0 && chartRef.current) {
+      chartRef.current.timeScale().scrollToRealTime();
+    }
+  }, [latestTrigger]);
+
+  useEffect(() => {
+    if (resetTrigger > 0) {
+      setLast90CandlesView();
+    }
+  }, [resetTrigger, setLast90CandlesView]);
+
+  useEffect(() => {
+    if (fitZonesTrigger > 0) {
+      fitAllZonesView();
+    }
+  }, [fitZonesTrigger, fitAllZonesView]);
+
+  useEffect(() => {
+    if (focusedZoneRequest && focusedZoneRequest.zone.timeframe === timeframe) {
+      scrollToZone(focusedZoneRequest.zone);
+    }
+  }, [focusedZoneRequest, timeframe, scrollToZone]);
+
+  const handleTopChipClick = () => {
+    if (offscreenAbove.length === 0) return;
+    const idx = aboveCycleIdxRef.current % offscreenAbove.length;
+    const target = offscreenAbove[idx];
+    aboveCycleIdxRef.current = (idx + 1) % offscreenAbove.length;
+    scrollToZone(target);
+  };
+
+  const handleBottomChipClick = () => {
+    if (offscreenBelow.length === 0) return;
+    const idx = belowCycleIdxRef.current % offscreenBelow.length;
+    const target = offscreenBelow[idx];
+    belowCycleIdxRef.current = (idx + 1) % offscreenBelow.length;
+    scrollToZone(target);
+  };
+
+  const nearestAbove = offscreenAbove[0];
+  const nearestBelow = offscreenBelow[0];
+
+  return (
+    <div className="relative w-full bg-[#0a0907] rounded-[8px] border border-[#2b261b] overflow-hidden">
+      <div ref={containerRef} className="w-full h-[360px] sm:h-[400px]" />
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 pointer-events-none z-10"
+      />
+
+      {/* Consolidated Top Edge Chip: "▲ 3 zones · nearest 4034.24 (+$29)" */}
+      {showZones && nearestAbove && (
+        <div className="absolute top-2 left-2 right-[65px] z-20 flex items-center pointer-events-none">
+          <button
+            type="button"
+            onClick={handleTopChipClick}
+            className="pointer-events-auto cursor-pointer px-2.5 py-1 rounded bg-[#12100c]/95 border border-[#d9b25a]/60 hover:border-[#d9b25a] text-[11px] font-['JetBrains_Mono',monospace] tabular-nums text-[#f0eadb] flex items-center gap-1.5 transition-colors"
+          >
+            <span className="text-[#3fbf8f] font-bold">▲</span>
+            <span className="font-semibold">
+              {offscreenAbove.length} {offscreenAbove.length === 1 ? 'zone' : 'zones'}
+            </span>
+            <span className="text-[#9d947e]">·</span>
+            <span className="text-[#9d947e]">nearest</span>
+            <span className="font-semibold text-[#f2d78f]">
+              {nearestAbove.high.toFixed(2)}
+            </span>
+            <span className="text-[#3fbf8f]">
+              (+${Math.round(Math.abs(nearestAbove.distancePts))})
+            </span>
+          </button>
+        </div>
+      )}
+
+      {/* Consolidated Bottom Edge Chip: "▼ 1 zone · nearest 3980.10 (–$15)" */}
+      {showZones && nearestBelow && (
+        <div className="absolute bottom-7 left-2 right-[65px] z-20 flex items-center pointer-events-none">
+          <button
+            type="button"
+            onClick={handleBottomChipClick}
+            className="pointer-events-auto cursor-pointer px-2.5 py-1 rounded bg-[#12100c]/95 border border-[#d9b25a]/60 hover:border-[#d9b25a] text-[11px] font-['JetBrains_Mono',monospace] tabular-nums text-[#f0eadb] flex items-center gap-1.5 transition-colors"
+          >
+            <span className="text-[#e5584f] font-bold">▼</span>
+            <span className="font-semibold">
+              {offscreenBelow.length} {offscreenBelow.length === 1 ? 'zone' : 'zones'}
+            </span>
+            <span className="text-[#9d947e]">·</span>
+            <span className="text-[#9d947e]">nearest</span>
+            <span className="font-semibold text-[#f2d78f]">
+              {nearestBelow.low.toFixed(2)}
+            </span>
+            <span className="text-[#e5584f]">
+              (–${Math.round(Math.abs(nearestBelow.distancePts))})
+            </span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+

@@ -840,6 +840,40 @@ app.get('/api/candles', (_req, res) => {
   });
 });
 
+// GET /api/doji/ohlc - Proxy to biquote.io ohlc endpoint with in-memory caching
+const dojiOhlcCache = new Map<string, { time: number; data: any }>();
+app.get('/api/doji/ohlc', async (req, res) => {
+  const interval = (req.query.interval as string) || '15m';
+  const limit = (req.query.limit as string) || '500';
+  const cacheKey = `${interval}_${limit}`;
+  const now = Date.now();
+  const cached = dojiOhlcCache.get(cacheKey);
+
+  if (cached && now - cached.time < 3000) {
+    return res.json(cached.data);
+  }
+
+  try {
+    const upstreamRes = await fetch(`https://biquote.io/api/XAUUSD/ohlc?interval=${interval}&limit=${limit}`, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'SARRAF-Terminal/1.0',
+      },
+    });
+    if (!upstreamRes.ok) {
+      throw new Error(`Upstream status ${upstreamRes.status}`);
+    }
+    const data = await upstreamRes.json();
+    dojiOhlcCache.set(cacheKey, { time: now, data });
+    return res.json(data);
+  } catch (err: any) {
+    if (cached) {
+      return res.json(cached.data);
+    }
+    return res.status(502).json({ error: 'Failed to fetch upstream OHLC', message: err?.message });
+  }
+});
+
 // GET /api/command/ticks - Get rolling 5-minute memory tick history
 app.get('/api/command/ticks', (_req, res) => {
   return res.json({

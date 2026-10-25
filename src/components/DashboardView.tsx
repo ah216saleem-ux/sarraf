@@ -30,6 +30,7 @@ import {
   Compass,
   Waves,
   Lock,
+  Target,
 } from 'lucide-react';
 import {
   formatNewSignalMessage,
@@ -45,6 +46,7 @@ import { SarrafAtlasView } from '../atlas/SarrafAtlasView';
 import { BlackstoneView } from '../blackstone/BlackstoneView';
 import { SpyOptionsView } from '../spy/SpyOptionsView';
 import { BtcTideView } from '../btcTide/BtcTideView';
+import { SarrafDojiView } from '../doji/SarrafDojiView';
 import { useCommandFeed } from '../command/data/useCommandFeed';
 
 const AdminLockScreen: React.FC<{ tabName: string; onSwitchAccount: () => void; currentUserEmail?: string }> = ({
@@ -175,6 +177,7 @@ export const DashboardView: React.FC = () => {
   const [activeMainTab, setActiveMainTab] = useState<
     | 'OVERVIEW'
     | 'BTC_TIDE'
+    | 'DOJI'
     | 'TELEGRAM'
     | 'SPY'
     | 'NEWS'
@@ -608,7 +611,7 @@ export const DashboardView: React.FC = () => {
       });
 
   return (
-    <div className="min-h-screen bg-[#050505] text-white flex flex-col font-sans selection:bg-[#E8B84A]/30 selection:text-[#FFD97A] overflow-x-hidden">
+    <div className={`min-h-screen ${activeMainTab === 'DOJI' ? 'bg-[#0a0907] text-[#f0eadb]' : 'bg-[#050505] text-white'} flex flex-col font-sans selection:bg-[#d9b25a]/30 selection:text-[#f2d78f] overflow-x-hidden`}>
       {/* Top Terminal Navigation Bar */}
       <header className="sticky top-0 z-30 bg-[#08080a]/95 backdrop-blur-md border-b border-[#E8B84A]/20 px-4 sm:px-6 py-2.5">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
@@ -655,6 +658,17 @@ export const DashboardView: React.FC = () => {
             >
               <Waves className={`w-3.5 h-3.5 shrink-0 ${activeMainTab === 'BTC_TIDE' ? 'text-black' : 'text-[#FFD97A]'}`} />
               <span>BTC TIDE</span>
+            </button>
+            <button
+              onClick={() => setActiveMainTab('DOJI')}
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
+                activeMainTab === 'DOJI'
+                  ? 'bg-[#d9b25a] text-[#0a0907] font-bold'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+            >
+              <Target className={`w-3.5 h-3.5 shrink-0 ${activeMainTab === 'DOJI' ? 'text-[#0a0907]' : 'text-[#d9b25a]'}`} />
+              <span>DOJI</span>
             </button>
             <button
               onClick={() => setActiveMainTab('TELEGRAM')}
@@ -1449,6 +1463,9 @@ export const DashboardView: React.FC = () => {
 
         {/* TAB: BTC TIDE (Real-time Flow & Cumulative Delta) */}
         {activeMainTab === 'BTC_TIDE' && <BtcTideView />}
+
+        {/* TAB: DOJI ZONES */}
+        {activeMainTab === 'DOJI' && <SarrafDojiView />}
 
         {/* TAB 2: TELEGRAM COMMAND CENTER (Phase 4 Centerpiece - Admin Only) */}
         {activeMainTab === 'TELEGRAM' && (
