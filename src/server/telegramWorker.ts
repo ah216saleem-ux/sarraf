@@ -76,6 +76,7 @@ function getLiveXauPrice(): number {
 const OUTBOX_FILE = path.resolve(DATA_DIR, 'outbox.json');
 const THREAD_MAP_FILE = path.resolve(DATA_DIR, 'telegram_threads.json');
 const DYNAMIC_CHAT_FILE = path.resolve(DATA_DIR, "telegram_chat.json");
+const WORKSPACE_CHAT_FILE = path.resolve(process.cwd(), "data", "telegram_chat.json");
 const OFFSET_FILE = path.resolve(DATA_DIR, "telegram_offset.json");
 function loadPollingOffset(): number {
   try {
@@ -127,16 +128,18 @@ export function getEffectiveTelegramChatId(): string | null {
 
 export function getDynamicTelegramChatId(): string | null {
   if (dynamicChatId && !isInvalidTelegramChatId(dynamicChatId)) return dynamicChatId;
-  if (fs.existsSync(DYNAMIC_CHAT_FILE)) {
-    try {
-      const data = fs.readFileSync(DYNAMIC_CHAT_FILE, 'utf-8');
-      const parsed = JSON.parse(data);
-      if (parsed && typeof parsed.chatId === 'string' && !isInvalidTelegramChatId(parsed.chatId)) {
-        dynamicChatId = parsed.chatId;
-        return dynamicChatId;
+  for (const filePath of [DYNAMIC_CHAT_FILE, WORKSPACE_CHAT_FILE]) {
+    if (fs.existsSync(filePath)) {
+      try {
+        const data = fs.readFileSync(filePath, 'utf-8');
+        const parsed = JSON.parse(data);
+        if (parsed && typeof parsed.chatId === 'string' && !isInvalidTelegramChatId(parsed.chatId)) {
+          dynamicChatId = parsed.chatId;
+          return dynamicChatId;
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
   }
   return null;
@@ -151,11 +154,12 @@ export function setDynamicTelegramChatId(id: string | number) {
   dynamicChatId = cleanId;
   try {
     ensureDataDir();
-    fs.writeFileSync(
-      DYNAMIC_CHAT_FILE,
-      JSON.stringify({ chatId: cleanId, registeredAt: new Date().toISOString() }, null, 2),
-      'utf-8'
-    );
+    const payloadStr = JSON.stringify({ chatId: cleanId, registeredAt: new Date().toISOString() }, null, 2);
+    fs.writeFileSync(DYNAMIC_CHAT_FILE, payloadStr, 'utf-8');
+    try {
+      fs.mkdirSync(path.dirname(WORKSPACE_CHAT_FILE), { recursive: true });
+      fs.writeFileSync(WORKSPACE_CHAT_FILE, payloadStr, 'utf-8');
+    } catch {}
     registerAdminChat(cleanId);
     console.log(`[TELEGRAM WORKER] Dynamic target chat ID updated to: ${cleanId}`);
 

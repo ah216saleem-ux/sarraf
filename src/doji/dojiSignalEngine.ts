@@ -17,6 +17,9 @@ export interface DojiTrade {
   timeframe: DojiTimeframe;
   zoneId: string;
   zoneOpenTime: string;
+  zoneTimeDisplay?: string;
+  breakTime?: string;
+  breakTimeDisplay?: string;
   side: 'BUY' | 'SELL';
   entryPrice: number;
   initialSl: number;
@@ -45,7 +48,7 @@ export interface DojiTrade {
   livePnlDollars?: number;
 }
 
-const LOCAL_STORAGE_KEY = 'sarraf_doji_trades_v2';
+const LOCAL_STORAGE_KEY = 'sarraf_doji_trades_v3';
 
 export function formatDubaiTime(isoOrDate: string | Date): string {
   return formatDubaiShortTime(isoOrDate);
@@ -113,7 +116,13 @@ export function computeLivePnl(trade: DojiTrade, currentPrice: number): number {
 
 /**
  * Replay historical closed bars to detect signals and execute trades per timeframe.
- * Strictly 1 trade per zone.
+ * Rules:
+ * 1) Break and retest MUST be on separate bars (retestBarIndex > breakBarIndex).
+ * 2) Never enter on the break bar itself.
+ * 3) Retest can only form at least 2 bars after the Doji bar (retestBarIndex >= dojiIndex + 2).
+ * 4) SELL retest: high >= zone.low && close < zone.low (and close < EMA9).
+ * 5) BUY retest: low <= zone.high && close > zone.high (and close > EMA9).
+ * 6) Strictly 1 trade per zone; zone is only marked "used" when a retest trade is opened.
  */
 export function simulateTradesForTimeframe(
   bars: RawBar[],
@@ -153,8 +162,9 @@ export function simulateTradesForTimeframe(
     body: number;
     wickDiff: number;
     openTime: string;
-    hasClosedAbove: boolean;
-    hasClosedBelow: boolean;
+    breakDirection: 'UP' | 'DOWN' | null;
+    breakBarIndex: number | null;
+    breakTime: string | null;
     isConsumed: boolean;
     isCancelled: boolean;
   }
@@ -179,8 +189,9 @@ export function simulateTradesForTimeframe(
         body: check.body,
         wickDiff: check.wickDiff,
         openTime: b.openTime,
-        hasClosedAbove: false,
-        hasClosedBelow: false,
+        breakDirection: null,
+        breakBarIndex: null,
+        breakTime: null,
         isConsumed: false,
         isCancelled: false,
       });
@@ -295,33 +306,49 @@ export function simulateTradesForTimeframe(
       }
     }
 
-    // B. Update zone breakouts & check for new entry (only when no active trade on this timeframe)
+    // B. Update zone breakouts & check for retest entry on subsequent bars
     for (const z of zones) {
       if (z.dojiIndex >= i) continue;
       if (z.isConsumed || z.isCancelled || consumedOpenTimes.has(z.openTime)) continue;
 
-      if (!z.hasClosedAbove && currentBar.close > z.high) {
-        z.hasClosedAbove = true;
-      }
-      if (!z.hasClosedBelow && currentBar.close < z.low) {
-        z.hasClosedBelow = true;
+      // 1) If zone has NOT broken yet: check if currentBar is the BREAK bar.
+      // Never enter on the break bar itself!
+      if (z.breakDirection === null) {
+        if (currentBar.close > z.high) {
+          z.breakDirection = 'UP';
+          z.breakBarIndex = i;
+          z.breakTime = currentBar.openTime;
+        } else if (currentBar.close < z.low) {
+          z.breakDirection = 'DOWN';
+          z.breakBarIndex = i;
+          z.breakTime = currentBar.openTime;
+        }
+        continue;
       }
 
-      if (z.hasClosedAbove && currentBar.close < z.low) {
+      // 2) Zone was already broken on an earlier bar (z.breakBarIndex < i).
+      // First check if currentBar closes on the opposite side of the zone (invalidation).
+      if (z.breakDirection === 'UP' && currentBar.close < z.low) {
         z.isCancelled = true;
         continue;
       }
-      if (z.hasClosedBelow && currentBar.close > z.high) {
+      if (z.breakDirection === 'DOWN' && currentBar.close > z.high) {
         z.isCancelled = true;
         continue;
       }
 
-      if (!currentActiveTrade) {
-        // BUY retest
+      // 3) Check for retest entry (strictly on bars after breakBarIndex, and at least 2 bars after dojiIndex)
+      if (
+        !currentActiveTrade &&
+        z.breakBarIndex !== null &&
+        i > z.breakBarIndex &&
+        i >= z.dojiIndex + 2
+      ) {
+        // BUY retest: low <= zone.high && close > zone.high
         if (
-          z.hasClosedAbove &&
+          z.breakDirection === 'UP' &&
           currentBar.low <= z.high &&
-          currentBar.close >= z.high &&
+          currentBar.close > z.high &&
           currentBar.close > currentEma
         ) {
           const entryPrice = Number(currentBar.close.toFixed(2));
@@ -351,6 +378,9 @@ export function simulateTradesForTimeframe(
             timeframe,
             zoneId: `doji-zone-${timeframe}-${z.openTime}`,
             zoneOpenTime: z.openTime,
+            zoneTimeDisplay: formatDubaiTime(z.openTime),
+            breakTime: z.breakTime || undefined,
+            breakTimeDisplay: z.breakTime ? formatDubaiTime(z.breakTime) : undefined,
             side: 'BUY',
             entryPrice,
             initialSl,
@@ -382,11 +412,11 @@ export function simulateTradesForTimeframe(
           continue;
         }
 
-        // SELL retest
+        // SELL retest: high >= zone.low && close < zone.low
         if (
-          z.hasClosedBelow &&
+          z.breakDirection === 'DOWN' &&
           currentBar.high >= z.low &&
-          currentBar.close <= z.low &&
+          currentBar.close < z.low &&
           currentBar.close < currentEma
         ) {
           const entryPrice = Number(currentBar.close.toFixed(2));
@@ -416,6 +446,9 @@ export function simulateTradesForTimeframe(
             timeframe,
             zoneId: `doji-zone-${timeframe}-${z.openTime}`,
             zoneOpenTime: z.openTime,
+            zoneTimeDisplay: formatDubaiTime(z.openTime),
+            breakTime: z.breakTime || undefined,
+            breakTimeDisplay: z.breakTime ? formatDubaiTime(z.breakTime) : undefined,
             side: 'SELL',
             entryPrice,
             initialSl,
@@ -481,6 +514,8 @@ export function simulateTradesForTimeframe(
 export function saveTradesToStorage(trades: DojiTrade[]): void {
   try {
     if (typeof window !== 'undefined') {
+      localStorage.removeItem('sarraf_doji_trades');
+      localStorage.removeItem('sarraf_doji_trades_v2');
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(trades));
     }
   } catch {}

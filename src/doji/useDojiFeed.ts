@@ -1,14 +1,17 @@
 // src/doji/useDojiFeed.ts
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as signalR from '@microsoft/signalr';
+import { commandStore } from '../command/data/commandFeedStore';
 import {
   DojiTimeframe,
+  DojiZoneState,
   RawBar,
   DojiZone,
   DojiTimeframeStats,
   ActiveDojiSignal,
   extractValidDojiZonesWithStats,
   calculateZoneStrength,
+  evaluateZoneLiveRetest,
   computeActiveSignal,
   computeAtr14,
   computeEma,
@@ -44,11 +47,19 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
     '4h': [],
   });
 
-  const [livePrice, setLivePrice] = useState<number>(0);
-  const [dayChange, setDayChange] = useState<number>(0);
-  const [dayChangePercent, setDayChangePercent] = useState<number>(0);
-  const [isMarketClosed, setIsMarketClosed] = useState<boolean>(false);
-  const [connectionStatus, setConnectionStatus] = useState<'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING'>('CONNECTING');
+  const [livePrice, setLivePrice] = useState<number>(() =>
+    commandStore.currentPrice > 0 ? commandStore.currentPrice : 0
+  );
+  const [dayChange, setDayChange] = useState<number>(() => commandStore.change24h || 0);
+  const [dayChangePercent, setDayChangePercent] = useState<number>(
+    () => commandStore.changePercent24h || 0
+  );
+  const [isMarketClosed, setIsMarketClosed] = useState<boolean>(
+    () => !commandStore.marketOpen
+  );
+  const [connectionStatus, setConnectionStatus] = useState<
+    'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'RECONNECTING'
+  >('CONNECTING');
   const [lastTickTime, setLastTickTime] = useState<number>(0);
   const [isLoadingCandles, setIsLoadingCandles] = useState<boolean>(true);
   const [redOnly, setRedOnly] = useState<boolean>(true);
@@ -83,8 +94,10 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
     '1h': [],
     '4h': [],
   });
-  const livePriceRef = useRef<number>(0);
-  const isMarketClosedRef = useRef<boolean>(false);
+  const livePriceRef = useRef<number>(
+    commandStore.currentPrice > 0 ? commandStore.currentPrice : 0
+  );
+  const isMarketClosedRef = useRef<boolean>(!commandStore.marketOpen);
   isMarketClosedRef.current = isMarketClosed;
   const connectionStatusRef = useRef(connectionStatus);
   connectionStatusRef.current = connectionStatus;
@@ -104,6 +117,7 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
     '1h': null,
     '4h': null,
   });
+  const isSyncingToCommandStoreRef = useRef<boolean>(false);
 
   // Re-extract zones and run trade simulation from closed bars across all 4 timeframes
   const reExtractAllZones = useCallback((currentP: number, redOnlyOverride?: boolean) => {
@@ -135,7 +149,7 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
       if (tfBars && tfBars.length > 0) {
         const refPrice = currentP > 0 ? currentP : tfBars[tfBars.length - 1].close;
 
-        // 1. Run deterministic signal engine per timeframe (1 trade per zone)
+        // 1. Run deterministic signal engine per timeframe (strictly separate break and retest bars)
         const { trades, activeTrade, consumedOpenTimes } = simulateTradesForTimeframe(
           tfBars,
           tf,
@@ -148,7 +162,7 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
           combinedTrades.push(activeTrade);
         }
 
-        // 2. Extract up to 5 valid zones per timeframe (including "used" zones where a trade was taken)
+        // 2. Extract up to 5 valid zones per timeframe (including "used" zones where a retest trade was taken)
         const { zones: tfZones, stats } = extractValidDojiZonesWithStats(
           tfBars,
           tf,
@@ -157,7 +171,7 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
           consumedOpenTimes
         );
 
-        // 3. Enforce strict check: a zone is marked "used" if and only if it has a trade in the Trade Log
+        // 3. Enforce strict check: a zone is marked "used" if and only if an actual retest trade opened on it
         const tfTradeZoneTimes = new Set<string>(trades.map((t) => t.zoneOpenTime));
         if (activeTrade) {
           tfTradeZoneTimes.add(activeTrade.zoneOpenTime);
@@ -165,10 +179,31 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
 
         const verifiedTfZones = tfZones.map((z) => {
           const hasTradeInLog = tfTradeZoneTimes.has(z.openTime);
+          const zoneState: DojiZoneState = hasTradeInLog
+            ? 'used'
+            : z.isBroken
+            ? 'armed'
+            : 'waiting';
+          const liveRetest = evaluateZoneLiveRetest(
+            {
+              barIndex: z.barIndex,
+              high: z.high,
+              low: z.low,
+              isBroken: z.isBroken,
+              breakDirection: z.breakDirection,
+              breakBarIndex: z.breakBarIndex,
+              isUsed: hasTradeInLog,
+            },
+            tfBars,
+            tf,
+            refPrice
+          );
           return {
             ...z,
+            zoneState,
             isUsed: hasTradeInLog,
             hasSignalFormed: hasTradeInLog,
+            ...liveRetest,
           };
         });
 
@@ -194,7 +229,7 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
     setActiveSignal(sig);
   }, []);
 
-  // Live strength & open trade P/L update on each tick
+  // Live strength, live retest heads-up & open trade P/L update on each tick
   const updateLiveStrengths = useCallback((currentP: number) => {
     if (currentP <= 0) return;
 
@@ -233,17 +268,38 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
         );
 
         const distPts = Number((((z.high + z.low) / 2) - currentP).toFixed(2));
+        const retestDistancePts =
+          z.retestLevel !== null
+            ? Number((z.retestLevel - currentP).toFixed(2))
+            : distPts;
         const distFromLevel =
           currentP >= z.low && currentP <= z.high
             ? 0
             : Math.min(Math.abs(currentP - z.high), Math.abs(currentP - z.low));
         const isWithin5Atr = distFromLevel <= 5 * atr;
 
+        const liveRetest = evaluateZoneLiveRetest(
+          {
+            barIndex: z.barIndex,
+            high: z.high,
+            low: z.low,
+            isBroken: z.isBroken,
+            breakDirection: z.breakDirection,
+            breakBarIndex: z.breakBarIndex,
+            isUsed: z.isUsed,
+          },
+          bars,
+          tf,
+          currentP
+        );
+
         return {
           ...z,
           ...s,
           distancePts: distPts,
+          retestDistancePts,
           isWithin5Atr,
+          ...liveRetest,
         };
       });
 
@@ -290,27 +346,35 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
     }
   }, []);
 
-  // Unified handler for incoming price & marketState updates (used by SignalR and fallback polling)
+  // Unified handler for incoming price & marketState updates (used by SignalR, fallback polling, and commandStore)
   const applyIncomingQuote = useCallback(
-    (quote: {
-      mid?: number;
-      price?: number;
-      bid?: number;
-      ask?: number;
-      marketState?: string;
-      status?: string;
-      dayDiffPercent?: number;
-      previousClose?: number;
-      close?: number;
-      timestamp?: string | number;
-    }) => {
+    (
+      quote: {
+        mid?: number;
+        price?: number;
+        bid?: number;
+        ask?: number;
+        marketState?: string;
+        status?: string;
+        marketOpen?: boolean;
+        dayDiffPercent?: number;
+        previousClose?: number;
+        close?: number;
+        timestamp?: string | number;
+      },
+      fromCommandStore: boolean = false
+    ) => {
       if (!quote) return;
 
       const stateStr = (quote.marketState || quote.status || '').toLowerCase();
       const closed =
-        stateStr === 'closed' ||
-        stateStr === 'offline' ||
-        stateStr === 'market_closed';
+        quote.marketOpen === false
+          ? true
+          : quote.marketOpen === true
+          ? false
+          : stateStr === 'closed' ||
+            stateStr === 'offline' ||
+            stateStr === 'market_closed';
       setIsMarketClosed(closed);
       isMarketClosedRef.current = closed;
 
@@ -338,6 +402,27 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
         } else {
           const approxChange = p * (quote.dayDiffPercent / 100);
           setDayChange(Number(approxChange.toFixed(2)));
+        }
+      } else if (commandStore.change24h !== 0 || commandStore.changePercent24h !== 0) {
+        setDayChange(commandStore.change24h);
+        setDayChangePercent(commandStore.changePercent24h);
+      }
+
+      // Synchronize top Sarraf bar (commandStore) with this exact price update
+      if (!fromCommandStore && !isSyncingToCommandStoreRef.current) {
+        try {
+          isSyncingToCommandStoreRef.current = true;
+          commandStore.processIncomingFeedQuote({
+            price: p,
+            bid: quote.bid,
+            ask: quote.ask,
+            previousClose: quote.previousClose ?? quote.close ?? (commandStore.previousClose || undefined),
+            dayDiffPercent: quote.dayDiffPercent,
+            marketOpen: !closed,
+            timestamp: quote.timestamp ? new Date(quote.timestamp).toISOString() : new Date().toISOString(),
+          });
+        } finally {
+          isSyncingToCommandStoreRef.current = false;
         }
       }
 
@@ -397,6 +482,34 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
     },
     [reExtractAllZones, updateLiveStrengths]
   );
+
+  // Subscribe to commandStore so top Sarraf bar and DOJI tab always share the exact same live price and update together
+  useEffect(() => {
+    const syncFromStore = () => {
+      if (isSyncingToCommandStoreRef.current) return;
+      const storePrice = commandStore.currentPrice;
+      if (storePrice > 0 && storePrice !== livePriceRef.current) {
+        applyIncomingQuote(
+          {
+            price: storePrice,
+            bid: commandStore.bid || undefined,
+            ask: commandStore.ask || undefined,
+            previousClose: commandStore.previousClose || undefined,
+            dayDiffPercent: commandStore.changePercent24h || undefined,
+            marketOpen: commandStore.marketOpen,
+            timestamp: commandStore.lastTickAt || Date.now(),
+          },
+          true
+        );
+      }
+    };
+
+    const unsubscribe = commandStore.subscribe(syncFromStore);
+    syncFromStore();
+    return () => {
+      unsubscribe();
+    };
+  }, [applyIncomingQuote]);
 
   // Silent GET https://biquote.io/api/latest?symbols=XAUUSD fetcher
   const pollBiquoteLatest = useCallback(async () => {
@@ -520,16 +633,30 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
 
       const latest15m = results[0][results[0].length - 1];
       const prev15m = results[0].length > 1 ? results[0][0] : latest15m;
-      const initialP = latest15m ? latest15m.close : 0;
+      const storeP = commandStore.currentPrice;
+      const initialP = storeP > 0 ? storeP : latest15m ? latest15m.close : 0;
 
       if (initialP > 0) {
         livePriceRef.current = initialP;
-        setLivePrice((prev) => (prev > 0 ? prev : initialP));
+        setLivePrice(initialP);
         if (prev15m && prev15m.open > 0) {
           const diff = Number((initialP - prev15m.open).toFixed(2));
           const pct = Number(((diff / prev15m.open) * 100).toFixed(2));
           setDayChange((prev) => (prev !== 0 ? prev : diff));
           setDayChangePercent((prev) => (prev !== 0 ? prev : pct));
+        }
+        if (storeP <= 0) {
+          try {
+            isSyncingToCommandStoreRef.current = true;
+            commandStore.processIncomingFeedQuote({
+              price: initialP,
+              previousClose: prev15m?.open || initialP,
+              marketOpen: !isMarketClosedRef.current,
+              timestamp: new Date().toISOString(),
+            });
+          } finally {
+            isSyncingToCommandStoreRef.current = false;
+          }
         }
       }
 
@@ -656,6 +783,7 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
     currentTfZones: zonesMap[selectedTf] || [],
     activeSignal,
     allTrades,
+    activeTradesMap,
     activeTrade: activeTradesMap[selectedTf] || null,
   };
 }

@@ -11,31 +11,131 @@ import {
   DojiTimeframe,
   DojiZone,
   formatSignedDollar,
+  formatRoundedSignedDollar,
   formatOpenedTime,
+  getNearestValidZone,
 } from './dojiEngine';
+
+const ALL_TIMEFRAMES: DojiTimeframe[] = ['15m', '30m', '1h', '4h'];
 
 interface ActiveSignalCardProps {
   trade: DojiTrade | null;
+  activeTradesMap?: Record<DojiTimeframe, DojiTrade | null>;
+  onSelectTimeframe?: (tf: DojiTimeframe) => void;
   timeframe: DojiTimeframe;
   livePrice: number;
   zones: DojiZone[];
+  allValidZones?: DojiZone[];
   isMarketClosed?: boolean;
 }
 
 export const ActiveSignalCard: React.FC<ActiveSignalCardProps> = ({
   trade,
+  activeTradesMap,
+  onSelectTimeframe,
   timeframe,
   livePrice,
   zones,
+  allValidZones = [],
   isMarketClosed = false,
 }) => {
-  if (!trade || trade.status !== 'OPEN') {
-    const nearestZone =
-      zones.find((z) => z.timeframe === timeframe && !z.isUsed) ||
-      zones.find((z) => z.timeframe === timeframe) ||
-      zones[0];
+  const openTradesList: DojiTrade[] = ALL_TIMEFRAMES.map((tf) => activeTradesMap?.[tf] || null).filter(
+    (t): t is DojiTrade => Boolean(t && t.status === 'OPEN')
+  );
+
+  const liveRetestZones = [
+    ...zones.filter((z) => z.isRetestLive && z.retestLiveText),
+    ...allValidZones.filter(
+      (z) => z.timeframe !== timeframe && z.isRetestLive && z.retestLiveText
+    ),
+  ];
+  const primaryLiveRetest = liveRetestZones[0] || null;
+
+  const renderOpenTradesBar = () => (
+    <div className="px-3 py-2 rounded-[8px] bg-[#1a1711] border border-[#2b261b] flex flex-wrap items-center justify-between gap-2 text-xs font-['JetBrains_Mono',monospace] tabular-nums">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[#9d947e] font-['DM_Sans',sans-serif] font-medium">
+          Open trades:
+        </span>
+        {openTradesList.length > 0 ? (
+          openTradesList.map((ot) => {
+            const refP = livePrice > 0 ? livePrice : ot.entryPrice;
+            const pnl = computeLivePnl(ot, refP);
+            const isPos = pnl >= 0;
+            return (
+              <button
+                key={ot.id}
+                type="button"
+                onClick={() => onSelectTimeframe?.(ot.timeframe)}
+                className="px-2 py-0.5 rounded bg-[#12100c] border border-[#d9b25a]/60 hover:border-[#d9b25a] text-[#f0eadb] font-semibold cursor-pointer flex items-center gap-1.5 transition-colors"
+              >
+                <span className="text-[#f2d78f]">{ot.timeframe}</span>
+                <span className={ot.side === 'BUY' ? 'text-[#3fbf8f]' : 'text-[#e5584f]'}>
+                  {ot.side}
+                </span>
+                <span className={isPos ? 'text-[#3fbf8f]' : 'text-[#e5584f]'}>
+                  {formatSignedDollar(pnl)}
+                </span>
+              </button>
+            );
+          })
+        ) : (
+          <span className="text-[#9d947e]">0</span>
+        )}
+      </div>
+
+      <div className="flex items-center gap-1.5 text-[11px]">
+        {ALL_TIMEFRAMES.map((tf) => {
+          const count = activeTradesMap?.[tf]?.status === 'OPEN' ? 1 : 0;
+          const isCurrent = tf === timeframe;
+          return (
+            <button
+              key={tf}
+              type="button"
+              onClick={() => onSelectTimeframe?.(tf)}
+              className={`px-1.5 py-0.5 rounded border cursor-pointer transition-colors ${
+                count > 0
+                  ? 'bg-[#12100c] border-[#d9b25a] text-[#f2d78f] font-bold'
+                  : isCurrent
+                  ? 'bg-[#12100c] border-[#2b261b] text-[#f0eadb]'
+                  : 'bg-[#12100c]/60 border-[#2b261b] text-[#9d947e] hover:text-[#f0eadb]'
+              }`}
+            >
+              {tf}: {count}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  const renderLiveRetestBanner = () => {
+    if (!primaryLiveRetest || !primaryLiveRetest.retestLiveText) return null;
     return (
-      <div className="p-4 rounded-[12px] bg-[#12100c] border border-[#2b261b] font-['DM_Sans',sans-serif]">
+      <div
+        onClick={() => onSelectTimeframe?.(primaryLiveRetest.timeframe)}
+        className="px-3 py-2 rounded-[8px] bg-[#1a1711] border border-[#d9b25a] text-[#f2d78f] text-xs font-['JetBrains_Mono',monospace] tabular-nums flex flex-wrap items-center justify-between gap-2 cursor-pointer"
+      >
+        <div className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-[#d9b25a] shrink-0" />
+          <span className="font-bold">{primaryLiveRetest.retestLiveText}</span>
+        </div>
+        <span className="text-[11px] text-[#f0eadb]">
+          {primaryLiveRetest.timeframe} · {primaryLiveRetest.high.toFixed(2)} / {primaryLiveRetest.low.toFixed(2)}
+        </span>
+      </div>
+    );
+  };
+
+  if (!trade || trade.status !== 'OPEN') {
+    // Requirement 6: "Nearest zone" must always be chosen from ALL valid zones (used and unused combined) closest to current price
+    const nearestZone = getNearestValidZone(zones, timeframe, livePrice);
+
+    return (
+      <div className="p-4 rounded-[12px] bg-[#12100c] border border-[#2b261b] space-y-3 font-['DM_Sans',sans-serif]">
+        {renderOpenTradesBar()}
+        {renderLiveRetestBanner()}
+
         <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#2b261b]">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-[#9d947e]" />
@@ -51,15 +151,28 @@ export const ActiveSignalCard: React.FC<ActiveSignalCardProps> = ({
           </span>
         </div>
 
-        <div className="py-5 text-center space-y-1.5">
+        <div className="py-4 text-center space-y-1.5">
           <Target className="w-5 h-5 text-[#d9b25a] mx-auto" />
           <div className="text-sm font-medium text-[#f0eadb]">
             No active signal on <span className="font-['JetBrains_Mono',monospace]">{timeframe}</span>
           </div>
           {nearestZone ? (
-            <p className="text-xs text-[#9d947e] font-['JetBrains_Mono',monospace] tabular-nums">
-              Nearest zone: {nearestZone.low.toFixed(2)} – {nearestZone.high.toFixed(2)} ({nearestZone.strength.toFixed(1)}/10)
-            </p>
+            <div className="space-y-1">
+              <p className="text-xs text-[#9d947e] font-['JetBrains_Mono',monospace] tabular-nums">
+                Nearest zone: {nearestZone.low.toFixed(2)} – {nearestZone.high.toFixed(2)} ({nearestZone.strength.toFixed(1)}/10 ·{' '}
+                {nearestZone.zoneState === 'used'
+                  ? 'used'
+                  : nearestZone.zoneState === 'armed'
+                  ? `armed ${nearestZone.breakDirection === 'UP' ? '▲' : '▼'} since ${nearestZone.breakTimeDisplay}`
+                  : 'waiting'}
+                )
+              </p>
+              {nearestZone.zoneState === 'armed' && nearestZone.retestLevel !== null && (
+                <p className="text-xs text-[#f2d78f] font-['JetBrains_Mono',monospace] tabular-nums">
+                  Waiting for retest to {nearestZone.retestLevel.toFixed(2)} ({formatRoundedSignedDollar(nearestZone.retestDistancePts)})
+                </p>
+              )}
+            </div>
           ) : (
             <p className="text-xs text-[#9d947e]">
               Scanning for valid zones
@@ -150,6 +263,9 @@ export const ActiveSignalCard: React.FC<ActiveSignalCardProps> = ({
 
   return (
     <div className="p-4 rounded-[12px] bg-[#12100c] border border-[#2b261b] space-y-3.5 font-['DM_Sans',sans-serif]">
+      {renderOpenTradesBar()}
+      {renderLiveRetestBanner()}
+
       {/* Header Row */}
       <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#2b261b]">
         <div className="flex items-center gap-2 flex-wrap">

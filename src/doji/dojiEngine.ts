@@ -1,6 +1,7 @@
 // src/doji/dojiEngine.ts
 
 export type DojiTimeframe = '15m' | '30m' | '1h' | '4h';
+export type DojiZoneState = 'waiting' | 'armed' | 'used';
 
 export interface RawBar {
   openTime: string; // ISO 8601
@@ -31,12 +32,22 @@ export interface DojiZone {
   wickDiff: number;
   isRed: boolean;
 
-  // Break & usage status
+  // Break, arm & usage status
+  zoneState: DojiZoneState;
   isBroken: boolean;
   breakDirection: 'UP' | 'DOWN' | null;
   breakBarIndex: number | null;
+  breakTime: string | null;
+  breakTimeDisplay: string | null;
+  retestLevel: number | null;
+  retestDistancePts: number;
   hasSignalFormed: boolean;
   isUsed: boolean;
+
+  // Live retest heads-up when live price touches an armed zone's retest level before bar close
+  isRetestLive?: boolean;
+  retestLiveCloseTime?: string | null;
+  retestLiveText?: string | null;
 
   // Strength metrics (0 - 10)
   shapeScore: number;
@@ -97,6 +108,19 @@ function clamp(val: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, val));
 }
 
+export function getTimeframeIntervalMs(tf: DojiTimeframe): number {
+  switch (tf) {
+    case '15m':
+      return 15 * 60 * 1000;
+    case '30m':
+      return 30 * 60 * 1000;
+    case '1h':
+      return 60 * 60 * 1000;
+    case '4h':
+      return 4 * 60 * 60 * 1000;
+  }
+}
+
 /**
  * Format signed dollar amount: "+$2.16" and "–$0.51" (sign before $)
  */
@@ -106,6 +130,17 @@ export function formatSignedDollar(val: number): string {
     return `–$${Math.abs(num).toFixed(2)}`;
   }
   return `+$${num.toFixed(2)}`;
+}
+
+/**
+ * Format rounded signed dollar amount: "+$9" and "–$15" (sign before $)
+ */
+export function formatRoundedSignedDollar(val: number): string {
+  const num = Math.round(Number(val) || 0);
+  if (num < 0) {
+    return `–$${Math.abs(num)}`;
+  }
+  return `+$${num}`;
 }
 
 /**
@@ -122,6 +157,95 @@ export function formatDubaiShortTime(isoOrDate: string | Date): string {
   })
     .format(new Date(isoOrDate))
     .replace(',', '');
+}
+
+/**
+ * Format Dubai HH:mm time as "11:00"
+ */
+export function formatDubaiHourMin(msOrDate: number | string | Date): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Dubai',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(msOrDate));
+}
+
+/**
+ * Compute current signal bar close time in Dubai HH:mm format (e.g. "11:00")
+ */
+export function getSignalBarCloseTimeDubai(bars: RawBar[], timeframe: DojiTimeframe): string {
+  const intervalMs = getTimeframeIntervalMs(timeframe);
+  if (bars && bars.length > 0) {
+    const lastBar = bars[bars.length - 1];
+    const openMs = new Date(lastBar.openTime).getTime();
+    if (Number.isFinite(openMs)) {
+      const closeMs = lastBar.isOpen ? openMs + intervalMs : openMs + 2 * intervalMs;
+      return formatDubaiHourMin(closeMs);
+    }
+  }
+  const alignedCloseMs = Math.ceil(Date.now() / intervalMs) * intervalMs;
+  return formatDubaiHourMin(alignedCloseMs);
+}
+
+/**
+ * Evaluate whether an armed zone is currently experiencing a live retest on the unclosed bar
+ */
+export function evaluateZoneLiveRetest(
+  zone: {
+    barIndex: number;
+    high: number;
+    low: number;
+    isBroken: boolean;
+    breakDirection: 'UP' | 'DOWN' | null;
+    breakBarIndex: number | null;
+    isUsed: boolean;
+  },
+  bars: RawBar[],
+  timeframe: DojiTimeframe,
+  currentPrice: number
+): {
+  isRetestLive: boolean;
+  retestLiveCloseTime: string | null;
+  retestLiveText: string | null;
+} {
+  if (!zone.isBroken || zone.isUsed || !zone.breakDirection || !bars || bars.length === 0) {
+    return { isRetestLive: false, retestLiveCloseTime: null, retestLiveText: null };
+  }
+
+  const closedBars = bars.filter((b) => !b.isOpen);
+  const currentBarIdx = closedBars.length; // index of the currently forming bar
+  if (currentBarIdx < zone.barIndex + 2) {
+    return { isRetestLive: false, retestLiveCloseTime: null, retestLiveText: null };
+  }
+  if (zone.breakBarIndex !== null && currentBarIdx <= zone.breakBarIndex) {
+    return { isRetestLive: false, retestLiveCloseTime: null, retestLiveText: null };
+  }
+
+  const lastBar = bars[bars.length - 1];
+  const refPrice = currentPrice > 0 ? currentPrice : lastBar.close;
+  const liveHigh = lastBar.isOpen ? Math.max(lastBar.high, refPrice) : refPrice;
+  const liveLow = lastBar.isOpen ? Math.min(lastBar.low, refPrice) : refPrice;
+
+  let touched = false;
+  if (zone.breakDirection === 'DOWN') {
+    // SELL retest live: live bar high or live price touches/crosses >= zone.low without closing > zone.high
+    touched = liveHigh >= zone.low && refPrice <= zone.high;
+  } else if (zone.breakDirection === 'UP') {
+    // BUY retest live: live bar low or live price touches/crosses <= zone.high without closing < zone.low
+    touched = liveLow <= zone.high && refPrice >= zone.low;
+  }
+
+  if (!touched) {
+    return { isRetestLive: false, retestLiveCloseTime: null, retestLiveText: null };
+  }
+
+  const closeTimeStr = getSignalBarCloseTimeDubai(bars, timeframe);
+  return {
+    isRetestLive: true,
+    retestLiveCloseTime: closeTimeStr,
+    retestLiveText: `RETEST LIVE · signal bar close par: ${closeTimeStr}`,
+  };
 }
 
 /**
@@ -451,6 +575,8 @@ export function extractValidDojiZonesWithStats(
     let isBroken = false;
     let breakDirection: 'UP' | 'DOWN' | null = null;
     let breakBarIndex: number | null = null;
+    let breakTime: string | null = null;
+    let breakTimeDisplay: string | null = null;
     let isCancelled = false;
 
     for (let j = i + 1; j < totalClosed; j++) {
@@ -461,10 +587,14 @@ export function extractValidDojiZonesWithStats(
           isBroken = true;
           breakDirection = 'UP';
           breakBarIndex = j;
+          breakTime = nextBar.openTime;
+          breakTimeDisplay = formatDubaiShortTime(nextBar.openTime);
         } else if (nextBar.close < low) {
           isBroken = true;
           breakDirection = 'DOWN';
           breakBarIndex = j;
+          breakTime = nextBar.openTime;
+          breakTimeDisplay = formatDubaiShortTime(nextBar.openTime);
         }
       } else {
         if (breakDirection === 'UP' && nextBar.close < low) {
@@ -485,6 +615,31 @@ export function extractValidDojiZonesWithStats(
     }
 
     const isUsed = consumedOpenTimes ? consumedOpenTimes.has(bar.openTime) : false;
+    const zoneState: DojiZoneState = isUsed ? 'used' : isBroken ? 'armed' : 'waiting';
+    const retestLevel: number | null = isBroken
+      ? breakDirection === 'UP'
+        ? high
+        : low
+      : null;
+    const retestDistancePts =
+      retestLevel !== null
+        ? Number((retestLevel - currentPrice).toFixed(2))
+        : Number((mid - currentPrice).toFixed(2));
+
+    const liveRetestInfo = evaluateZoneLiveRetest(
+      {
+        barIndex: i,
+        high,
+        low,
+        isBroken,
+        breakDirection,
+        breakBarIndex,
+        isUsed,
+      },
+      uniqueBars,
+      timeframe,
+      currentPrice
+    );
 
     const strengthRes = calculateZoneStrength(
       {
@@ -525,11 +680,17 @@ export function extractValidDojiZonesWithStats(
       lowerWick: check.lowerWick,
       wickDiff: check.wickDiff,
       isRed: check.isRed,
+      zoneState,
       isBroken,
       breakDirection,
       breakBarIndex,
+      breakTime,
+      breakTimeDisplay,
+      retestLevel,
+      retestDistancePts,
       hasSignalFormed: isUsed,
       isUsed,
+      ...liveRetestInfo,
       ...strengthRes,
       distancePts: distPts,
       isWithin5Atr,
@@ -572,6 +733,37 @@ export function extractValidDojiZones(
 }
 
 /**
+ * Find the nearest valid zone to currentPrice among ALL valid zones (used and unused combined)
+ */
+export function getNearestValidZone(
+  zones: DojiZone[],
+  timeframe?: DojiTimeframe,
+  currentPrice?: number
+): DojiZone | null {
+  if (!zones || zones.length === 0) return null;
+  const pool = timeframe ? zones.filter((z) => z.timeframe === timeframe) : zones;
+  const candidates = pool.length > 0 ? pool : zones;
+  if (candidates.length === 0) return null;
+
+  const sorted = [...candidates].sort((a, b) => {
+    if (typeof currentPrice === 'number' && currentPrice > 0) {
+      const distA =
+        currentPrice >= a.low && currentPrice <= a.high
+          ? 0
+          : Math.min(Math.abs(currentPrice - a.high), Math.abs(currentPrice - a.low));
+      const distB =
+        currentPrice >= b.low && currentPrice <= b.high
+          ? 0
+          : Math.min(Math.abs(currentPrice - b.high), Math.abs(currentPrice - b.low));
+      if (distA !== distB) return distA - distB;
+    }
+    return Math.abs(a.distancePts) - Math.abs(b.distancePts);
+  });
+
+  return sorted[0] || null;
+}
+
+/**
  * Compute active signal based on current price and nearest valid Doji zone
  */
 export function computeActiveSignal(
@@ -579,9 +771,7 @@ export function computeActiveSignal(
   timeframe: DojiTimeframe,
   zones: DojiZone[]
 ): ActiveDojiSignal {
-  const tfZones = zones.filter((z) => z.timeframe === timeframe);
-  const sorted = [...tfZones].sort((a, b) => Math.abs(a.distancePts) - Math.abs(b.distancePts));
-  const target = sorted[0];
+  const target = getNearestValidZone(zones, timeframe, currentPrice);
 
   const nowDubaiStr = new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Asia/Dubai',

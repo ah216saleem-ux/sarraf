@@ -597,6 +597,7 @@ export const DojiChart: React.FC<DojiChartProps> = ({
         h: number;
         color: string;
         strength: number;
+        isRetestLive: boolean;
       }
 
       const pendingLabels: PendingLabel[] = [];
@@ -692,69 +693,122 @@ export const DojiChart: React.FC<DojiChartProps> = ({
           ? `${zone.strength.toFixed(1)}/10 · used`
           : `${zone.strength.toFixed(1)}/10`;
         const textWidth = ctx.measureText(labelText).width;
-        const labelX = Math.max(4, clampedStartX + 5);
-        const labelY = rectHeight < 20 ? rectY - 14 : rectY + 3;
+        const pillText = 'RETEST LIVE';
+        const pillW = zone.isRetestLive ? ctx.measureText(pillText).width + 16 : 0;
+        const totalW = textWidth + pillW;
 
-        if (labelX + textWidth <= plotWidth && labelY >= 0 && labelY + 12 <= plotHeight) {
-          pendingLabels.push({
-            text: labelText,
-            x: labelX,
-            y: labelY,
-            w: textWidth,
-            h: 12,
-            color: zone.strengthColor,
-            strength: zone.strength,
-          });
+        const labelX = Math.max(4, Math.min(clampedStartX + 5, Math.max(4, plotWidth - totalW - 6)));
+        let rawLabelY = rectHeight < 20 ? rectY - 14 : rectY + 3;
+        if (rawLabelY < 2) {
+          rawLabelY = Math.min(plotHeight - 14, rectBottom + 3);
         }
+        const labelY = Math.max(2, Math.min(rawLabelY, Math.max(2, plotHeight - 14)));
+
+        pendingLabels.push({
+          text: labelText,
+          x: labelX,
+          y: labelY,
+          w: textWidth,
+          h: 12,
+          color: zone.strengthColor,
+          strength: zone.strength,
+          isRetestLive: Boolean(zone.isRetestLive),
+        });
       }
 
-      // 5) Draw labels sorted by strength descending; hide if colliding with SL/TP lines or stronger zone labels
+      // 5) Draw labels for EVERY zone (only hide if colliding with SL/TP price tags; shift horizontally if two zone labels overlap)
       pendingLabels.sort((a, b) => b.strength - a.strength);
       const placedBoxes: { x1: number; y1: number; x2: number; y2: number }[] = [];
 
       for (const lbl of pendingLabels) {
-        const box = {
-          x1: lbl.x,
-          y1: lbl.y,
-          x2: lbl.x + lbl.w,
-          y2: lbl.y + lbl.h,
-        };
+        const pillText = 'RETEST LIVE';
+        const pillTextW = lbl.isRetestLive ? ctx.measureText(pillText).width : 0;
+        const pillTotalW = lbl.isRetestLive ? pillTextW + 16 : 0;
 
-        // Hide zone label if it collides with any active trade Entry/SL/BE/TP price line
+        let curX = lbl.x;
+        let curY = lbl.y;
+
+        // Hide zone label ONLY if it collides with any active trade Entry/SL/BE/TP price line
         const collidesWithPriceLine = tradeLineYs.some(
-          (lineY) => lineY >= box.y1 - 5 && lineY <= box.y2 + 5
+          (lineY) => lineY >= curY - 5 && lineY <= curY + lbl.h + 5
         );
         if (collidesWithPriceLine) {
           continue;
         }
 
-        const collidesWithZoneLabel = placedBoxes.some(
-          (b) =>
-            !(
-              box.x2 + 4 < b.x1 ||
-              box.x1 - 4 > b.x2 ||
-              box.y2 + 3 < b.y1 ||
-              box.y1 - 3 > b.y2
-            )
-        );
-
-        if (!collidesWithZoneLabel) {
-          // Small dark background patch behind text so candles don't obscure it
-          ctx.fillStyle = 'rgba(10, 9, 7, 0.88)';
-          ctx.fillRect(lbl.x - 3, lbl.y - 1, lbl.w + 6, lbl.h + 2);
-          ctx.fillStyle = lbl.color;
-          ctx.fillText(lbl.text, lbl.x, lbl.y);
-          placedBoxes.push(box);
+        // If another zone label is at the same position, shift horizontally so both zone labels remain visible
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const boxW = lbl.w + pillTotalW;
+          const overlapping = placedBoxes.find(
+            (b) =>
+              !(
+                curX + boxW + 4 < b.x1 ||
+                curX - 4 > b.x2 ||
+                curY + lbl.h + 3 < b.y1 ||
+                curY - 3 > b.y2
+              )
+          );
+          if (!overlapping) break;
+          if (overlapping.x2 + 10 + boxW <= plotWidth - 4) {
+            curX = overlapping.x2 + 10;
+          } else {
+            curY = Math.min(plotHeight - 14, overlapping.y2 + 4);
+          }
         }
+
+        // Small dark background patch behind text so candles don't obscure it
+        ctx.fillStyle = 'rgba(10, 9, 7, 0.88)';
+        ctx.fillRect(curX - 3, curY - 1, lbl.w + 6, lbl.h + 2);
+        ctx.fillStyle = lbl.color;
+        ctx.fillText(lbl.text, curX, curY);
+
+        // If live price is touching this armed zone, draw a small "RETEST LIVE" pill on the zone
+        if (lbl.isRetestLive) {
+          const pillX = curX + lbl.w + 6;
+          const pillY = curY - 1;
+          const pillW = pillTextW + 10;
+          const pillH = lbl.h + 2;
+
+          ctx.save();
+          ctx.fillStyle = 'rgba(18, 16, 12, 0.95)';
+          ctx.strokeStyle = '#d9b25a';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          if (typeof ctx.roundRect === 'function') {
+            ctx.roundRect(pillX, pillY, pillW, pillH, 4);
+          } else {
+            ctx.rect(pillX, pillY, pillW, pillH);
+          }
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = '#f2d78f';
+          ctx.font = '700 10px "JetBrains Mono", monospace';
+          ctx.fillText(pillText, pillX + 5, curY + 0.5);
+          ctx.font = '600 11px "JetBrains Mono", monospace';
+          ctx.restore();
+        }
+
+        placedBoxes.push({
+          x1: curX,
+          y1: curY,
+          x2: curX + lbl.w + pillTotalW,
+          y2: curY + lbl.h,
+        });
       }
 
       ctx.restore();
 
+      const getEdgeDist = (z: DojiZone) =>
+        refPrice >= z.low && refPrice <= z.high
+          ? 0
+          : Math.min(Math.abs(refPrice - z.high), Math.abs(refPrice - z.low));
+
       const aboveList = Array.from(aboveSet.values()).sort(
-        (a, b) => Math.abs(a.distancePts) - Math.abs(b.distancePts)
+        (a, b) => getEdgeDist(a) - getEdgeDist(b)
       );
       const belowList = Array.from(belowSet.values()).sort(
-        (a, b) => Math.abs(a.distancePts) - Math.abs(b.distancePts)
+        (a, b) => getEdgeDist(a) - getEdgeDist(b)
       );
 
       // Update off-screen chips state only when changed

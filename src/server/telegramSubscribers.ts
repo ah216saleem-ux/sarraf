@@ -3,6 +3,7 @@ import path from 'path';
 import { DATA_DIR, writeJsonAtomic } from './deploymentSafety.ts';
 
 const SUBSCRIBERS_FILE = path.resolve(DATA_DIR, 'telegram_subscribers.json');
+const WORKSPACE_SUBSCRIBERS_FILE = path.resolve(process.cwd(), 'data', 'telegram_subscribers.json');
 
 export type SubscriberRole = 'ADMIN' | 'USER';
 export type SubscriberStatus = 'APPROVED' | 'PENDING' | 'BLOCKED';
@@ -29,8 +30,13 @@ let state: SubscribersState = {
 
 function ensureLoaded() {
   try {
-    if (fs.existsSync(SUBSCRIBERS_FILE)) {
-      const raw = fs.readFileSync(SUBSCRIBERS_FILE, 'utf8');
+    const fileToRead = fs.existsSync(SUBSCRIBERS_FILE)
+      ? SUBSCRIBERS_FILE
+      : fs.existsSync(WORKSPACE_SUBSCRIBERS_FILE)
+      ? WORKSPACE_SUBSCRIBERS_FILE
+      : null;
+    if (fileToRead) {
+      const raw = fs.readFileSync(fileToRead, 'utf8');
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed.subscribers === 'object') {
         state = parsed;
@@ -49,6 +55,9 @@ function ensureLoaded() {
 function saveState() {
   try {
     writeJsonAtomic(SUBSCRIBERS_FILE, state);
+    try {
+      writeJsonAtomic(WORKSPACE_SUBSCRIBERS_FILE, state);
+    } catch {}
   } catch (err: any) {
     console.error('[TELEGRAM SUBSCRIBERS] Failed to save subscribers file:', err.message);
   }

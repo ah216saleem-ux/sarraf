@@ -11,7 +11,12 @@ import {
   Filter,
   Maximize2,
 } from 'lucide-react';
-import { DojiTimeframe, DojiZone, formatSignedDollar } from './dojiEngine';
+import {
+  DojiTimeframe,
+  DojiZone,
+  formatSignedDollar,
+  formatRoundedSignedDollar,
+} from './dojiEngine';
 import { useDojiFeed } from './useDojiFeed';
 import { DojiChart } from './DojiChart';
 import { ActiveSignalCard } from './ActiveSignalCard';
@@ -45,6 +50,7 @@ export const SarrafDojiView: React.FC = () => {
     allValidZones,
     currentTfZones,
     allTrades,
+    activeTradesMap,
     activeTrade,
   } = useDojiFeed(selectedTf);
 
@@ -100,21 +106,37 @@ export const SarrafDojiView: React.FC = () => {
       <div className="p-3.5 sm:p-4 rounded-[12px] bg-[#12100c] border border-[#2b261b] space-y-3">
         {/* Controls Row (flex-wrap so all buttons remain visible without clipping) */}
         <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#2b261b]">
-          {/* Timeframe Buttons: 15m, 30m, 1h, 4h (Gold fill ONLY on selected timeframe button) */}
+          {/* Timeframe Buttons: 15m, 30m, 1h, 4h with open trade count (Gold fill ONLY on selected timeframe button) */}
           <div className="flex items-center gap-1 bg-[#1a1711] p-1 rounded-[8px] border border-[#2b261b] font-['JetBrains_Mono',monospace] text-xs">
-            {ALL_TIMEFRAMES.map((tf) => (
-              <button
-                key={tf}
-                onClick={() => setSelectedTf(tf)}
-                className={`px-2.5 py-1 rounded-[6px] transition-colors font-bold cursor-pointer ${
-                  selectedTf === tf
-                    ? 'bg-[#d9b25a] text-[#0a0907]'
-                    : 'text-[#9d947e] hover:text-[#f0eadb]'
-                }`}
-              >
-                {tf}
-              </button>
-            ))}
+            {ALL_TIMEFRAMES.map((tf) => {
+              const openCount = activeTradesMap[tf]?.status === 'OPEN' ? 1 : 0;
+              const isSelected = selectedTf === tf;
+              return (
+                <button
+                  key={tf}
+                  onClick={() => setSelectedTf(tf)}
+                  className={`px-2.5 py-1 rounded-[6px] transition-colors font-bold cursor-pointer flex items-center gap-1.5 ${
+                    isSelected
+                      ? 'bg-[#d9b25a] text-[#0a0907]'
+                      : 'text-[#9d947e] hover:text-[#f0eadb]'
+                  }`}
+                >
+                  <span>{tf}</span>
+                  <span
+                    className={`px-1 py-0.2 rounded text-[10px] tabular-nums ${
+                      isSelected
+                        ? 'bg-[#0a0907]/20 text-[#0a0907]'
+                        : openCount > 0
+                        ? 'bg-[#12100c] text-[#f2d78f] border border-[#d9b25a]/60'
+                        : 'bg-[#12100c] text-[#9d947e]'
+                    }`}
+                    title={`Open trades on ${tf}: ${openCount}`}
+                  >
+                    {openCount}
+                  </span>
+                </button>
+              );
+            })}
           </div>
 
           {/* Action Buttons: Zones, EMA 9, Red only, Fit zones, Latest, Reset view */}
@@ -214,9 +236,12 @@ export const SarrafDojiView: React.FC = () => {
       {/* 3) Active Signal Card */}
       <ActiveSignalCard
         trade={activeTrade}
+        activeTradesMap={activeTradesMap}
+        onSelectTimeframe={(tf) => setSelectedTf(tf)}
         timeframe={selectedTf}
         livePrice={livePrice}
         zones={currentTfZones}
+        allValidZones={allValidZones}
         isMarketClosed={isMarketClosed}
       />
 
@@ -240,6 +265,8 @@ export const SarrafDojiView: React.FC = () => {
             allValidZones.map((zone) => {
               const isSelected = selectedTf === zone.timeframe;
               const isDistUp = zone.distancePts >= 0;
+              const breakArrow = zone.breakDirection === 'UP' ? '▲' : '▼';
+
               return (
                 <div
                   key={zone.id}
@@ -250,7 +277,7 @@ export const SarrafDojiView: React.FC = () => {
                       : 'border-[#2b261b] hover:border-[#d9b25a]/60'
                   }`}
                 >
-                  {/* Pehli line: [timeframe chip] time "23 Oct 18:45" · strength "8.0/10" (colored) · "used" tag */}
+                  {/* Pehli line: [timeframe chip] time "23 Oct 18:45" · strength "8.0/10" (colored) · zone state ("waiting" | "armed ▼ since ..." | "used") */}
                   <div className="flex flex-wrap items-center gap-1.5 leading-snug">
                     <span className="px-1.5 py-0.5 rounded bg-[#12100c] border border-[#2b261b] text-[#f2d78f] text-[11px] font-semibold shrink-0">
                       {zone.timeframe}
@@ -269,17 +296,43 @@ export const SarrafDojiView: React.FC = () => {
                       {zone.strength.toFixed(1)}/10
                     </span>
 
-                    {zone.isUsed && (
+                    <span className="text-[#9d947e]">·</span>
+
+                    {zone.zoneState === 'used' ? (
+                      <span className="px-1.5 py-0.2 rounded bg-[#12100c] border border-[#2b261b] text-[#9d947e] text-[11px] shrink-0">
+                        used
+                      </span>
+                    ) : zone.zoneState === 'armed' ? (
+                      <span className="px-1.5 py-0.2 rounded bg-[#12100c] border border-[#d9b25a]/50 text-[#f2d78f] text-[11px] shrink-0">
+                        armed{' '}
+                        <span
+                          className={
+                            zone.breakDirection === 'UP'
+                              ? 'text-[#3fbf8f] font-bold'
+                              : 'text-[#e5584f] font-bold'
+                          }
+                        >
+                          {breakArrow}
+                        </span>{' '}
+                        since {zone.breakTimeDisplay}
+                      </span>
+                    ) : (
+                      <span className="px-1.5 py-0.2 rounded bg-[#12100c] border border-[#2b261b] text-[#9d947e] text-[11px] shrink-0">
+                        waiting
+                      </span>
+                    )}
+
+                    {zone.isRetestLive && zone.retestLiveText && (
                       <>
                         <span className="text-[#9d947e]">·</span>
-                        <span className="px-1.5 py-0.2 rounded bg-[#12100c] border border-[#2b261b] text-[#9d947e] text-[11px] shrink-0">
-                          used
+                        <span className="px-1.5 py-0.2 rounded bg-[#12100c] border border-[#d9b25a] text-[#f2d78f] text-[11px] font-bold shrink-0">
+                          {zone.retestLiveText}
                         </span>
                       </>
                     )}
                   </div>
 
-                  {/* Doosri line: poora high / low (ellipsis nahi) · ▲ ya ▼ · current price se doori "+$5.27" */}
+                  {/* Doosri line: poora high / low · ▲ ya ▼ · current price se doori "+$5.27" · (if armed: "Waiting for retest to 4016.19 (+$9)") */}
                   <div className="flex flex-wrap items-center gap-1.5 leading-snug text-[#9d947e]">
                     <span className="text-[#f0eadb] font-semibold whitespace-nowrap">
                       {zone.high.toFixed(2)} / {zone.low.toFixed(2)}
@@ -307,6 +360,16 @@ export const SarrafDojiView: React.FC = () => {
                     >
                       {formatSignedDollar(zone.distancePts)}
                     </span>
+
+                    {zone.zoneState === 'armed' && zone.retestLevel !== null && (
+                      <>
+                        <span>·</span>
+                        <span className="text-[#f2d78f] whitespace-nowrap">
+                          Waiting for retest to {zone.retestLevel.toFixed(2)} (
+                          {formatRoundedSignedDollar(zone.retestDistancePts)})
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
               );
