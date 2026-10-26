@@ -5,10 +5,10 @@ interface BlackstoneZoneRecordViewProps {
   records: ZoneSummaryRow[] | null | undefined;
 }
 
-const novaCardStyle: React.CSSProperties = {
-  backgroundColor: 'rgba(18, 22, 34, 0.72)',
-  border: '1px solid rgba(140, 160, 255, 0.14)',
-  fontFamily: "'Sora', sans-serif",
+const cardStyle: React.CSSProperties = {
+  backgroundColor: '#0b0b0e',
+  border: '1px solid #1f1d18',
+  fontFamily: "'DM Sans', sans-serif",
 };
 
 const monoStyle: React.CSSProperties = {
@@ -18,7 +18,6 @@ const monoStyle: React.CSSProperties = {
 export const BlackstoneZoneRecordView: React.FC<BlackstoneZoneRecordViewProps> = ({
   records,
 }) => {
-  // Only show rows matching Level map names, excluding any generic/bogus entries
   const rows = (records || []).filter(
     (r) => r.zoneName && !r.zoneName.includes('Reaction Zone')
   );
@@ -27,145 +26,119 @@ export const BlackstoneZoneRecordView: React.FC<BlackstoneZoneRecordViewProps> =
     stats: { tests: number; held: number; broken: number; holdRatePct: number | null },
     totalStoredTests: number
   ) => {
-    // Show dashes unless a zone has at least 10 real stored tests
     if (totalStoredTests < 10 || stats.tests < 10 || stats.holdRatePct === null) {
       return (
-        <span className="text-[#8d97b8] font-semibold" style={monoStyle}>
+        <span className="text-[#8e8779] font-semibold" style={monoStyle}>
           —
         </span>
       );
     }
     return (
       <div className="flex flex-col tabular-nums" style={monoStyle}>
-        <span className="font-bold text-[#e9edff]">
+        <span className="font-bold text-[#f4efe6]">
           {stats.holdRatePct.toFixed(0)}%{' '}
-          <span className="text-[11px] font-normal text-[#4df0b4]">
-            ({stats.held} held)
+          <span className="text-[11px] font-normal text-[#3fbf8f]">
+            ({stats.held})
           </span>
         </span>
-        <span className="text-[10px] text-[#8d97b8]">
-          {stats.tests} tests · {stats.broken} broken
+        <span className="text-[10px] text-[#8e8779]">
+          {stats.tests}t · {stats.broken}b
         </span>
       </div>
     );
   };
 
   return (
-    <div className="space-y-4" style={{ fontFamily: "'Sora', sans-serif" }}>
-      {/* Banner / Explanation */}
-      <div
-        className="rounded-[18px] p-4 flex flex-wrap items-center justify-between gap-3 backdrop-blur-md"
-        style={novaCardStyle}
-      >
-        <div className="flex items-center gap-3">
-          <div className="w-2.5 h-2.5 rounded-full bg-[#52e3ff]" />
-          <div>
-            <div className="text-xs font-bold uppercase tracking-wider text-[#52e3ff]">
-              ZONE RECORD DATABASE
-            </div>
-            <div className="text-xs text-[#8d97b8]">
-              Persisted server records of zone reactions, tests, and holds
-            </div>
-          </div>
-        </div>
-
+    <div className="space-y-3.5" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+      <div className="rounded-[12px] p-4 space-y-3.5" style={cardStyle}>
         <div
-          className="rounded-[10px] px-3.5 py-1.5 text-xs text-[#8d97b8]"
-          style={{
-            backgroundColor: 'rgba(7, 9, 15, 0.55)',
-            border: '1px solid rgba(140, 160, 255, 0.14)',
-          }}
+          className="flex flex-wrap items-center justify-between gap-2 pb-2.5"
+          style={{ borderBottom: '1px solid #1f1d18' }}
         >
-          Rating criterion:{' '}
-          <strong className="text-[#52e3ff]">
-            Minimum 10 stored tests required
-          </strong>{' '}
-          before a rating is assigned. Shows dashes where no data exists.
-        </div>
-      </div>
-
-      {/* Main Zone Record Table */}
-      <div
-        className="rounded-[18px] p-5 space-y-4 backdrop-blur-md"
-        style={novaCardStyle}
-      >
-        <div
-          className="flex flex-wrap items-center justify-between gap-2 pb-3"
-          style={{ borderBottom: '1px solid rgba(140, 160, 255, 0.14)' }}
-        >
-          <h2 className="text-xs font-bold uppercase tracking-wider text-[#52e3ff]">
-            ZONE TEST PERFORMANCE (STORED HISTORY)
+          <h2
+            className="text-xs font-bold uppercase tracking-wider text-[#d9b25a]"
+            style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}
+          >
+            ZONE RECORD
           </h2>
-          <span className="text-xs text-[#8d97b8]">
+          <span className="text-xs text-[#8e8779]" style={monoStyle}>
             Today · 30d · 60d · 90d
           </span>
         </div>
 
         {rows.length === 0 ? (
-          <div className="py-8 text-center text-sm text-[#8d97b8]">
-            No zone test records stored on server yet. Real intraday touches and tests will record here automatically.
+          <div className="py-6 text-center text-xs text-[#8e8779]">
+            No zone test records yet.
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead>
                 <tr
-                  className="text-[#8d97b8] uppercase text-[11px]"
-                  style={{ borderBottom: '1px solid rgba(140, 160, 255, 0.14)' }}
+                  className="text-[#8e8779] uppercase text-[11px]"
+                  style={{ borderBottom: '1px solid #1f1d18' }}
                 >
-                  <th className="py-2.5 px-3 font-semibold">Zone</th>
-                  <th className="py-2.5 px-3 font-semibold">Today</th>
-                  <th className="py-2.5 px-3 font-semibold">30 Days</th>
-                  <th className="py-2.5 px-3 font-semibold">60 Days</th>
-                  <th className="py-2.5 px-3 font-semibold">90 Days</th>
-                  <th className="py-2.5 px-3 font-semibold text-center">Stored Tests</th>
-                  <th className="py-2.5 px-3 font-semibold text-right">Rating</th>
+                  <th className="py-2 px-2.5 font-semibold">Zone</th>
+                  <th className="py-2 px-2.5 font-semibold">Today</th>
+                  <th className="py-2 px-2.5 font-semibold">30d</th>
+                  <th className="py-2 px-2.5 font-semibold">60d</th>
+                  <th className="py-2 px-2.5 font-semibold">90d</th>
+                  <th className="py-2 px-2.5 font-semibold text-center">Tests</th>
+                  <th className="py-2 px-2.5 font-semibold text-right">Rating</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[rgba(140,160,255,0.08)]">
+              <tbody className="divide-y divide-[#181612]">
                 {rows.map((r) => {
                   const hasRating = r.rating !== null;
                   return (
                     <tr key={r.zoneId}>
-                      <td className="py-3 px-3">
-                        <span className="font-bold text-[#e9edff] text-sm">
+                      <td className="py-2.5 px-2.5">
+                        <span className="font-bold text-[#f4efe6] text-xs sm:text-sm">
                           {r.zoneName}
                         </span>
                       </td>
 
-                      <td className="py-3 px-3">{formatPeriod(r.today, r.totalStoredTests)}</td>
-                      <td className="py-3 px-3">{formatPeriod(r.d30, r.totalStoredTests)}</td>
-                      <td className="py-3 px-3">{formatPeriod(r.d60, r.totalStoredTests)}</td>
-                      <td className="py-3 px-3">{formatPeriod(r.d90, r.totalStoredTests)}</td>
+                      <td className="py-2.5 px-2.5">
+                        {formatPeriod(r.today, r.totalStoredTests)}
+                      </td>
+                      <td className="py-2.5 px-2.5">
+                        {formatPeriod(r.d30, r.totalStoredTests)}
+                      </td>
+                      <td className="py-2.5 px-2.5">
+                        {formatPeriod(r.d60, r.totalStoredTests)}
+                      </td>
+                      <td className="py-2.5 px-2.5">
+                        {formatPeriod(r.d90, r.totalStoredTests)}
+                      </td>
 
                       <td
-                        className="py-3 px-3 text-center tabular-nums text-[#e9edff] font-bold"
+                        className="py-2.5 px-2.5 text-center tabular-nums text-[#f4efe6] font-bold"
                         style={monoStyle}
                       >
                         {r.totalStoredTests >= 10 ? (
                           r.totalStoredTests
                         ) : (
-                          <span className="text-[#8d97b8] font-semibold">—</span>
+                          <span className="text-[#8e8779] font-semibold">—</span>
                         )}
                       </td>
 
-                      <td className="py-3 px-3 text-right">
+                      <td className="py-2.5 px-2.5 text-right">
                         {r.totalStoredTests >= 10 && hasRating ? (
                           <span
-                            className="inline-flex items-center px-2 py-0.5 rounded-[6px] text-[11px] font-bold"
+                            className="inline-flex items-center px-2 py-0.5 rounded-[5px] text-[11px] font-bold"
                             style={{
-                              backgroundColor: 'rgba(82, 227, 255, 0.18)',
-                              border: '1px solid #52e3ff',
-                              color: '#52e3ff',
+                              backgroundColor: 'rgba(217, 178, 90, 0.14)',
+                              border: '1px solid #d9b25a',
+                              color: '#f2d78f',
+                              ...monoStyle,
                             }}
                           >
                             {r.rating}
                           </span>
                         ) : (
                           <span
-                            className="text-xs text-[#8d97b8] font-semibold"
+                            className="text-xs text-[#8e8779] font-semibold"
                             style={monoStyle}
-                            title="Minimum 10 stored tests required"
                           >
                             —
                           </span>

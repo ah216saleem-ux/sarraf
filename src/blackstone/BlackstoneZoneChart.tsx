@@ -1,5 +1,18 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react';
-import type { BlackstoneEvaluatedZone, BlackstoneZoneId } from '../server/blackstoneEngine';
+import {
+  createChart,
+  IChartApi,
+  ISeriesApi,
+  LineStyle,
+  CrosshairMode,
+  ColorType,
+  IPriceLine,
+} from 'lightweight-charts';
+import type {
+  BlackstoneEvaluatedZone,
+  BlackstoneZoneId,
+  BlackstoneReferenceLevelItem,
+} from '../server/blackstoneEngine';
 import type { LivePlanTrade } from '../server/blackstonePlanEngine';
 
 export interface BlackstoneCandle {
@@ -14,7 +27,7 @@ export interface BlackstoneCandle {
 
 export type BlackstoneChartTimeframe = 'M5' | 'M15' | 'H1';
 
-interface BlackstoneZoneChartProps {
+export interface BlackstoneZoneChartProps {
   candles: BlackstoneCandle[];
   zones: BlackstoneEvaluatedZone[];
   selectedZoneId: BlackstoneZoneId | null;
@@ -28,36 +41,34 @@ interface BlackstoneZoneChartProps {
   isMarketClosed: boolean;
   activeTrade?: LivePlanTrade | null;
   newsPauseNotice?: string | null;
+  focusSeq?: number;
+  referenceLevels?: BlackstoneReferenceLevelItem[];
+}
+
+interface CandlePoint {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+interface ZoneHitBox {
+  id: BlackstoneZoneId;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 const TIMEFRAMES: BlackstoneChartTimeframe[] = ['M5', 'M15', 'H1'];
+const DUBAI_OFFSET_SEC = 4 * 3600;
 
-function formatDubaiTime(iso: string): string {
+function isoToDubaiChartSec(iso: string): number | null {
+  if (!iso) return null;
   const ms = new Date(iso).getTime();
-  if (isNaN(ms)) return '';
-  const d = new Date(ms + 4 * 60 * 60 * 1000);
-  const hh = String(d.getUTCHours()).padStart(2, '0');
-  const mm = String(d.getUTCMinutes()).padStart(2, '0');
-  return `${hh}:${mm}`;
-}
-
-interface GutterBadge {
-  id: string;
-  desiredY: number;
-  y: number;
-  height: number;
-  color: string;
-  bgColor: string;
-  borderColor: string;
-  render: (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) => void;
-}
-
-interface DistantZoneHint {
-  zone: BlackstoneEvaluatedZone;
-  direction: 'ABOVE' | 'BELOW';
-  distanceDollars: number;
-  label: string;
-  rect?: { x: number; y: number; w: number; h: number };
+  if (isNaN(ms)) return null;
+  return Math.floor(ms / 1000) + DUBAI_OFFSET_SEC;
 }
 
 export const BlackstoneZoneChart: React.FC<BlackstoneZoneChartProps> = ({
@@ -73,744 +84,731 @@ export const BlackstoneZoneChart: React.FC<BlackstoneZoneChartProps> = ({
   isMarketClosed,
   activeTrade,
   newsPauseNotice,
+  focusSeq = 0,
+  referenceLevels = [],
 }) => {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const zoneHitRectsRef = useRef<Array<{ id: BlackstoneZoneId; yTop: number; yBottom: number }>>([]);
-  const hintHitRectsRef = useRef<Array<{ id: BlackstoneZoneId; x: number; y: number; w: number; h: number }>>([]);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const tradeLinesRef = useRef<IPriceLine[]>([]);
+  const zoneHitBoxesRef = useRef<ZoneHitBox[]>([]);
 
-  // Merge live price tick into local real-time candle state
-  const [liveCandles, setLiveCandles] = useState<BlackstoneCandle[]>(candles);
+  const [offscreenAbove, setOffscreenAbove] = useState<BlackstoneEvaluatedZone[]>([]);
+  const [offscreenBelow, setOffscreenBelow] = useState<BlackstoneEvaluatedZone[]>([]);
+  const offscreenSigRef = useRef<string>('');
 
+  const zonesRef = useRef<BlackstoneEvaluatedZone[]>(zones);
+  zonesRef.current = zones;
+  const referenceLevelsRef = useRef<BlackstoneReferenceLevelItem[]>(referenceLevels);
+  referenceLevelsRef.current = referenceLevels;
+  const selectedZoneIdRef = useRef<BlackstoneZoneId | null>(selectedZoneId);
+  selectedZoneIdRef.current = selectedZoneId;
+  const lockTimeIsoRef = useRef<string>(lockTimeIso);
+  lockTimeIsoRef.current = lockTimeIso;
+  const livePriceRef = useRef<number | null>(livePrice);
+  livePriceRef.current = livePrice;
+  const isFeedLiveRef = useRef<boolean>(isFeedLive);
+  isFeedLiveRef.current = isFeedLive;
+  const activeTradeRef = useRef<LivePlanTrade | null | undefined>(activeTrade);
+  activeTradeRef.current = activeTrade;
+
+  const uniqueCandlesRef = useRef<CandlePoint[]>([]);
+  const initializedTfRef = useRef<BlackstoneChartTimeframe | null>(null);
+  const lastFocusKeyRef = useRef<string>('');
+
+  const scaleModeRef = useRef<{
+    mode: 'normal' | 'focus_zone';
+    targetZone: BlackstoneEvaluatedZone | null;
+  }>({
+    mode: 'normal',
+    targetZone: null,
+  });
+
+  const recenterChart = useCallback(() => {
+    const chart = chartRef.current;
+    const candleSeries = candleSeriesRef.current;
+    const total = uniqueCandlesRef.current.length;
+    if (!chart || total === 0) return;
+
+    scaleModeRef.current = { mode: 'normal', targetZone: null };
+
+    const visibleBars = window.innerWidth < 480 ? 48 : 72;
+    const from = Math.max(0, total - visibleBars);
+    const to = Math.max(0, total - 1) + 8;
+
+    chart.timeScale().setVisibleLogicalRange({ from, to });
+    chart.priceScale('right').applyOptions({ autoScale: true });
+    if (candleSeries) {
+      candleSeries.applyOptions({});
+    }
+  }, []);
+
+  const zoomToZone = useCallback((zone: BlackstoneEvaluatedZone) => {
+    const chart = chartRef.current;
+    const candleSeries = candleSeriesRef.current;
+    const total = uniqueCandlesRef.current.length;
+    if (!chart || total === 0) return;
+
+    scaleModeRef.current = { mode: 'focus_zone', targetZone: zone };
+
+    const candlesList = uniqueCandlesRef.current;
+    const zoneStartSec =
+      isoToDubaiChartSec(zone.baseStartIso || zone.formedAtIso) ?? candlesList[0].time;
+
+    let startIdx = 0;
+    for (let i = 0; i < candlesList.length; i++) {
+      if (candlesList[i].time >= zoneStartSec) {
+        startIdx = i;
+        break;
+      }
+    }
+
+    const defaultBars = window.innerWidth < 480 ? 48 : 72;
+    const from =
+      startIdx > total - 90
+        ? Math.max(0, Math.min(startIdx - 6, total - defaultBars))
+        : Math.max(0, total - defaultBars);
+    const to = Math.max(0, total - 1) + 8;
+
+    chart.timeScale().setVisibleLogicalRange({ from, to });
+    chart.priceScale('right').applyOptions({ autoScale: true });
+    if (candleSeries) {
+      candleSeries.applyOptions({});
+    }
+  }, []);
+
+  // 1. Initialize Lightweight Charts instance
   useEffect(() => {
-    setLiveCandles(candles);
-  }, [candles]);
-
-  // Real-time tick update on the latest candle in the active timeframe
-  useEffect(() => {
-    if (!isFeedLive || livePrice === null || livePrice <= 0) return;
-
-    setLiveCandles((prev) => {
-      if (!prev || prev.length === 0) return prev;
-      const periodMinutes = timeframe === 'M5' ? 5 : timeframe === 'M15' ? 15 : 60;
-      const periodMs = periodMinutes * 60 * 1000;
-      const nowMs = Date.now();
-      const currentBucketMs = Math.floor(nowMs / periodMs) * periodMs;
-      const currentBucketIso = new Date(currentBucketMs).toISOString();
-
-      const copy = [...prev];
-      const last = copy[copy.length - 1];
-      const lastBarTime = new Date(last.openTime).getTime();
-
-      if (last.openTime === currentBucketIso || lastBarTime === currentBucketMs) {
-        copy[copy.length - 1] = {
-          ...last,
-          high: Math.max(last.high, livePrice),
-          low: Math.min(last.low, livePrice),
-          close: livePrice,
-          isClosed: false,
-        };
-        return copy;
-      } else if (currentBucketMs > lastBarTime) {
-        // Real period ended: mark previous candle closed, start fresh candle
-        copy[copy.length - 1] = { ...last, isClosed: true };
-        copy.push({
-          openTime: currentBucketIso,
-          open: livePrice,
-          high: livePrice,
-          low: livePrice,
-          close: livePrice,
-          volume: 1,
-          isClosed: false,
-        });
-        return copy.slice(-160);
-      }
-      return prev;
-    });
-  }, [livePrice, isFeedLive, timeframe]);
-
-  const drawChart = useCallback(() => {
-    const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const width = Math.max(300, container.clientWidth || 740);
-    const plotHeight = 500;
-    const timeAxisHeight = 28;
-    const totalHeight = plotHeight + timeAxisHeight;
-
-    // Responsive right gutter width so chart stays readable on 400px phones
-    const rightAxisWidth = width < 480 ? 116 : 146;
-    const plotWidth = Math.max(150, width - rightAxisWidth);
-
-    if (canvas.width !== width * dpr || canvas.height !== totalHeight * dpr) {
-      canvas.width = width * dpr;
-      canvas.height = totalHeight * dpr;
-    }
-
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.scale(dpr, dpr);
-
-    // Canvas background (#07090f Nova deep space)
-    ctx.fillStyle = '#07090f';
-    ctx.fillRect(0, 0, width, totalHeight);
-
-    // Plot area background
-    ctx.fillStyle = '#07090f';
-    ctx.fillRect(0, 0, plotWidth, plotHeight);
-
-    // Right gutter background
-    ctx.fillStyle = '#0b0e18';
-    ctx.fillRect(plotWidth, 0, rightAxisWidth, plotHeight);
-
-    // Visible candles count: large, clear candles
-    const maxBars = width < 480 ? 28 : 42;
-    const visibleCandles = liveCandles.slice(-maxBars);
-    const refPrice =
-      isFeedLive && livePrice && livePrice > 0
-        ? livePrice
-        : visibleCandles.length > 0
-          ? visibleCandles[visibleCandles.length - 1].close
-          : null;
-
-    if (!refPrice || visibleCandles.length === 0) {
-      ctx.fillStyle = '#8d97b8';
-      ctx.font = '12px "Sora", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(
-        'Waiting for stored candle history from Ahmad server...',
-        plotWidth / 2,
-        plotHeight / 2
-      );
-      ctx.restore();
-      return;
-    }
-
-    // 1. PRICE SCALE: About $28 around live price, widened ONLY to include nearest zone above and below
-    let minPrice = refPrice - 14.0;
-    let maxPrice = refPrice + 14.0;
-
-    // Nearest zone above live price
-    const aboveZones = zones
-      .filter((z) => z.level >= refPrice)
-      .sort((a, b) => a.level - b.level);
-    const nearestAbove = aboveZones[0] || null;
-
-    // Nearest zone below live price
-    const belowZones = zones
-      .filter((z) => z.level < refPrice)
-      .sort((a, b) => b.level - a.level);
-    const nearestBelow = belowZones[0] || null;
-
-    // Widened ONLY to include the nearest zone above and below
-    if (nearestAbove && nearestAbove.high > maxPrice) {
-      maxPrice = nearestAbove.high + 1.5;
-    }
-    if (nearestBelow && nearestBelow.low < minPrice) {
-      minPrice = nearestBelow.low - 1.5;
-    }
-
-    // Include active trade boundaries if live
-    if (activeTrade && activeTrade.status === 'ACTIVE') {
-      const tradePrices = [
-        activeTrade.entryPrice,
-        activeTrade.currentStopLoss,
-        activeTrade.tp1.price,
-        activeTrade.tp2.price,
-        activeTrade.tp3.price,
-      ].filter((p) => typeof p === 'number' && p > 0);
-      for (const p of tradePrices) {
-        if (p < minPrice) minPrice = p - 1.0;
-        if (p > maxPrice) maxPrice = p + 1.0;
-      }
-    }
-
-    const priceSpan = Math.max(20.0, maxPrice - minPrice);
-    const yMin = minPrice;
-    const yMax = minPrice + priceSpan;
-
-    const priceToY = (p: number): number => {
-      const ratio = (yMax - p) / (yMax - yMin);
-      return Math.max(12, Math.min(plotHeight - 12, ratio * plotHeight));
-    };
-
-    // 2. Subtle horizontal price grid lines across plot
-    const gridSteps = 6;
-    ctx.strokeStyle = 'rgba(140, 160, 255, 0.06)';
-    ctx.lineWidth = 1;
-    for (let i = 1; i < gridSteps; i++) {
-      const p = yMin + ((yMax - yMin) * i) / gridSteps;
-      const y = Math.round(priceToY(p)) + 0.5;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(plotWidth, y);
-      ctx.stroke();
-
-      ctx.fillStyle = '#8d97b8';
-      ctx.font = '10px "JetBrains Mono", monospace';
-      ctx.textAlign = 'left';
-      ctx.fillText(p.toFixed(1), plotWidth + 6, y + 3.5);
-    }
-
-    // 3. ZONE BANDS: sell side coral (#ff6b7f), buy side mint (#4df0b4), light fill, thin edges
-    // Zones further away are NOT drawn as bands.
-    const drawnZones: BlackstoneEvaluatedZone[] = [];
-    const distantAboveHints: DistantZoneHint[] = [];
-    const distantBelowHints: DistantZoneHint[] = [];
-
-    for (const z of zones) {
-      const inVisibleRange = z.low <= yMax && z.high >= yMin;
-      if (inVisibleRange) {
-        drawnZones.push(z);
-      } else if (z.level > yMax) {
-        const diff = Math.round(z.level - refPrice);
-        const nameText = z.isSarrafCore ? 'Sarraf Core' : z.name;
-        distantAboveHints.push({
-          zone: z,
-          direction: 'ABOVE',
-          distanceDollars: diff,
-          label: `${nameText} ${z.level.toFixed(2)} +$${diff}`,
-        });
-      } else if (z.level < yMin) {
-        const diff = Math.round(refPrice - z.level);
-        const nameText = z.isSarrafCore ? 'Sarraf Core' : z.name;
-        distantBelowHints.push({
-          zone: z,
-          direction: 'BELOW',
-          distanceDollars: diff,
-          label: `${nameText} ${z.level.toFixed(2)} -$${diff}`,
-        });
-      }
-    }
-
-    const hitRects: Array<{ id: BlackstoneZoneId; yTop: number; yBottom: number }> = [];
-
-    // Draw visible zone bands across plot
-    for (const z of drawnZones) {
-      const rawTop = priceToY(z.high);
-      const rawBottom = priceToY(z.low);
-      const yCenter = priceToY(z.level);
-
-      const minBandHeight = 14;
-      const naturalHeight = Math.abs(rawBottom - rawTop);
-      const bandHeight = Math.max(minBandHeight, naturalHeight);
-      const yTop =
-        naturalHeight < minBandHeight
-          ? yCenter - minBandHeight / 2
-          : Math.min(rawTop, rawBottom);
-      const yBottom = yTop + bandHeight;
-
-      hitRects.push({ id: z.id, yTop: yTop - 3, yBottom: yBottom + 3 });
-
-      const isSelected = selectedZoneId === z.id;
-      const isBuy = z.side === 'buy side';
-      const isCore = z.isSarrafCore;
-
-      // Sell side coral (#ff6b7f), Buy side mint (#4df0b4), light fill
-      const fillRgba = isBuy
-        ? isSelected
-          ? 'rgba(77, 240, 180, 0.18)'
-          : 'rgba(77, 240, 180, 0.08)'
-        : isSelected
-          ? 'rgba(255, 107, 127, 0.18)'
-          : 'rgba(255, 107, 127, 0.08)';
-
-      // Thin hairline boundary strokes
-      const strokeColor = isBuy
-        ? isSelected
-          ? '#4df0b4'
-          : 'rgba(77, 240, 180, 0.55)'
-        : isSelected
-          ? '#ff6b7f'
-          : 'rgba(255, 107, 127, 0.55)';
-
-      // Band fill across plot width
-      ctx.fillStyle = fillRgba;
-      ctx.fillRect(0, yTop, plotWidth, bandHeight);
-
-      // Top and bottom thin edges
-      ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = isSelected ? 1.6 : 1;
-      ctx.beginPath();
-      ctx.moveTo(0, yTop);
-      ctx.lineTo(plotWidth, yTop);
-      ctx.moveTo(0, yBottom);
-      ctx.lineTo(plotWidth, yBottom);
-      ctx.stroke();
-
-      // Core accent indicator line on left edge if Sarraf Core
-      if (isCore) {
-        ctx.fillStyle = '#52e3ff';
-        ctx.fillRect(0, yTop, 3.5, bandHeight);
-      }
-    }
-
-    zoneHitRectsRef.current = hitRects;
-
-    // 4. DRAW CANDLES: large and clear
-    const leftPad = 12;
-    const rightPad = 12;
-    const usablePlotW = Math.max(60, plotWidth - leftPad - rightPad);
-    const stepX = usablePlotW / visibleCandles.length;
-    const bodyWidth = Math.max(5.5, Math.min(13, stepX * 0.70));
-
-    const lockMs = new Date(lockTimeIso).getTime();
-    let lockMarkerX: number | null = null;
-
-    for (let i = 0; i < visibleCandles.length; i++) {
-      const c = visibleCandles[i];
-      const barMs = new Date(c.openTime).getTime();
-      const prevMs = i > 0 ? new Date(visibleCandles[i - 1].openTime).getTime() : -Infinity;
-      const cx = leftPad + i * stepX + stepX / 2;
-
-      if (!isNaN(lockMs) && lockMarkerX === null) {
-        if (barMs === lockMs || (prevMs < lockMs && barMs >= lockMs)) {
-          lockMarkerX = cx;
-        }
-      }
-
-      const yHigh = priceToY(c.high);
-      const yLow = priceToY(c.low);
-      const yOpen = priceToY(c.open);
-      const yClose = priceToY(c.close);
-
-      const isBull = c.close >= c.open;
-      const candleColor = isBull ? '#4df0b4' : '#ff6b7f';
-
-      // Wick
-      ctx.strokeStyle = candleColor;
-      ctx.lineWidth = 1.35;
-      ctx.beginPath();
-      ctx.moveTo(cx, yHigh);
-      ctx.lineTo(cx, yLow);
-      ctx.stroke();
-
-      // Body (large and clear)
-      const bodyTop = Math.min(yOpen, yClose);
-      const bodyH = Math.max(2, Math.abs(yClose - yOpen));
-      ctx.fillStyle = candleColor;
-      ctx.fillRect(cx - bodyWidth / 2, bodyTop, bodyWidth, bodyH);
-
-      // Time axis ticks at bottom in Dubai time
-      const tickEvery = Math.max(5, Math.floor(visibleCandles.length / 5));
-      if (i % tickEvery === 0 || i === visibleCandles.length - 1) {
-        ctx.fillStyle = '#8d97b8';
-        ctx.font = '10px "JetBrains Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(formatDubaiTime(c.openTime), cx, plotHeight + 17);
-      }
-    }
-
-    // 04:00 Lock Marker pip at bottom
-    if (lockMarkerX !== null) {
-      ctx.save();
-      ctx.fillStyle = '#52e3ff';
-      ctx.beginPath();
-      ctx.moveTo(lockMarkerX - 3.5, plotHeight);
-      ctx.lineTo(lockMarkerX + 3.5, plotHeight);
-      ctx.lineTo(lockMarkerX, plotHeight - 5);
-      ctx.closePath();
-      ctx.fill();
-
-      const chipW = 64;
-      const chipX = Math.max(4, Math.min(plotWidth - chipW - 4, lockMarkerX - chipW / 2));
-      ctx.fillStyle = 'rgba(82, 227, 255, 0.16)';
-      ctx.fillRect(chipX, plotHeight + 4, chipW, 16);
-      ctx.strokeStyle = 'rgba(82, 227, 255, 0.65)';
-      ctx.lineWidth = 0.8;
-      ctx.strokeRect(chipX, plotHeight + 4, chipW, 16);
-
-      ctx.fillStyle = '#52e3ff';
-      ctx.font = '700 8.5px "Sora", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('04:00 LOCK', chipX + chipW / 2, plotHeight + 15);
-      ctx.restore();
-    }
-
-    // 5. DISTANT ZONE HINTS: Small text hints inside the chart at the top or bottom edge
-    // e.g. "Sarraf Core 4057.04 +$61"
-    const hintRects: Array<{ id: BlackstoneZoneId; x: number; y: number; w: number; h: number }> = [];
-
-    // Top edge distant hints
-    if (distantAboveHints.length > 0) {
-      let hintX = 10;
-      const hintY = 10;
-      const sortedAbove = [...distantAboveHints].sort((a, b) => a.zone.level - b.zone.level);
-
-      for (const hint of sortedAbove.slice(0, 3)) {
-        ctx.font = '600 10px "JetBrains Mono", monospace';
-        const textWidth = ctx.measureText(hint.label).width;
-        const pillW = textWidth + 18;
-        const pillH = 20;
-
-        if (hintX + pillW > plotWidth - 8) break;
-
-        const isCore = hint.zone.isSarrafCore;
-        ctx.fillStyle = 'rgba(18, 22, 34, 0.92)';
-        ctx.fillRect(hintX, hintY, pillW, pillH);
-        ctx.strokeStyle = isCore ? 'rgba(82, 227, 255, 0.65)' : 'rgba(255, 107, 127, 0.55)';
-        ctx.lineWidth = 0.85;
-        ctx.strokeRect(hintX, hintY, pillW, pillH);
-
-        if (isCore) {
-          ctx.fillStyle = '#52e3ff';
-          ctx.beginPath();
-          ctx.arc(hintX + 7, hintY + pillH / 2, 2.5, 0, Math.PI * 2);
-          ctx.fill();
-        }
-
-        ctx.fillStyle = isCore ? '#52e3ff' : '#ff6b7f';
-        ctx.textAlign = 'left';
-        ctx.fillText(hint.label, hintX + (isCore ? 14 : 9), hintY + 14);
-
-        hintRects.push({
-          id: hint.zone.id,
-          x: hintX,
-          y: hintY,
-          w: pillW,
-          h: pillH,
-        });
-
-        hintX += pillW + 8;
-      }
-    }
-
-    // Bottom edge distant hints
-    if (distantBelowHints.length > 0) {
-      let hintX = 10;
-      const hintY = plotHeight - 30;
-      const sortedBelow = [...distantBelowHints].sort((a, b) => b.zone.level - a.zone.level);
-
-      for (const hint of sortedBelow.slice(0, 3)) {
-        ctx.font = '600 10px "JetBrains Mono", monospace';
-        const textWidth = ctx.measureText(hint.label).width;
-        const pillW = textWidth + 18;
-        const pillH = 20;
-
-        if (hintX + pillW > plotWidth - 8) break;
-
-        const isCore = hint.zone.isSarrafCore;
-        ctx.fillStyle = 'rgba(18, 22, 34, 0.92)';
-        ctx.fillRect(hintX, hintY, pillW, pillH);
-        ctx.strokeStyle = isCore ? 'rgba(82, 227, 255, 0.65)' : 'rgba(77, 240, 180, 0.55)';
-        ctx.lineWidth = 0.85;
-        ctx.strokeRect(hintX, hintY, pillW, pillH);
-
-        if (isCore) {
-          ctx.fillStyle = '#52e3ff';
-          ctx.beginPath();
-          ctx.arc(hintX + 7, hintY + pillH / 2, 2.5, 0, Math.PI * 2);
-          ctx.fill();
-        }
-
-        ctx.fillStyle = isCore ? '#52e3ff' : '#4df0b4';
-        ctx.textAlign = 'left';
-        ctx.fillText(hint.label, hintX + (isCore ? 14 : 9), hintY + 14);
-
-        hintRects.push({
-          id: hint.zone.id,
-          x: hintX,
-          y: hintY,
-          w: pillW,
-          h: pillH,
-        });
-
-        hintX += pillW + 8;
-      }
-    }
-
-    hintHitRectsRef.current = hintRects;
-
-    // 6. LIVE PRICE TAG IN ACCENT COLOUR (#52e3ff) WITH DOTTED LINE
-    const yLive = priceToY(refPrice);
-    ctx.save();
-    ctx.strokeStyle = isFeedLive ? 'rgba(82, 227, 255, 0.65)' : 'rgba(141, 151, 184, 0.45)';
-    ctx.lineWidth = 1.1;
-    ctx.setLineDash([2, 3]); // dotted line across plot
-    ctx.beginPath();
-    ctx.moveTo(0, yLive);
-    ctx.lineTo(plotWidth, yLive);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.restore();
-
-    // 7. ACTIVE TRADE LINES (Entry, SL, TP1, TP2, TP3 as dashed lines)
-    if (activeTrade && activeTrade.status === 'ACTIVE') {
-      const drawDashedTradeLine = (price: number, color: string) => {
-        const y = priceToY(price);
-        ctx.save();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.35;
-        ctx.setLineDash([4, 3]); // dashed line
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(plotWidth, y);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.restore();
-      };
-
-      drawDashedTradeLine(activeTrade.entryPrice, '#52e3ff');
-      drawDashedTradeLine(activeTrade.currentStopLoss, '#ff6b7f');
-      drawDashedTradeLine(activeTrade.tp1.price, '#4df0b4');
-      drawDashedTradeLine(activeTrade.tp2.price, '#4df0b4');
-      drawDashedTradeLine(activeTrade.tp3.price, '#52e3ff');
-    }
-
-    // 8. RIGHT GUTTER BADGES WITH NO-OVERLAP COLLISION AVOIDANCE
-    const gutterBadges: GutterBadge[] = [];
-
-    // Live price badge in accent cyan (#52e3ff)
-    gutterBadges.push({
-      id: 'LIVE_PRICE',
-      desiredY: yLive,
-      y: yLive,
-      height: 22,
-      color: '#07090f',
-      bgColor: isFeedLive ? '#52e3ff' : '#1e2436',
-      borderColor: '#52e3ff',
-      render: (c, x, y, w, h) => {
-        c.fillStyle = isFeedLive ? '#52e3ff' : '#1e2436';
-        c.fillRect(x, y, w, h);
-        c.strokeStyle = '#52e3ff';
-        c.lineWidth = 1;
-        c.strokeRect(x, y, w, h);
-
-        c.fillStyle = isFeedLive ? '#07090f' : '#e9edff';
-        c.font = isFeedLive
-          ? '700 11px "JetBrains Mono", monospace'
-          : '600 9.5px "Sora", sans-serif';
-        c.textAlign = 'center';
-        const tagText = isMarketClosed
-          ? 'Market Closed'
-          : !isFeedLive
-            ? 'Feed Stale'
-            : refPrice.toFixed(2);
-        c.fillText(tagText, x + w / 2, y + 15);
+    if (!containerRef.current) return;
+
+    const chartCreator = (window as any).LightweightCharts?.createChart || createChart;
+    const initWidth = containerRef.current.clientWidth || 720;
+    const initHeight = containerRef.current.clientHeight || 420;
+
+    const chart: IChartApi = chartCreator(containerRef.current, {
+      width: initWidth,
+      height: initHeight,
+      layout: {
+        background: { type: ColorType.Solid, color: '#060608' },
+        textColor: '#8e8779',
+        fontFamily: 'JetBrains Mono, monospace',
+        fontSize: 11,
+      },
+      grid: {
+        vertLines: { color: '#111114' },
+        horzLines: { color: '#111114' },
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: {
+          color: '#d9b25a',
+          width: 1,
+          style: LineStyle.Dashed,
+          labelBackgroundColor: '#171510',
+        },
+        horzLine: {
+          color: '#d9b25a',
+          width: 1,
+          style: LineStyle.Dashed,
+          labelBackgroundColor: '#d9b25a',
+        },
+      },
+      rightPriceScale: {
+        borderColor: '#1f1d18',
+        textColor: '#f4efe6',
+        scaleMargins: { top: 0.12, bottom: 0.12 },
+        autoScale: true,
+      },
+      timeScale: {
+        borderColor: '#1f1d18',
+        timeVisible: true,
+        secondsVisible: false,
+        rightOffset: 8,
+        barSpacing: 8,
+        minBarSpacing: 2,
+      },
+      localization: {
+        timeFormatter: (utcTimestamp: number) => {
+          const d = new Date(utcTimestamp * 1000);
+          return new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'UTC',
+            hour: '2-digit',
+            minute: '2-digit',
+            day: '2-digit',
+            month: 'short',
+          }).format(d);
+        },
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: { time: true, price: true },
+        mouseWheel: true,
+        pinch: true,
       },
     });
 
-    // Visible zone badges
-    for (const z of drawnZones) {
-      const isSelected = selectedZoneId === z.id;
-      const isBuy = z.side === 'buy side';
-      const isCore = z.isSarrafCore;
-      const yCenter = priceToY(z.level);
-      const accent = isBuy ? '#4df0b4' : '#ff6b7f';
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: '#3fbf8f',
+      downColor: '#e5584f',
+      borderUpColor: '#3fbf8f',
+      borderDownColor: '#e5584f',
+      wickUpColor: '#3fbf8f',
+      wickDownColor: '#e5584f',
+      priceLineVisible: true,
+      lastValueVisible: true,
+      priceLineColor: '#d9b25a',
+      priceLineWidth: 1,
+      priceLineStyle: LineStyle.Dotted,
+      autoscaleInfoProvider: (original: () => any) => {
+        const res = original();
+        const modeInfo = scaleModeRef.current;
+        const candlesArr = uniqueCandlesRef.current;
+        const fallbackRef =
+          livePriceRef.current && livePriceRef.current > 0
+            ? livePriceRef.current
+            : candlesArr.length > 0
+              ? candlesArr[candlesArr.length - 1].close
+              : null;
 
-      gutterBadges.push({
-        id: z.id,
-        desiredY: yCenter,
-        y: yCenter,
-        height: 28,
-        color: accent,
-        bgColor: isSelected ? 'rgba(26, 32, 48, 0.98)' : 'rgba(18, 22, 34, 0.92)',
-        borderColor: isSelected
-          ? '#52e3ff'
-          : isBuy
-            ? 'rgba(77, 240, 180, 0.55)'
-            : 'rgba(255, 107, 127, 0.55)',
-        render: (c, x, y, w, h) => {
-          c.fillStyle = isSelected ? 'rgba(26, 32, 48, 0.98)' : 'rgba(18, 22, 34, 0.92)';
-          c.fillRect(x, y, w, h);
-          c.strokeStyle = isSelected
-            ? '#52e3ff'
-            : isBuy
-              ? 'rgba(77, 240, 180, 0.55)'
-              : 'rgba(255, 107, 127, 0.55)';
-          c.lineWidth = isSelected ? 1.5 : 0.9;
-          c.strokeRect(x, y, w, h);
+        if (modeInfo.mode === 'focus_zone' && modeInfo.targetZone) {
+          const z = modeInfo.targetZone;
+          const span = Math.max(2.5, z.high - z.low);
+          const pad = Math.max(5.5, span * 2.8);
+          let minVal = z.low - pad;
+          let maxVal = z.high + pad;
+          if (fallbackRef !== null && Math.abs(z.level - fallbackRef) <= 32) {
+            minVal = Math.min(minVal, fallbackRef - 3.5);
+            maxVal = Math.max(maxVal, fallbackRef + 3.5);
+          }
+          return {
+            priceRange: {
+              minValue: minVal,
+              maxValue: maxVal,
+            },
+          };
+        }
 
-          // Line 1: [Grade] Name [Core tag]
-          const isGradeA = z.grade === 'A';
-          c.fillStyle = isGradeA ? '#52e3ff' : 'rgba(140, 160, 255, 0.2)';
-          c.fillRect(x + 4, y + 3.5, 13, 10.5);
-          c.fillStyle = isGradeA ? '#07090f' : '#e9edff';
-          c.font = '700 8px "Sora", sans-serif';
-          c.textAlign = 'center';
-          c.fillText(z.grade, x + 4 + 6.5, y + 11.5);
+        if (!res || !res.priceRange) return res;
 
-          c.fillStyle = isSelected ? '#e9edff' : accent;
-          c.font = '600 9px "Sora", sans-serif';
-          c.textAlign = 'left';
-          const displayName = isCore ? `${z.name} ★` : z.name;
-          c.fillText(displayName, x + 20, y + 12);
+        let minVal = res.priceRange.minValue;
+        let maxVal = res.priceRange.maxValue;
 
-          // Line 2: Price level
-          c.fillStyle = '#e9edff';
-          c.font = '600 10px "JetBrains Mono", monospace';
-          c.textAlign = 'left';
-          c.fillText(z.level.toFixed(2), x + 4, y + 23);
+        if (fallbackRef !== null) {
+          const allZones = zonesRef.current;
+          const nearestAbove = allZones
+            .filter((z) => z.level >= fallbackRef)
+            .sort((a, b) => a.level - b.level)[0];
+          const nearestBelow = allZones
+            .filter((z) => z.level < fallbackRef)
+            .sort((a, b) => b.level - a.level)[0];
 
-          // Status label
-          c.fillStyle = z.touches > 0 ? '#52e3ff' : '#4df0b4';
-          c.font = '600 8px "Sora", sans-serif';
-          c.textAlign = 'right';
-          c.fillText(z.touches > 0 ? 'TESTED' : 'FRESH', x + w - 4, y + 23);
-        },
-      });
-    }
+          if (nearestAbove && nearestAbove.high - fallbackRef <= 28) {
+            maxVal = Math.max(maxVal, nearestAbove.high + 1.8);
+          }
+          if (nearestBelow && fallbackRef - nearestBelow.low <= 28) {
+            minVal = Math.min(minVal, nearestBelow.low - 1.8);
+          }
+        }
 
-    // Active trade badges
-    if (activeTrade && activeTrade.status === 'ACTIVE') {
-      const addTradeBadge = (id: string, price: number, label: string, color: string) => {
-        const y = priceToY(price);
-        gutterBadges.push({
-          id,
-          desiredY: y,
-          y,
-          height: 18,
-          color,
-          bgColor: 'rgba(18, 22, 34, 0.96)',
-          borderColor: color,
-          render: (c, x, yBadge, w, h) => {
-            c.fillStyle = 'rgba(18, 22, 34, 0.96)';
-            c.fillRect(x, yBadge, w, h);
-            c.strokeStyle = color;
-            c.lineWidth = 1;
-            c.strokeRect(x, yBadge, w, h);
-
-            c.fillStyle = color;
-            c.font = '700 8.5px "JetBrains Mono", monospace';
-            c.textAlign = 'center';
-            c.fillText(`${label} ${price.toFixed(1)}`, x + w / 2, yBadge + 12.5);
+        return {
+          ...res,
+          priceRange: {
+            minValue: minVal,
+            maxValue: maxVal,
           },
-        });
-      };
+        };
+      },
+    });
 
-      addTradeBadge('TRADE_ENTRY', activeTrade.entryPrice, `ENTRY (${activeTrade.side})`, '#52e3ff');
-      addTradeBadge(
-        'TRADE_SL',
-        activeTrade.currentStopLoss,
-        activeTrade.beMoved ? 'BE STOP' : 'SL (-1R)',
-        '#ff6b7f'
-      );
-      addTradeBadge('TRADE_TP1', activeTrade.tp1.price, activeTrade.tp1.hit ? 'TP1 HIT' : 'TP1 (+10)', '#4df0b4');
-      addTradeBadge('TRADE_TP2', activeTrade.tp2.price, activeTrade.tp2.hit ? 'TP2 HIT' : 'TP2 (+17)', '#4df0b4');
-      addTradeBadge('TRADE_TP3', activeTrade.tp3.price, activeTrade.tp3.capped ? 'TP3 (CAP)' : 'TP3 (+25)', '#52e3ff');
+    chartRef.current = chart;
+    candleSeriesRef.current = candleSeries;
+
+    if (canvasRef.current) {
+      canvasRef.current.width = initWidth;
+      canvasRef.current.height = initHeight;
     }
 
-    // RESOLVE OVERLAPS: Sort badges by desiredY and enforce minimum spacing
-    gutterBadges.sort((a, b) => a.desiredY - b.desiredY);
-    for (let i = 0; i < gutterBadges.length; i++) {
-      gutterBadges[i].y = gutterBadges[i].desiredY - gutterBadges[i].height / 2;
-    }
-
-    const minGap = 3;
-    // Forward pass
-    for (let i = 1; i < gutterBadges.length; i++) {
-      const prevBottom = gutterBadges[i - 1].y + gutterBadges[i - 1].height;
-      if (gutterBadges[i].y < prevBottom + minGap) {
-        gutterBadges[i].y = prevBottom + minGap;
-      }
-    }
-
-    // Backward pass (ensure within plotHeight bounds)
-    const maxBottom = plotHeight - 4;
-    if (
-      gutterBadges.length > 0 &&
-      gutterBadges[gutterBadges.length - 1].y + gutterBadges[gutterBadges.length - 1].height > maxBottom
-    ) {
-      gutterBadges[gutterBadges.length - 1].y =
-        maxBottom - gutterBadges[gutterBadges.length - 1].height;
-      for (let i = gutterBadges.length - 2; i >= 0; i--) {
-        const nextTop = gutterBadges[i + 1].y;
-        if (gutterBadges[i].y + gutterBadges[i].height > nextTop - minGap) {
-          gutterBadges[i].y = nextTop - minGap - gutterBadges[i].height;
+    const resizeObserver = new ResizeObserver((entries) => {
+      if (!entries || entries.length === 0 || !containerRef.current) return;
+      const { width, height } = entries[0].contentRect;
+      const w = Math.floor(width);
+      const h = Math.floor(height);
+      if (w > 0 && h > 0) {
+        chart.applyOptions({ width: w, height: h });
+        if (canvasRef.current) {
+          canvasRef.current.width = w;
+          canvasRef.current.height = h;
         }
       }
-    }
+    });
 
-    // Top clamp
-    if (gutterBadges.length > 0 && gutterBadges[0].y < 4) {
-      gutterBadges[0].y = 4;
-      for (let i = 1; i < gutterBadges.length; i++) {
-        const prevBottom = gutterBadges[i - 1].y + gutterBadges[i - 1].height;
-        if (gutterBadges[i].y < prevBottom + minGap) {
-          gutterBadges[i].y = prevBottom + minGap;
-        }
-      }
-    }
+    resizeObserver.observe(containerRef.current);
 
-    // Draw non-overlapping gutter badges
-    const badgeX = plotWidth + 4;
-    const badgeW = rightAxisWidth - 8;
-    for (const badge of gutterBadges) {
-      badge.render(ctx, badgeX, badge.y, badgeW, badge.height);
-    }
+    return () => {
+      resizeObserver.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      candleSeriesRef.current = null;
+    };
+  }, []);
 
-    // 9. NEWS PAUSE STRIP ON CHART
-    if (newsPauseNotice) {
-      ctx.save();
-      const stripH = 22;
-      const stripY = 8;
-      ctx.fillStyle = 'rgba(255, 107, 127, 0.92)';
-      ctx.fillRect(8, stripY, plotWidth - 16, stripH);
-      ctx.strokeStyle = '#ff6b7f';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(8, stripY, plotWidth - 16, stripH);
-
-      ctx.fillStyle = '#07090f';
-      ctx.font = '700 10px "Sora", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(`News pause: ${newsPauseNotice}`, plotWidth / 2, stripY + 15);
-      ctx.restore();
-    }
-
-    // Axis boundary divider lines
-    ctx.strokeStyle = 'rgba(140, 160, 255, 0.14)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(plotWidth, 0);
-    ctx.lineTo(plotWidth, totalHeight);
-    ctx.moveTo(0, plotHeight);
-    ctx.lineTo(width, plotHeight);
-    ctx.stroke();
-
-    ctx.restore();
-  }, [
-    liveCandles,
-    zones,
-    selectedZoneId,
-    lockTimeIso,
-    livePrice,
-    isFeedLive,
-    isMarketClosed,
-    activeTrade,
-    newsPauseNotice,
-  ]);
-
+  // 2. Populate candle series when candles or timeframe change
   useEffect(() => {
-    drawChart();
-    const handleResize = () => drawChart();
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [drawChart]);
+    const candleSeries = candleSeriesRef.current;
+    if (!candleSeries || !candles || candles.length === 0) return;
 
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
+    const formatted: CandlePoint[] = [];
+    for (const c of candles) {
+      const timeSec = isoToDubaiChartSec(c.openTime);
+      if (timeSec !== null) {
+        formatted.push({
+          time: timeSec,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        });
+      }
+    }
+
+    formatted.sort((a, b) => a.time - b.time);
+
+    const unique: CandlePoint[] = [];
+    const seen = new Set<number>();
+    for (const item of formatted) {
+      if (!seen.has(item.time)) {
+        seen.add(item.time);
+        unique.push(item);
+      }
+    }
+
+    // Merge current live price into the latest candle if feed is live
+    if (isFeedLive && livePrice && livePrice > 0 && unique.length > 0) {
+      const lastIdx = unique.length - 1;
+      const last = unique[lastIdx];
+      unique[lastIdx] = {
+        ...last,
+        high: Math.max(last.high, livePrice),
+        low: Math.min(last.low, livePrice),
+        close: livePrice,
+      };
+    }
+
+    uniqueCandlesRef.current = unique;
+    candleSeries.setData(unique as any);
+
+    if (initializedTfRef.current !== timeframe) {
+      initializedTfRef.current = timeframe;
+      recenterChart();
+    }
+  }, [candles, timeframe, isFeedLive, livePrice, recenterChart]);
+
+  // 3. Live price tick update on latest bar
+  useEffect(() => {
+    const candleSeries = candleSeriesRef.current;
+    const unique = uniqueCandlesRef.current;
+    if (!candleSeries || !isFeedLive || !livePrice || livePrice <= 0 || unique.length === 0) {
+      return;
+    }
+
+    const lastIdx = unique.length - 1;
+    const last = unique[lastIdx];
+    const updated: CandlePoint = {
+      ...last,
+      high: Math.max(last.high, livePrice),
+      low: Math.min(last.low, livePrice),
+      close: livePrice,
+    };
+    unique[lastIdx] = updated;
+
+    try {
+      candleSeries.update(updated as any);
+    } catch {
+      // ignore transient ordering issue
+    }
+  }, [livePrice, isFeedLive]);
+
+  // 4. Zoom to selected zone when user taps a Level Map row (focusSeq > 0)
+  useEffect(() => {
+    if (!selectedZoneId || focusSeq <= 0) return;
+    const key = `${selectedZoneId}:${focusSeq}`;
+    if (lastFocusKeyRef.current === key) return;
+    lastFocusKeyRef.current = key;
+
+    const target = zones.find((z) => z.id === selectedZoneId);
+    if (target) {
+      zoomToZone(target);
+    }
+  }, [selectedZoneId, focusSeq, zones, zoomToZone]);
+
+  // 5. Active trade price lines on Lightweight Charts
+  useEffect(() => {
+    const candleSeries = candleSeriesRef.current;
+    if (!candleSeries) return;
+
+    for (const line of tradeLinesRef.current) {
+      try {
+        candleSeries.removePriceLine(line);
+      } catch {
+        // ignore
+      }
+    }
+    tradeLinesRef.current = [];
+
+    if (!activeTrade || activeTrade.status !== 'ACTIVE') return;
+
+    try {
+      const created: IPriceLine[] = [];
+
+      created.push(
+        candleSeries.createPriceLine({
+          price: activeTrade.entryPrice,
+          color: '#d9b25a',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `ENTRY ${activeTrade.side}`,
+        })
+      );
+
+      created.push(
+        candleSeries.createPriceLine({
+          price: activeTrade.currentStopLoss,
+          color: activeTrade.beMoved ? '#8e8779' : '#e5584f',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: activeTrade.beMoved ? 'BE' : 'SL',
+        })
+      );
+
+      if (!activeTrade.tp1.hit) {
+        created.push(
+          candleSeries.createPriceLine({
+            price: activeTrade.tp1.price,
+            color: '#3fbf8f',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: 'TP1',
+          })
+        );
+      }
+
+      if (!activeTrade.tp2.hit) {
+        created.push(
+          candleSeries.createPriceLine({
+            price: activeTrade.tp2.price,
+            color: '#3fbf8f',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: 'TP2',
+          })
+        );
+      }
+
+      if (!activeTrade.tp3.hit) {
+        created.push(
+          candleSeries.createPriceLine({
+            price: activeTrade.tp3.price,
+            color: '#d9b25a',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: 'TP3',
+          })
+        );
+      }
+
+      tradeLinesRef.current = created;
+    } catch {
+      // ignore
+    }
+  }, [activeTrade]);
+
+  // 6. Synchronized Overlay Canvas: Zones (move with candles) + 04:00 Lock Marker
+  useEffect(() => {
+    let animId: number;
+
+    const getXForTimeSec = (chart: IChartApi, timeSec: number): number | null => {
+      const directX = chart.timeScale().timeToCoordinate(timeSec as any);
+      if (directX !== null) return directX;
+
+      const candlesList = uniqueCandlesRef.current;
+      if (candlesList.length === 0) return null;
+
+      if (timeSec <= candlesList[0].time) {
+        return chart.timeScale().logicalToCoordinate(0 as any);
+      }
+
+      let idx = candlesList.length - 1;
+      for (let i = 0; i < candlesList.length; i++) {
+        if (candlesList[i].time >= timeSec) {
+          idx = i;
+          break;
+        }
+      }
+      return chart.timeScale().logicalToCoordinate(idx as any);
+    };
+
+    const renderOverlay = () => {
+      const canvas = canvasRef.current;
+      const chart = chartRef.current;
+      const candleSeries = candleSeriesRef.current;
+
+      if (!canvas || !chart || !candleSeries) {
+        animId = requestAnimationFrame(renderOverlay);
+        return;
+      }
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        animId = requestAnimationFrame(renderOverlay);
+        return;
+      }
+
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx.clearRect(0, 0, width, height);
+
+      const candlesList = uniqueCandlesRef.current;
+      if (candlesList.length === 0) {
+        animId = requestAnimationFrame(renderOverlay);
+        return;
+      }
+
+      const plotWidth = chart.timeScale().width() || Math.max(180, width - 64);
+      const plotHeight = Math.max(0, height - 26);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, plotWidth, plotHeight);
+      ctx.clip();
+
+      const lastIdx = candlesList.length - 1;
+      const currentBarX =
+        chart.timeScale().logicalToCoordinate(lastIdx as any) ??
+        getXForTimeSec(chart, candlesList[lastIdx].time);
+      const rightEdgeBarX =
+        chart.timeScale().logicalToCoordinate((lastIdx + 4) as any) ??
+        (currentBarX !== null ? currentBarX + 28 : plotWidth - 8);
+
+      // A. Draw 04:00 Lock Marker vertical line + badge moving with candles
+      const lockSec = isoToDubaiChartSec(lockTimeIsoRef.current);
+      if (lockSec !== null) {
+        const lockX = getXForTimeSec(chart, lockSec);
+        if (lockX !== null && lockX >= 2 && lockX <= plotWidth - 2) {
+          ctx.save();
+          ctx.strokeStyle = 'rgba(217, 178, 90, 0.45)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 4]);
+          ctx.beginPath();
+          ctx.moveTo(lockX, 0);
+          ctx.lineTo(lockX, plotHeight);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          const tagText = '04:00 LOCK';
+          ctx.font = '700 9.5px "JetBrains Mono", monospace';
+          const tw = ctx.measureText(tagText).width;
+          const boxW = tw + 12;
+          const boxH = 17;
+          const boxX = Math.max(4, Math.min(plotWidth - boxW - 4, lockX - boxW / 2));
+          const boxY = plotHeight - boxH - 4;
+
+          ctx.fillStyle = 'rgba(14, 13, 10, 0.94)';
+          ctx.fillRect(boxX, boxY, boxW, boxH);
+          ctx.strokeStyle = 'rgba(217, 178, 90, 0.65)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+          ctx.fillStyle = '#d9b25a';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(tagText, boxX + boxW / 2, boxY + boxH / 2 + 0.5);
+          ctx.restore();
+        }
+      }
+
+      // B. Draw Zones (rectangles that move with candles horizontally & vertically)
+      const hitBoxes: ZoneHitBox[] = [];
+      const aboveOff: BlackstoneEvaluatedZone[] = [];
+      const belowOff: BlackstoneEvaluatedZone[] = [];
+
+      for (const z of zonesRef.current) {
+        const yHigh = candleSeries.priceToCoordinate(z.high);
+        const yLow = candleSeries.priceToCoordinate(z.low);
+        if (yHigh === null || yLow === null) continue;
+
+        const rawTop = Math.min(yHigh, yLow);
+        const rawBottom = Math.max(yHigh, yLow);
+
+        if (rawBottom < 2) {
+          aboveOff.push(z);
+          continue;
+        }
+        if (rawTop > plotHeight - 2) {
+          belowOff.push(z);
+          continue;
+        }
+
+        const startSec =
+          isoToDubaiChartSec(z.baseStartIso || z.formedAtIso) ?? candlesList[0].time;
+        const rawStartX = getXForTimeSec(chart, startSec) ?? 0;
+        const rawEndX = Math.max(rawStartX + 28, rightEdgeBarX);
+
+        if (rawEndX < 0 || rawStartX > plotWidth) continue;
+
+        const rectX = Math.max(2, rawStartX);
+        const rectEndX = Math.min(plotWidth - 2, rawEndX);
+        const rectW = Math.max(16, rectEndX - rectX);
+
+        const minBandH = 14;
+        const naturalH = Math.abs(rawBottom - rawTop);
+        const rectH = Math.max(minBandH, naturalH);
+        const rectY =
+          naturalH < minBandH ? (rawTop + rawBottom) / 2 - minBandH / 2 : rawTop;
+
+        hitBoxes.push({ id: z.id, x: rectX, y: rectY, w: rectW, h: rectH });
+
+        const isSelected = selectedZoneIdRef.current === z.id;
+        const isBuy = z.side === 'buy side';
+        const isCore = Boolean(z.isSarrafCore || z.id === 'SARRAF_CORE');
+
+        // Fill: Sell zone red, Buy zone green
+        ctx.fillStyle = isBuy
+          ? isSelected
+            ? 'rgba(63, 191, 143, 0.19)'
+            : 'rgba(63, 191, 143, 0.09)'
+          : isSelected
+            ? 'rgba(229, 88, 79, 0.19)'
+            : 'rgba(229, 88, 79, 0.09)';
+        ctx.fillRect(rectX, rectY, rectW, rectH);
+
+        // Dotted border rectangle
+        ctx.save();
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = isBuy
+          ? isSelected
+            ? '#3fbf8f'
+            : 'rgba(63, 191, 143, 0.82)'
+          : isSelected
+            ? '#e5584f'
+            : 'rgba(229, 88, 79, 0.82)';
+        ctx.lineWidth = isSelected ? 1.5 : 1;
+        ctx.strokeRect(rectX, rectY, rectW, rectH);
+        ctx.restore();
+
+        // Cyan strip on the left edge for Sarraf Core zone
+        if (isCore) {
+          ctx.fillStyle = '#38bdf8';
+          ctx.fillRect(rectX, rectY, 4, rectH);
+        }
+
+        // Label with Name and Grade
+        const labelText = `${z.name} · ${z.grade}`;
+        ctx.font = '600 10.5px "JetBrains Mono", monospace';
+        const textW = ctx.measureText(labelText).width;
+        const padX = 5;
+        const boxW = textW + padX * 2;
+        const boxH = 16;
+
+        const labelX = Math.min(
+          Math.max(rectX + (isCore ? 8 : 5), 6),
+          Math.max(6, plotWidth - boxW - 6)
+        );
+        const labelY = rectH >= 20 ? rectY + 3 : Math.max(2, rectY - boxH - 2);
+
+        ctx.fillStyle = 'rgba(10, 10, 12, 0.88)';
+        ctx.fillRect(labelX, labelY, boxW, boxH);
+
+        ctx.fillStyle = isCore ? '#38bdf8' : isBuy ? '#3fbf8f' : '#e5584f';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(labelText, labelX + padX, labelY + boxH / 2 + 0.5);
+      }
+
+      // C. Draw active Reference Levels (Day / Camarilla / Profile / ADR) if within visible plot
+      if (referenceLevelsRef.current && referenceLevelsRef.current.length > 0) {
+        const usedLabelYs: number[] = [];
+        for (const refItem of referenceLevelsRef.current) {
+          const yCoord = candleSeries.priceToCoordinate(refItem.price);
+          if (yCoord === null || yCoord < 8 || yCoord > plotHeight - 8) continue;
+
+          const color =
+            refItem.category === 'DAY'
+              ? '#d9b25a'
+              : refItem.category === 'CAMARILLA'
+                ? '#a78bfa'
+                : refItem.category === 'PROFILE'
+                  ? '#38bdf8'
+                  : '#f59e0b';
+
+          ctx.save();
+          ctx.strokeStyle = color;
+          ctx.globalAlpha = 0.48;
+          ctx.lineWidth = 1;
+          ctx.setLineDash([2, 4]);
+          ctx.beginPath();
+          ctx.moveTo(0, yCoord);
+          ctx.lineTo(plotWidth, yCoord);
+          ctx.stroke();
+          ctx.restore();
+
+          // Avoid colliding reference tags vertically
+          if (usedLabelYs.some((uy) => Math.abs(uy - yCoord) < 13)) continue;
+          usedLabelYs.push(yCoord);
+
+          const tag = `${refItem.label} ${refItem.price.toFixed(2)}`;
+          ctx.font = '600 9.5px "JetBrains Mono", monospace';
+          const tw = ctx.measureText(tag).width;
+          const bw = tw + 8;
+          const bh = 14;
+          const bx = Math.max(4, plotWidth - bw - 6);
+          const by = Math.max(2, Math.min(plotHeight - bh - 2, yCoord - bh / 2));
+
+          ctx.fillStyle = 'rgba(8, 8, 10, 0.88)';
+          ctx.fillRect(bx, by, bw, bh);
+          ctx.fillStyle = color;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(tag, bx + 4, by + bh / 2 + 0.5);
+        }
+      }
+
+      zoneHitBoxesRef.current = hitBoxes;
+      ctx.restore();
+
+      const nextSig = `${aboveOff.map((z) => z.id).join(',')}|${belowOff.map((z) => z.id).join(',')}`;
+      if (offscreenSigRef.current !== nextSig) {
+        offscreenSigRef.current = nextSig;
+        setOffscreenAbove(aboveOff.sort((a, b) => a.level - b.level));
+        setOffscreenBelow(belowOff.sort((a, b) => b.level - a.level));
+      }
+
+      animId = requestAnimationFrame(renderOverlay);
+    };
+
+    animId = requestAnimationFrame(renderOverlay);
+    return () => cancelAnimationFrame(animId);
+  }, []);
+
+  const handleOverlayClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    // 1. Check distant zone hints clicked
-    for (const hint of hintHitRectsRef.current) {
-      if (x >= hint.x && x <= hint.x + hint.w && y >= hint.y && y <= hint.y + hint.h) {
-        onSelectZone(hint.id);
-        return;
-      }
-    }
-
-    // 2. Check zone bands / badges clicked
-    for (const hit of zoneHitRectsRef.current) {
-      if (y >= hit.yTop && y <= hit.yBottom) {
-        onSelectZone(hit.id);
+    for (const box of zoneHitBoxesRef.current) {
+      if (x >= box.x && x <= box.x + box.w && y >= box.y - 4 && y <= box.y + box.h + 4) {
+        onSelectZone(box.id);
         return;
       }
     }
@@ -818,34 +816,42 @@ export const BlackstoneZoneChart: React.FC<BlackstoneZoneChartProps> = ({
 
   return (
     <div
-      className="rounded-[18px] p-4 space-y-3 backdrop-blur-md"
+      className="rounded-[12px] p-3.5 sm:p-4 space-y-3"
       style={{
-        backgroundColor: 'rgba(18, 22, 34, 0.72)',
-        border: '1px solid rgba(140, 160, 255, 0.14)',
-        fontFamily: "'Sora', sans-serif",
+        backgroundColor: '#0b0b0e',
+        border: '1px solid #1f1d18',
+        fontFamily: "'DM Sans', sans-serif",
       }}
     >
-      {/* Header + Timeframe Buttons: M5, M15, H1 */}
+      {/* Top Toolbar: Title, Timeframe M5/M15/H1, Re-center */}
       <div
-        className="flex flex-wrap items-center justify-between gap-3 pb-3"
-        style={{ borderBottom: '1px solid rgba(140, 160, 255, 0.14)' }}
+        className="flex flex-wrap items-center justify-between gap-2.5 pb-2.5"
+        style={{ borderBottom: '1px solid #1f1d18' }}
       >
-        <div className="flex flex-wrap items-center gap-2.5">
-          <h2 className="text-xs font-bold uppercase tracking-wider text-[#52e3ff]">
+        <div className="flex items-center gap-2">
+          <h2
+            className="text-xs font-bold uppercase tracking-wider text-[#f4efe6]"
+            style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}
+          >
             ZONES CHART
           </h2>
-          <span className="text-xs text-[#8d97b8]">
-            Real OHLC · Dubai time axis · Live price scale
-          </span>
+          {isMarketClosed && (
+            <span
+              className="text-[11px] text-[#d9b25a]"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              · Market closed
+            </span>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Timeframe Buttons: M5, M15, H1 */}
+          {/* Timeframe Selector: M5 / M15 / H1 */}
           <div
-            className="flex items-center gap-1 rounded-[10px] p-1"
+            className="flex items-center gap-1 rounded-[8px] p-0.5"
             style={{
-              backgroundColor: 'rgba(7, 9, 15, 0.65)',
-              border: '1px solid rgba(140, 160, 255, 0.14)',
+              backgroundColor: '#12110e',
+              border: '1px solid #26231c',
             }}
           >
             {TIMEFRAMES.map((tf) => {
@@ -855,55 +861,140 @@ export const BlackstoneZoneChart: React.FC<BlackstoneZoneChartProps> = ({
                   key={tf}
                   type="button"
                   onClick={() => onChangeTimeframe(tf)}
-                  className={`px-3 py-1 rounded-[7px] text-xs font-semibold transition-all cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-[6px] text-xs font-semibold transition-colors cursor-pointer ${
                     active
-                      ? 'bg-[#52e3ff] text-[#07090f] font-bold shadow-[0_0_12px_rgba(82,227,255,0.35)]'
-                      : 'text-[#8d97b8] hover:text-[#e9edff]'
+                      ? 'bg-[#d9b25a] text-[#090806] font-bold'
+                      : 'text-[#8e8779] hover:text-[#f4efe6]'
                   }`}
+                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
                 >
                   {tf}
                 </button>
               );
             })}
           </div>
+
+          {/* Re-center Button */}
+          <button
+            type="button"
+            onClick={recenterChart}
+            className="px-2.5 py-1 rounded-[8px] text-xs font-semibold text-[#f4efe6] hover:text-[#f2d78f] transition-colors cursor-pointer"
+            style={{
+              backgroundColor: '#12110e',
+              border: '1px solid #26231c',
+              fontFamily: "'JetBrains Mono', monospace",
+            }}
+          >
+            Re-center
+          </button>
         </div>
       </div>
 
-      {/* Tall Canvas Chart */}
+      {/* News Pause Strip if active */}
+      {newsPauseNotice && (
+        <div
+          className="rounded-[8px] px-3 py-1.5 text-xs font-semibold flex items-center justify-between gap-2"
+          style={{
+            backgroundColor: 'rgba(229, 88, 79, 0.12)',
+            border: '1px solid rgba(229, 88, 79, 0.4)',
+            color: '#e5584f',
+          }}
+        >
+          <span>News pause: {newsPauseNotice}</span>
+        </div>
+      )}
+
+      {/* Lightweight Charts Container + Synchronized Zone/Lock Canvas Overlay */}
       <div
-        ref={containerRef}
-        className="w-full overflow-hidden rounded-[12px]"
+        onClick={handleOverlayClick}
+        className="relative w-full h-[380px] sm:h-[440px] rounded-[10px] overflow-hidden select-none"
         style={{
-          backgroundColor: '#07090f',
-          border: '1px solid rgba(140, 160, 255, 0.14)',
+          backgroundColor: '#060608',
+          border: '1px solid #1f1d18',
         }}
       >
+        <div ref={containerRef} className="w-full h-full" />
         <canvas
           ref={canvasRef}
-          onClick={handleCanvasClick}
-          className="w-full h-[528px] block cursor-pointer"
+          className="pointer-events-none absolute inset-0 w-full h-full z-10"
         />
+
+        {/* Offscreen Above Zone Chip */}
+        {offscreenAbove.length > 0 && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              const target = offscreenAbove[0];
+              onSelectZone(target.id);
+              zoomToZone(target);
+            }}
+            className="absolute top-2 left-2 z-20 px-2.5 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1.5 cursor-pointer transition-colors"
+            style={{
+              backgroundColor: 'rgba(12, 11, 9, 0.92)',
+              border: '1px solid rgba(229, 88, 79, 0.45)',
+              color: '#f4efe6',
+              fontFamily: "'JetBrains Mono', monospace",
+            }}
+          >
+            <span className="text-[#e5584f]">▲</span>
+            <span>
+              {offscreenAbove[0].name} · {offscreenAbove[0].grade} (
+              {offscreenAbove[0].level.toFixed(2)})
+            </span>
+          </button>
+        )}
+
+        {/* Offscreen Below Zone Chip */}
+        {offscreenBelow.length > 0 && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              const target = offscreenBelow[0];
+              onSelectZone(target.id);
+              zoomToZone(target);
+            }}
+            className="absolute bottom-8 left-2 z-20 px-2.5 py-1 rounded-[6px] text-[11px] font-medium flex items-center gap-1.5 cursor-pointer transition-colors"
+            style={{
+              backgroundColor: 'rgba(12, 11, 9, 0.92)',
+              border: '1px solid rgba(63, 191, 143, 0.45)',
+              color: '#f4efe6',
+              fontFamily: "'JetBrains Mono', monospace",
+            }}
+          >
+            <span className="text-[#3fbf8f]">▼</span>
+            <span>
+              {offscreenBelow[0].name} · {offscreenBelow[0].grade} (
+              {offscreenBelow[0].level.toFixed(2)})
+            </span>
+          </button>
+        )}
       </div>
 
-      {/* Legend */}
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#8d97b8] pt-0.5">
-        <div className="flex flex-wrap items-center gap-4">
+      {/* Compact Legend */}
+      <div
+        className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#8e8779] pt-0.5"
+        style={{ fontFamily: "'JetBrains Mono', monospace" }}
+      >
+        <div className="flex flex-wrap items-center gap-3.5">
           <span className="inline-flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-[3px] bg-[#ff6b7f] inline-block" />
-            <span>Sell side</span>
+            <span className="w-2.5 h-2.5 rounded-[2px] bg-[#e5584f] inline-block" />
+            <span>Sell zone</span>
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-[3px] bg-[#4df0b4] inline-block" />
-            <span>Buy side</span>
+            <span className="w-2.5 h-2.5 rounded-[2px] bg-[#3fbf8f] inline-block" />
+            <span>Buy zone</span>
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-[3px] bg-[#52e3ff] inline-block" />
-            <span>Sarraf Core / Live</span>
+            <span className="w-1 h-3 bg-[#38bdf8] inline-block" />
+            <span>Sarraf Core</span>
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="w-2.5 h-[2px] bg-[#d9b25a] inline-block" />
+            <span>Live / 04:00 Lock</span>
           </span>
         </div>
-        <span className="text-[11px] text-[#8d97b8]">
-          Tap a zone band or hint to highlight
-        </span>
       </div>
     </div>
   );

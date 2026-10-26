@@ -171,6 +171,53 @@ export interface BlackstoneDayState {
   dayBudgetDisplay: string;
 }
 
+export interface BlackstoneCamarillaLevels {
+  h3: number | null;
+  l3: number | null;
+  h4: number | null;
+  l4: number | null;
+}
+
+export interface BlackstoneProfileLevels {
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+  totalCandles: number;
+}
+
+export interface BlackstoneLockedLevels {
+  pdh: number | null;
+  pdl: number | null;
+  prevClose: number | null;
+  todayOpen: number | null;
+  camarilla: BlackstoneCamarillaLevels;
+  profile: BlackstoneProfileLevels;
+  adr4: number | null;
+  adrDaysUsed: number;
+}
+
+export interface BlackstoneAdrLiveState {
+  adr4: number | null;
+  adrDaysUsed: number;
+  todayHigh: number | null;
+  todayLow: number | null;
+  todayRangeSoFar: number | null;
+  adrUsedPct: number | null;
+  adrHighProjection: number | null;
+  adrLowProjection: number | null;
+}
+
+export type BlackstoneRefCategory = 'DAY' | 'CAMARILLA' | 'PROFILE' | 'ADR';
+
+export interface BlackstoneReferenceLevelItem {
+  key: string;
+  label: string;
+  category: BlackstoneRefCategory;
+  price: number;
+  distanceDollars: number | null;
+  distanceFormatted: string;
+}
+
 export interface BlackstoneDailyLockRecord {
   engineVersion: 4;
   sessionDate: string; // YYYY-MM-DD in Dubai session calendar
@@ -184,6 +231,7 @@ export interface BlackstoneDailyLockRecord {
   historyStatus: 'READY' | 'Building history';
   openingGap: BlackstoneOpeningGap;
   openingRange: BlackstoneOpeningRange;
+  lockedLevels?: BlackstoneLockedLevels;
   dayState: BlackstoneDayState;
   zones: BlackstoneLockedZoneBase[];
   grade: Record<string, BlackstoneZoneGrade>;
@@ -218,6 +266,9 @@ export interface BlackstoneStatePayload {
   dubaiClock: string;
   openingGap: BlackstoneOpeningGap;
   openingRange: BlackstoneOpeningRange;
+  lockedLevels: BlackstoneLockedLevels;
+  adrState: BlackstoneAdrLiveState;
+  referenceLevels: BlackstoneReferenceLevelItem[];
   dayState: BlackstoneDayState;
   zones: BlackstoneEvaluatedZone[];
   visibleZones: BlackstoneEvaluatedZone[];
@@ -497,10 +548,152 @@ interface ConfluenceReference {
 }
 
 /**
- * Compute confluence reference points for scoring (+5 each within $3 of zone, max 15):
- * - Prior day high (PDH) and prior day low (PDL)
- * - Today's open (02:00 Dubai) and opening range edges (OR High, OR Low)
- * - Asia High / Low (02:00–11:00 Dubai) and London High / Low (11:00–17:00 Dubai) when available
+ * Compute prior day's Time-at-Price (TPO) profile:
+ * Since spot gold has no centralized exchange volume, count how many candles traded at each $0.50 price bucket.
+ * Returns POC (Point of Control) and 70% Value Area (VAH / VAL).
+ */
+function computeTimeAtPriceProfile(candles: Candle[]): BlackstoneProfileLevels {
+  if (!candles || candles.length === 0) {
+    return { poc: null, vah: null, val: null, totalCandles: 0 };
+  }
+
+  const bucketStep = 0.5;
+  const countsMap = new Map<number, number>();
+  let minPrice = Infinity;
+  let maxPrice = -Infinity;
+
+  for (const bar of candles) {
+    if (!Number.isFinite(bar.low) || !Number.isFinite(bar.high)) continue;
+    const low = Math.min(bar.low, bar.high);
+    const high = Math.max(bar.low, bar.high);
+    if (low < minPrice) minPrice = low;
+    if (high > maxPrice) maxPrice = high;
+
+    const startBucket = Math.floor(low / bucketStep) * bucketStep;
+    const endBucket = Math.ceil(high / bucketStep) * bucketStep;
+    const maxSteps = 400; // safety guard against corrupt spikes
+    let steps = 0;
+    for (let p = startBucket; p <= endBucket + 1e-6 && steps < maxSteps; p += bucketStep, steps++) {
+      const key = round2(p);
+      countsMap.set(key, (countsMap.get(key) || 0) + 1);
+    }
+  }
+
+  if (countsMap.size === 0) {
+    return { poc: null, vah: null, val: null, totalCandles: candles.length };
+  }
+
+  const buckets = Array.from(countsMap.entries())
+    .map(([price, count]) => ({ price, count }))
+    .sort((a, b) => a.price - b.price);
+
+  const midPrice = (minPrice + maxPrice) / 2;
+  let pocIdx = 0;
+  let bestCount = -1;
+  for (let i = 0; i < buckets.length; i++) {
+    const b = buckets[i];
+    if (
+      b.count > bestCount ||
+      (b.count === bestCount && Math.abs(b.price - midPrice) < Math.abs(buckets[pocIdx].price - midPrice))
+    ) {
+      bestCount = b.count;
+      pocIdx = i;
+    }
+  }
+
+  const totalTpoCount = buckets.reduce((acc, b) => acc + b.count, 0);
+  const targetVaCount = totalTpoCount * 0.7;
+
+  let lowIdx = pocIdx;
+  let highIdx = pocIdx;
+  let currentVaCount = buckets[pocIdx].count;
+
+  while (currentVaCount < targetVaCount && (lowIdx > 0 || highIdx < buckets.length - 1)) {
+    const nextDownCount = lowIdx > 0 ? buckets[lowIdx - 1].count : -1;
+    const nextUpCount = highIdx < buckets.length - 1 ? buckets[highIdx + 1].count : -1;
+
+    if (nextUpCount >= nextDownCount && highIdx < buckets.length - 1) {
+      highIdx++;
+      currentVaCount += buckets[highIdx].count;
+    } else if (lowIdx > 0) {
+      lowIdx--;
+      currentVaCount += buckets[lowIdx].count;
+    } else if (highIdx < buckets.length - 1) {
+      highIdx++;
+      currentVaCount += buckets[highIdx].count;
+    } else {
+      break;
+    }
+  }
+
+  return {
+    poc: round2(buckets[pocIdx].price),
+    vah: round2(buckets[highIdx].price),
+    val: round2(buckets[lowIdx].price),
+    totalCandles: candles.length,
+  };
+}
+
+/**
+ * Compute 4-day Average Daily Range (ADR) from the last 4 completed trading days prior to openTimeMs.
+ * Handles edge cases when fewer than 4 prior days exist in stored candles.
+ */
+function computePrior4DayAdr(
+  openTimeMs: number,
+  m5All: Candle[],
+  h1All: Candle[],
+  fallbackRange: number | null
+): { adr4: number | null; adrDaysUsed: number } {
+  const dayRangesMap = new Map<string, { high: number; low: number; count: number }>();
+  const combinedPrior = [...h1All, ...m5All].filter((c) => {
+    const t = new Date(c.openTime).getTime();
+    return !isNaN(t) && t < openTimeMs;
+  });
+
+  for (const bar of combinedPrior) {
+    const t = new Date(bar.openTime).getTime();
+    const sessionDayObj = new Date(t + 2 * 60 * 60 * 1000);
+    const dow = sessionDayObj.getUTCDay();
+    if (dow === 0 || dow === 6) continue;
+    const dayKey = sessionDayObj.toISOString().slice(0, 10);
+    const existing = dayRangesMap.get(dayKey);
+    if (!existing) {
+      dayRangesMap.set(dayKey, { high: bar.high, low: bar.low, count: 1 });
+    } else {
+      if (bar.high > existing.high) existing.high = bar.high;
+      if (bar.low < existing.low) existing.low = bar.low;
+      existing.count += 1;
+    }
+  }
+
+  const completedDays = Array.from(dayRangesMap.entries())
+    .map(([date, d]) => ({
+      date,
+      range: round2(d.high - d.low),
+      count: d.count,
+    }))
+    .filter((d) => d.range > 0.5)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const last4 = completedDays.slice(-4);
+  if (last4.length > 0) {
+    const avg = round2(last4.reduce((sum, d) => sum + d.range, 0) / last4.length);
+    return { adr4: avg, adrDaysUsed: last4.length };
+  }
+
+  if (fallbackRange !== null && fallbackRange > 0) {
+    return { adr4: round2(fallbackRange), adrDaysUsed: 1 };
+  }
+
+  return { adr4: null, adrDaysUsed: 0 };
+}
+
+/**
+ * Compute confluence reference points and locked daily levels at 04:00 Dubai:
+ * - Prior day high (PDH), prior day low (PDL), today's Open (02:00 Dubai)
+ * - Camarilla H3, L3, H4, L4 from prior day H, L, C
+ * - Prior day Time-at-Price Profile: POC, VAH, VAL (70% Value Area)
+ * - 4-day ADR (average range of previous 4 completed trading days)
  */
 function computeSessionReferences(
   timing: ReturnType<typeof getDubaiSessionTiming>,
@@ -509,10 +702,14 @@ function computeSessionReferences(
   prevClose: number | null;
   openingGap: BlackstoneOpeningGap;
   openingRange: BlackstoneOpeningRange;
+  lockedLevels: BlackstoneLockedLevels;
   confluenceRefs: ConfluenceReference[];
 } {
   const store = getCandleStore();
   const m5All = [...(store.M5 || [])].sort(
+    (a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime()
+  );
+  const m15All = [...(store.M15 || [])].sort(
     (a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime()
   );
   const h1All = [...(store.H1 || [])].sort(
@@ -521,10 +718,15 @@ function computeSessionReferences(
 
   // Prior trading day (02:00 to 02:00 Dubai)
   let prevDayBars: Candle[] = [];
-  for (let daysBack = 1; daysBack <= 4; daysBack++) {
+  let prevDayProfileSourceBars: Candle[] = [];
+  for (let daysBack = 1; daysBack <= 5; daysBack++) {
     const endMs = timing.openTimeMs - (daysBack - 1) * 24 * 60 * 60 * 1000;
     const startMs = endMs - 24 * 60 * 60 * 1000;
     const m5Bars = m5All.filter((c) => {
+      const t = new Date(c.openTime).getTime();
+      return t >= startMs && t < endMs;
+    });
+    const m15Bars = m15All.filter((c) => {
       const t = new Date(c.openTime).getTime();
       return t >= startMs && t < endMs;
     });
@@ -532,9 +734,13 @@ function computeSessionReferences(
       const t = new Date(c.openTime).getTime();
       return t >= startMs && t < endMs;
     });
-    const combined = m5Bars.length > 0 ? m5Bars : h1Bars;
+    const combined = m5Bars.length > 0 ? m5Bars : m15Bars.length > 0 ? m15Bars : h1Bars;
     if (combined.length > 0) {
-      prevDayBars = [...h1Bars, ...m5Bars];
+      prevDayBars = [...h1Bars, ...m15Bars, ...m5Bars].sort(
+        (a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime()
+      );
+      prevDayProfileSourceBars =
+        m5Bars.length >= 6 ? m5Bars : m15Bars.length >= 4 ? m15Bars : h1Bars;
       break;
     }
   }
@@ -548,11 +754,36 @@ function computeSessionReferences(
       ? round2(prevDayBars[prevDayBars.length - 1].close)
       : null;
 
-  // Opening range (02:00 to 04:00 Dubai)
+  // Camarilla levels from prior day H, L, C
+  const camarilla: BlackstoneCamarillaLevels = {
+    h3: null,
+    l3: null,
+    h4: null,
+    l4: null,
+  };
+  if (pdh !== null && pdl !== null && prevClose !== null && pdh >= pdl) {
+    const range = pdh - pdl;
+    camarilla.h3 = round2(prevClose + (range * 1.1) / 4);
+    camarilla.l3 = round2(prevClose - (range * 1.1) / 4);
+    camarilla.h4 = round2(prevClose + (range * 1.1) / 2);
+    camarilla.l4 = round2(prevClose - (range * 1.1) / 2);
+  }
+
+  // Time-at-Price Profile (POC, VAH, VAL) for prior day
+  const profile = computeTimeAtPriceProfile(prevDayProfileSourceBars);
+
+  // Opening range (02:00 to 04:00 Dubai) + fallback if early in the session with few candles
   const openingWindowCandles = m5All.filter((c) => {
     const t = new Date(c.openTime).getTime();
     return t >= timing.openTimeMs && t < timing.lockTimeMs;
   });
+
+  const todayAnyCandles = [...m5All, ...m15All, ...h1All]
+    .filter((c) => {
+      const t = new Date(c.openTime).getTime();
+      return t >= timing.openTimeMs && t <= upToMs;
+    })
+    .sort((a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime());
 
   const sourceOrCandles =
     openingWindowCandles.length > 0
@@ -579,11 +810,15 @@ function computeSessionReferences(
     candlesCount: 0,
   };
 
-  if (sourceOrCandles.length > 0) {
-    const openPrice = round2(sourceOrCandles[0].open);
-    const closePrice = round2(sourceOrCandles[sourceOrCandles.length - 1].close);
-    const rangeHigh = round2(Math.max(...sourceOrCandles.map((c) => c.high)));
-    const rangeLow = round2(Math.min(...sourceOrCandles.map((c) => c.low)));
+  const sessionCandlesForOpen =
+    sourceOrCandles.length > 0 ? sourceOrCandles : todayAnyCandles;
+
+  if (sessionCandlesForOpen.length > 0) {
+    const openPrice = round2(sessionCandlesForOpen[0].open);
+    const orList = sourceOrCandles.length > 0 ? sourceOrCandles : sessionCandlesForOpen;
+    const closePrice = round2(orList[orList.length - 1].close);
+    const rangeHigh = round2(Math.max(...orList.map((c) => c.high)));
+    const rangeLow = round2(Math.min(...orList.map((c) => c.low)));
     const rangeWidth = round2(rangeHigh - rangeLow);
 
     const gapDollars = prevClose !== null ? round2(openPrice - prevClose) : null;
@@ -618,12 +853,39 @@ function computeSessionReferences(
     };
   }
 
+  const todayOpen = openingRange.openPrice ?? prevClose;
+  const fallbackPrevRange = pdh !== null && pdl !== null && pdh > pdl ? pdh - pdl : null;
+  const { adr4, adrDaysUsed } = computePrior4DayAdr(
+    timing.openTimeMs,
+    m5All,
+    h1All,
+    fallbackPrevRange
+  );
+
+  const lockedLevels: BlackstoneLockedLevels = {
+    pdh,
+    pdl,
+    prevClose,
+    todayOpen,
+    camarilla,
+    profile,
+    adr4,
+    adrDaysUsed,
+  };
+
   const confluenceRefs: ConfluenceReference[] = [];
   if (pdh !== null) confluenceRefs.push({ label: 'PDH', price: pdh });
   if (pdl !== null) confluenceRefs.push({ label: 'PDL', price: pdl });
-  if (openingRange.openPrice !== null) {
-    confluenceRefs.push({ label: 'Today Open', price: openingRange.openPrice });
+  if (todayOpen !== null) {
+    confluenceRefs.push({ label: 'Today Open', price: todayOpen });
   }
+  if (camarilla.h3 !== null) confluenceRefs.push({ label: 'Cam H3', price: camarilla.h3 });
+  if (camarilla.l3 !== null) confluenceRefs.push({ label: 'Cam L3', price: camarilla.l3 });
+  if (camarilla.h4 !== null) confluenceRefs.push({ label: 'Cam H4', price: camarilla.h4 });
+  if (camarilla.l4 !== null) confluenceRefs.push({ label: 'Cam L4', price: camarilla.l4 });
+  if (profile.poc !== null) confluenceRefs.push({ label: 'POC', price: profile.poc });
+  if (profile.vah !== null) confluenceRefs.push({ label: 'VAH', price: profile.vah });
+  if (profile.val !== null) confluenceRefs.push({ label: 'VAL', price: profile.val });
   if (openingRange.high !== null) {
     confluenceRefs.push({ label: 'OR High', price: openingRange.high });
   }
@@ -667,7 +929,140 @@ function computeSessionReferences(
     }
   }
 
-  return { prevClose, openingGap, openingRange, confluenceRefs };
+  return { prevClose, openingGap, openingRange, lockedLevels, confluenceRefs };
+}
+
+/**
+ * Helper to compute confluence sources & bonus score:
+ * +4 per locked reference level or $50 round number within $3 of the zone (maximum +12).
+ */
+function computeZoneConfluenceBonus(
+  low: number,
+  high: number,
+  confluenceRefs: ConfluenceReference[]
+): { matchedSources: string[]; confScore: number } {
+  const matchedSources: string[] = [];
+  const seenLabels = new Set<string>();
+
+  for (const ref of confluenceRefs) {
+    if (
+      ref.price >= low - CONFLUENCE_RADIUS_DOLLARS &&
+      ref.price <= high + CONFLUENCE_RADIUS_DOLLARS
+    ) {
+      if (!seenLabels.has(ref.label)) {
+        seenLabels.add(ref.label);
+        matchedSources.push(`${ref.label} (${ref.price.toFixed(2)})`);
+      }
+    }
+  }
+
+  // Check $50 round numbers within $3 of [low, high]
+  const minRound = Math.floor((low - CONFLUENCE_RADIUS_DOLLARS) / 50) * 50;
+  const maxRound = Math.ceil((high + CONFLUENCE_RADIUS_DOLLARS) / 50) * 50;
+  for (let r = minRound; r <= maxRound; r += 50) {
+    if (r > 0 && r >= low - CONFLUENCE_RADIUS_DOLLARS && r <= high + CONFLUENCE_RADIUS_DOLLARS) {
+      const label = `Round $50 (${r.toFixed(0)})`;
+      if (!seenLabels.has(label)) {
+        seenLabels.add(label);
+        matchedSources.push(label);
+      }
+    }
+  }
+
+  const confScore = Math.min(12, matchedSources.length * 4);
+  return { matchedSources, confScore };
+}
+
+/**
+ * Compute live ADR projection (up/down) and ADR used % against the locked 4-day ADR.
+ */
+function computeLiveAdrState(
+  lockedLevels: BlackstoneLockedLevels,
+  dayState: BlackstoneDayState,
+  livePrice: number | null
+): BlackstoneAdrLiveState {
+  const adr4 = lockedLevels.adr4 ?? dayState.adr20 ?? null;
+  const anchorPrice = livePrice ?? lockedLevels.todayOpen ?? lockedLevels.prevClose ?? null;
+  const todayHigh = dayState.todayHigh ?? anchorPrice;
+  const todayLow = dayState.todayLow ?? anchorPrice;
+  const todayRangeSoFar =
+    dayState.todayRangeSoFar !== null
+      ? dayState.todayRangeSoFar
+      : todayHigh !== null && todayLow !== null
+        ? round2(Math.max(0, todayHigh - todayLow))
+        : 0;
+
+  const adrUsedPct =
+    adr4 !== null && adr4 > 0 && todayRangeSoFar !== null
+      ? round2((todayRangeSoFar / adr4) * 100)
+      : null;
+
+  // Live ADR High/Low projections from session low/high (or todayOpen when session range is minimal)
+  const baseForHigh = todayLow ?? lockedLevels.todayOpen ?? anchorPrice;
+  const baseForLow = todayHigh ?? lockedLevels.todayOpen ?? anchorPrice;
+
+  const adrHighProjection =
+    adr4 !== null && baseForHigh !== null ? round2(baseForHigh + adr4) : null;
+  const adrLowProjection =
+    adr4 !== null && baseForLow !== null ? round2(baseForLow - adr4) : null;
+
+  return {
+    adr4,
+    adrDaysUsed: lockedLevels.adrDaysUsed || 0,
+    todayHigh,
+    todayLow,
+    todayRangeSoFar,
+    adrUsedPct,
+    adrHighProjection,
+    adrLowProjection,
+  };
+}
+
+/**
+ * Build flat list of Reference Levels for UI chips (Day, Camarilla, Profile, ADR).
+ */
+function buildReferenceLevelsList(
+  lockedLevels: BlackstoneLockedLevels,
+  adrState: BlackstoneAdrLiveState,
+  livePrice: number | null
+): BlackstoneReferenceLevelItem[] {
+  const rawItems: Array<{ key: string; label: string; category: BlackstoneRefCategory; price: number | null }> = [
+    { key: 'PDH', label: 'PDH', category: 'DAY', price: lockedLevels.pdh },
+    { key: 'PDL', label: 'PDL', category: 'DAY', price: lockedLevels.pdl },
+    { key: 'OPEN', label: 'Open', category: 'DAY', price: lockedLevels.todayOpen },
+    { key: 'H4', label: 'H4', category: 'CAMARILLA', price: lockedLevels.camarilla.h4 },
+    { key: 'H3', label: 'H3', category: 'CAMARILLA', price: lockedLevels.camarilla.h3 },
+    { key: 'L3', label: 'L3', category: 'CAMARILLA', price: lockedLevels.camarilla.l3 },
+    { key: 'L4', label: 'L4', category: 'CAMARILLA', price: lockedLevels.camarilla.l4 },
+    { key: 'VAH', label: 'VAH', category: 'PROFILE', price: lockedLevels.profile.vah },
+    { key: 'POC', label: 'POC', category: 'PROFILE', price: lockedLevels.profile.poc },
+    { key: 'VAL', label: 'VAL', category: 'PROFILE', price: lockedLevels.profile.val },
+    { key: 'ADR_HIGH', label: 'ADR High', category: 'ADR', price: adrState.adrHighProjection },
+    { key: 'ADR_LOW', label: 'ADR Low', category: 'ADR', price: adrState.adrLowProjection },
+  ];
+
+  const list: BlackstoneReferenceLevelItem[] = [];
+  for (const item of rawItems) {
+    if (item.price === null || !Number.isFinite(item.price)) continue;
+    const dist = livePrice !== null && livePrice > 0 ? round2(item.price - livePrice) : null;
+    const distanceFormatted =
+      dist === null
+        ? '—'
+        : dist > 0
+          ? `+$${dist.toFixed(2)}`
+          : dist < 0
+            ? `-$${Math.abs(dist).toFixed(2)}`
+            : '$0.00';
+    list.push({
+      key: item.key,
+      label: item.label,
+      category: item.category,
+      price: round2(item.price),
+      distanceDollars: dist,
+      distanceFormatted,
+    });
+  }
+  return list;
 }
 
 /**
@@ -1050,16 +1445,11 @@ function scanAndScoreReactionZones(
         Math.max(3, Math.min(15, ((8 - z.baseWidthDollars) / 5) * 12 + 3))
       );
       const freshScore = touches === 0 ? 25 : 10;
-      const matchedSources: string[] = [];
-      for (const ref of confluenceRefs) {
-        if (
-          ref.price >= z.low - CONFLUENCE_RADIUS_DOLLARS &&
-          ref.price <= z.high + CONFLUENCE_RADIUS_DOLLARS
-        ) {
-          matchedSources.push(`${ref.label} (${ref.price.toFixed(2)})`);
-        }
-      }
-      const confScore = Math.min(15, matchedSources.length * 5);
+      const { matchedSources, confScore } = computeZoneConfluenceBonus(
+        z.low,
+        z.high,
+        confluenceRefs
+      );
       const totalScore = Math.min(100, depScore + tightScore + freshScore + confScore + 10);
 
       if (totalScore >= 50 && touches <= 2) {
@@ -1115,17 +1505,12 @@ function scanAndScoreReactionZones(
     // 3. Freshness: 25 if untouched (0 touches) or 10 with 1 touch
     const freshScore = z.touches === 0 ? 25 : 10;
 
-    // 4. Confluence up to 15 (+5 for each of PDH/PDL, Asia/London H/L, Today Open/OR edge within $3)
-    const matchedSources: string[] = [];
-    for (const ref of confluenceRefs) {
-      if (
-        ref.price >= z.low - CONFLUENCE_RADIUS_DOLLARS &&
-        ref.price <= z.high + CONFLUENCE_RADIUS_DOLLARS
-      ) {
-        matchedSources.push(`${ref.label} (${ref.price.toFixed(2)})`);
-      }
-    }
-    const confScore = Math.min(15, matchedSources.length * 5);
+    // 4. Confluence up to 12 (+4 for each locked level or $50 round number within $3)
+    const { matchedSources, confScore } = computeZoneConfluenceBonus(
+      z.low,
+      z.high,
+      confluenceRefs
+    );
 
     // 5. Room to the next opposing zone of $17 or more: 10
     const opposing = surviving.filter((o) => o.side !== z.side);
@@ -1844,10 +2229,8 @@ export function getBlackstoneState(
   const historyStatus: 'READY' | 'Building history' =
     h1TradingDaysCount >= 30 ? 'READY' : 'Building history';
 
-  const { openingGap, openingRange, confluenceRefs } = computeSessionReferences(
-    timing,
-    nowMs
-  );
+  const { openingGap, openingRange, lockedLevels: computedLockedLevels, confluenceRefs } =
+    computeSessionReferences(timing, nowMs);
   const liveDayState = computeBlackstoneDayState(timing.openTimeMs, openingRange.width);
 
   const store = getCandleStore();
@@ -1879,8 +2262,13 @@ export function getBlackstoneState(
       effectiveReferencePrice
     );
 
+    // Ensure lockedLevels are persisted once at lock time and never change during the day
+    const persistedLockedLevels = todayLock.lockedLevels || computedLockedLevels;
+    const needsLockedLevelsBackfill = !todayLock.lockedLevels;
+
     if (
       changed ||
+      needsLockedLevelsBackfill ||
       todayLock.h1TradingDaysCount !== h1TradingDaysCount ||
       todayLock.dayState?.todayRangeSoFar !== liveDayState.todayRangeSoFar
     ) {
@@ -1900,6 +2288,7 @@ export function getBlackstoneState(
         ...todayLock,
         h1TradingDaysCount,
         historyStatus,
+        lockedLevels: persistedLockedLevels,
         dayState: liveDayState,
         zones: updatedZones,
         grade: gradeMap,
@@ -1924,7 +2313,15 @@ export function getBlackstoneState(
 
     const formattedZones = formatZonesForDisplay(todayLock.zones, livePrice, isAdmin);
     const formattedRetired = sanitizeRetiredForUser(todayLock.retiredZones || [], isAdmin);
-    const plan = evaluateLivePlanEngine(formattedZones, todayLock.retiredZones || []);
+    const activeLockedLevels = todayLock.lockedLevels || persistedLockedLevels;
+    const adrState = computeLiveAdrState(activeLockedLevels, liveDayState, livePrice);
+    const referenceLevels = buildReferenceLevelsList(activeLockedLevels, adrState, livePrice);
+    const plan = evaluateLivePlanEngine(
+      formattedZones,
+      todayLock.retiredZones || [],
+      adrState.adrUsedPct,
+      adrState.adr4
+    );
     const { visibleZones, aboveZone, belowZone } = computeServerVisibleZones(
       formattedZones,
       livePrice ?? effectiveReferencePrice
@@ -1951,6 +2348,9 @@ export function getBlackstoneState(
       dubaiClock: formatDubaiClockFull(nowMs),
       openingGap: todayLock.openingGap,
       openingRange: todayLock.openingRange,
+      lockedLevels: activeLockedLevels,
+      adrState,
+      referenceLevels,
       dayState: liveDayState,
       zones: formattedZones,
       visibleZones,
@@ -1995,6 +2395,7 @@ export function getBlackstoneState(
       historyStatus,
       openingGap,
       openingRange,
+      lockedLevels: lockAt0400Refs.lockedLevels,
       dayState: liveDayState,
       zones: initialZones,
       grade: {},
@@ -2041,6 +2442,10 @@ export function getBlackstoneState(
 
   const activeZones = todayLock ? todayLock.zones : initialZones;
   const activeRetired = todayLock ? todayLock.retiredZones : currentScan.retiredToday;
+  const activeLockedLevels =
+    todayLock?.lockedLevels ?? lockAt0400Refs.lockedLevels ?? computedLockedLevels;
+  const adrState = computeLiveAdrState(activeLockedLevels, liveDayState, livePrice);
+  const referenceLevels = buildReferenceLevelsList(activeLockedLevels, adrState, livePrice);
 
   const countdownSeconds = Math.max(0, Math.floor((timing.nextLockMs - nowMs) / 1000));
   const priorHistory = allLocks
@@ -2082,6 +2487,9 @@ export function getBlackstoneState(
     dubaiClock: formatDubaiClockFull(nowMs),
     openingGap,
     openingRange,
+    lockedLevels: activeLockedLevels,
+    adrState,
+    referenceLevels,
     dayState: liveDayState,
     zones: formattedZones,
     visibleZones,
@@ -2090,7 +2498,12 @@ export function getBlackstoneState(
     retiredZones: sanitizeRetiredForUser(activeRetired, isAdmin),
     lockHistory: priorHistory,
     allLocksCount: todayLock ? priorHistory.length + 1 : priorHistory.length,
-    plan: evaluateLivePlanEngine(formattedZones, activeRetired),
+    plan: evaluateLivePlanEngine(
+      formattedZones,
+      activeRetired,
+      adrState.adrUsedPct,
+      adrState.adr4
+    ),
     tape: getBlackstoneTapeState(),
     zoneRecords: getZoneRecordsSummary(todayLock ? todayLock.zones : activeZones),
     backtest: getBacktestState(),

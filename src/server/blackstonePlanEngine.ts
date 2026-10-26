@@ -139,6 +139,7 @@ export interface NearestZoneItem {
   distance: number;
   distanceFormatted: string;
   grade: string;
+  score: number;
   status: string;
   isRetest?: boolean;
   isSarrafCore?: boolean;
@@ -202,12 +203,15 @@ export interface BlackstonePlanPayload {
     touches: number;
     isRetest: boolean;
     grade: string;
+    score: number;
     isSarrafCore?: boolean;
     tag?: 'Sarraf Core' | null;
   } | null;
   transitionMessage: string | null;
   m15Atr: number;
-  stopDistanceDollars: number; // 10 or 12
+  stopDistanceDollars: number;
+  adrUsedPct: number | null;
+  adrDollars: number | null;
   plannedTrade: PlannedTradeSetup | null;
   gates: BlackstonePlanGates;
   nearestZones: {
@@ -287,26 +291,33 @@ function computeM15ATR14(): number {
   const store = getCandleStore();
   const m5 = store.M5 || [];
   let m15 = store.M15 || [];
-  if (m15.length < 15 && m5.length >= 45) {
+  if (m15.length < 15 && m5.length >= 3) {
     m15 = buildTimeframeFromM5(m5, 15);
   }
   const closedM15 = m15.filter((c) => c.isClosed);
-  if (closedM15.length < 15) return 4.2;
+  const series = closedM15.length >= 2 ? closedM15 : m15;
+  if (series.length === 0) return 4.2;
+  if (series.length === 1) {
+    return round2(Math.max(1.5, series[0].high - series[0].low));
+  }
 
   const trueRanges: number[] = [];
-  for (let i = 1; i < closedM15.length; i++) {
-    const cur = closedM15[i];
-    const prev = closedM15[i - 1];
+  for (let i = 1; i < series.length; i++) {
+    const cur = series[i];
+    const prev = series[i - 1];
     const tr = Math.max(
       cur.high - cur.low,
       Math.abs(cur.high - prev.close),
       Math.abs(cur.low - prev.close)
     );
-    trueRanges.push(tr);
+    if (Number.isFinite(tr) && tr > 0) {
+      trueRanges.push(tr);
+    }
   }
+  if (trueRanges.length === 0) return 4.2;
   const last14 = trueRanges.slice(-14);
   const sum = last14.reduce((acc, v) => acc + v, 0);
-  return round2(sum / last14.length);
+  return round2(Math.max(1.0, sum / last14.length));
 }
 
 function loadPersistedPlan(): void {
@@ -370,7 +381,9 @@ export function setPlanPinMode(mode: BlackstonePlanMode, zoneId?: string | null)
  */
 export function evaluateLivePlanEngine(
   zones: BlackstoneEvaluatedZone[],
-  retiredZones: any[] = []
+  retiredZones: any[] = [],
+  adrUsedPct: number | null = null,
+  adrDollars: number | null = null
 ): BlackstonePlanPayload {
   const timing = getDubaiSessionTiming();
   const tick = getLastValidTick();
@@ -481,8 +494,6 @@ export function evaluateLivePlanEngine(
 
   // 3. Compute M15 ATR(14)
   const m15Atr = computeM15ATR14();
-  // Fixed plan: stop loss $10, or $12 when M15 ATR(14) is 6 or higher
-  const stopDistanceDollars = m15Atr >= 6.0 ? 12.0 : 10.0;
 
   // 3b. Read news from existing news engine (same calendar events & decisions as News tab)
   let newsState: BlackstoneNewsState = {
@@ -609,6 +620,7 @@ export function evaluateLivePlanEngine(
     low: number;
     high: number;
     grade: string;
+    score: number;
     touches: number;
     status: string;
     isRetest?: boolean;
@@ -625,6 +637,7 @@ export function evaluateLivePlanEngine(
       low: z.low,
       high: z.high,
       grade: z.grade,
+      score: z.score,
       touches: z.touches,
       status: z.statusLabel,
       isRetest: false,
@@ -642,6 +655,7 @@ export function evaluateLivePlanEngine(
       low: rz.low,
       high: rz.high,
       grade: rz.grade,
+      score: rz.score,
       touches: rz.retestCount,
       status: rz.retestCount === 0 ? 'FRESH RETEST' : 'TESTED 1',
       isRetest: true,
@@ -669,6 +683,7 @@ export function evaluateLivePlanEngine(
         distance: dist,
         distanceFormatted: `+$${dist.toFixed(2)}`,
         grade: a.grade,
+        score: a.score,
         status: a.status,
         isRetest: a.isRetest,
         isSarrafCore: a.isSarrafCore,
@@ -693,6 +708,7 @@ export function evaluateLivePlanEngine(
         distance: dist,
         distanceFormatted: `-$${dist.toFixed(2)}`,
         grade: b.grade,
+        score: b.score,
         status: b.status,
         isRetest: b.isRetest,
         isSarrafCore: b.isSarrafCore,
@@ -712,6 +728,7 @@ export function evaluateLivePlanEngine(
     touches: number;
     isRetest: boolean;
     grade: string;
+    score: number;
     isSarrafCore?: boolean;
     tag?: 'Sarraf Core' | null;
   } | null = null;
@@ -729,6 +746,7 @@ export function evaluateLivePlanEngine(
         touches: found.touches,
         isRetest: Boolean(found.isRetest),
         grade: found.grade,
+        score: found.score,
         isSarrafCore: found.isSarrafCore,
         tag: found.tag,
       };
@@ -752,6 +770,7 @@ export function evaluateLivePlanEngine(
       touches: top.touches,
       isRetest: Boolean(top.isRetest),
       grade: top.grade,
+      score: top.score,
       isSarrafCore: top.isSarrafCore,
       tag: top.tag,
     };
@@ -767,25 +786,35 @@ export function evaluateLivePlanEngine(
       touches: top.touches,
       isRetest: Boolean(top.isRetest),
       grade: top.grade,
+      score: top.score,
       isSarrafCore: top.isSarrafCore,
       tag: top.tag,
     };
   }
+
+  // Compute ATR-based Stop Loss: stopDistance = max(1.5 * ATR14(M15), zoneWidth + 0.25 * ATR14(M15))
+  const targetZoneWidth = targetZoneItem
+    ? Math.max(0, round2(targetZoneItem.high - targetZoneItem.low))
+    : 4.0;
+  const stopDistanceDollars = round2(
+    Math.max(1.5 * m15Atr, targetZoneWidth + 0.25 * m15Atr)
+  );
 
   // 6. Update Active Trade if one is live
   if (inMemoryPlanData.activeTrade && livePrice !== null) {
     const trade = inMemoryPlanData.activeTrade;
     const isBuy = trade.side === 'BUY';
 
-    // Check TP1
+    // Check TP1 (1.0R)
     if (!trade.tp1.hit) {
       const tp1Triggered = isBuy ? livePrice >= trade.tp1.price : livePrice <= trade.tp1.price;
       if (tp1Triggered) {
         trade.tp1.hit = true;
         trade.tp1.hitTimeIso = new Date().toISOString();
         trade.tp1.hitTimeDubai = formatDubaiClockFull();
-        trade.tp1.portionPnlDollars = 10.0;
-        trade.tp1.portionPnlR = round2(10.0 / trade.oneR);
+        const diff1 = Math.abs(trade.tp1.price - trade.entryPrice);
+        trade.tp1.portionPnlDollars = round2(diff1);
+        trade.tp1.portionPnlR = trade.oneR > 0 ? round2(diff1 / trade.oneR) : 1.0;
         // After TP1 move the stop to entry
         trade.currentStopLoss = trade.entryPrice;
         trade.beMoved = true;
@@ -793,20 +822,21 @@ export function evaluateLivePlanEngine(
       }
     }
 
-    // Check TP2
+    // Check TP2 (1.7R)
     if (!trade.tp2.hit) {
       const tp2Triggered = isBuy ? livePrice >= trade.tp2.price : livePrice <= trade.tp2.price;
       if (tp2Triggered) {
         trade.tp2.hit = true;
         trade.tp2.hitTimeIso = new Date().toISOString();
         trade.tp2.hitTimeDubai = formatDubaiClockFull();
-        trade.tp2.portionPnlDollars = 17.0;
-        trade.tp2.portionPnlR = round2(17.0 / trade.oneR);
+        const diff2 = Math.abs(trade.tp2.price - trade.entryPrice);
+        trade.tp2.portionPnlDollars = round2(diff2);
+        trade.tp2.portionPnlR = trade.oneR > 0 ? round2(diff2 / trade.oneR) : 1.7;
         savePersistedPlan();
       }
     }
 
-    // Check TP3
+    // Check TP3 (2.5R)
     if (!trade.tp3.hit) {
       const tp3Triggered = isBuy ? livePrice >= trade.tp3.price : livePrice <= trade.tp3.price;
       if (tp3Triggered) {
@@ -815,7 +845,7 @@ export function evaluateLivePlanEngine(
         trade.tp3.hitTimeDubai = formatDubaiClockFull();
         const diff = Math.abs(trade.tp3.price - trade.entryPrice);
         trade.tp3.portionPnlDollars = round2(diff);
-        trade.tp3.portionPnlR = round2(diff / trade.oneR);
+        trade.tp3.portionPnlR = trade.oneR > 0 ? round2(diff / trade.oneR) : 2.5;
 
         // All 3 targets hit: Trade Completed in Profit
         trade.status = 'CLOSED_PROFIT';
@@ -964,7 +994,7 @@ export function evaluateLivePlanEngine(
     pauseReason = `${targetZoneItem?.name} is blocked after exit until price moves $8.00 away (currently $${distAway.toFixed(2)} away).`;
   }
 
-  // 8. Determine Planned Trade Setup (Entry, Stop, TP1, TP2, TP3 with capping)
+  // 8. Determine Planned Trade Setup (Entry, Stop, TP1=1R, TP2=1.7R, TP3=2.5R with capping)
   let plannedTrade: PlannedTradeSetup | null = null;
 
   if (targetZoneItem && livePrice !== null) {
@@ -975,9 +1005,13 @@ export function evaluateLivePlanEngine(
       ? round2(plannedEntry - stopDistanceDollars)
       : round2(plannedEntry + stopDistanceDollars);
 
-    const tp1Price = isBuyZone ? round2(plannedEntry + 10.0) : round2(plannedEntry - 10.0);
-    const tp2Price = isBuyZone ? round2(plannedEntry + 17.0) : round2(plannedEntry - 17.0);
-    let tp3Price = isBuyZone ? round2(plannedEntry + 25.0) : round2(plannedEntry - 25.0);
+    const tp1Dist = round2(1.0 * stopDistanceDollars);
+    const tp2Dist = round2(1.7 * stopDistanceDollars);
+    const tp3Dist = round2(2.5 * stopDistanceDollars);
+
+    const tp1Price = isBuyZone ? round2(plannedEntry + tp1Dist) : round2(plannedEntry - tp1Dist);
+    const tp2Price = isBuyZone ? round2(plannedEntry + tp2Dist) : round2(plannedEntry - tp2Dist);
+    let tp3Price = isBuyZone ? round2(plannedEntry + tp3Dist) : round2(plannedEntry - tp3Dist);
     let tp3Capped = false;
     let tp3CapReason: string | undefined = undefined;
 
@@ -1198,7 +1232,9 @@ export function evaluateLivePlanEngine(
       tp3: {
         price: plannedTrade.tp3,
         capped: plannedTrade.tp3Capped,
-        originalPrice: isBuy ? round2(livePrice + 25.0) : round2(livePrice - 25.0),
+        originalPrice: isBuy
+          ? round2(plannedTrade.plannedEntry + 2.5 * plannedTrade.stopDistance)
+          : round2(plannedTrade.plannedEntry - 2.5 * plannedTrade.stopDistance),
         hit: false,
         portionPnlDollars: 0,
         portionPnlR: 0,
@@ -1278,6 +1314,8 @@ export function evaluateLivePlanEngine(
     transitionMessage: inMemoryPlanData.transitionMessage,
     m15Atr,
     stopDistanceDollars,
+    adrUsedPct: adrUsedPct ?? null,
+    adrDollars: adrDollars ?? null,
     plannedTrade,
     gates: {
       gate1: {
