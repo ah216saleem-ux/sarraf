@@ -10,9 +10,13 @@ import { LoginModal } from './components/LoginModal';
 import { ParticleTunnelTransition } from './components/ParticleTunnelTransition';
 import { DashboardView } from './components/DashboardView';
 import { NewsTab } from './components/NewsTab';
+import { DojiBacktestPage } from './doji/DojiBacktestPage';
 
 const MainApp: React.FC = () => {
   const { isLoggedIn, isTunnelActive, priceData } = useMarket();
+  const isDojiBacktestPage =
+    typeof window !== 'undefined' &&
+    window.location.pathname.replace(/\/+$/, '') === '/doji-backtest';
   const isDevNewsPreview =
     import.meta.env.DEV &&
     typeof window !== 'undefined' &&
@@ -21,6 +25,10 @@ const MainApp: React.FC = () => {
     import.meta.env.DEV && typeof window !== 'undefined'
       ? new URLSearchParams(window.location.search).get('newsTheme')
       : null;
+
+  if (isDojiBacktestPage) {
+    return <DojiBacktestPage />;
+  }
 
   if (isDevNewsPreview) {
     return (

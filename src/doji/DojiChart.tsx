@@ -9,7 +9,7 @@ import {
   ColorType,
   IPriceLine,
 } from 'lightweight-charts';
-import { RawBar, DojiTimeframe, DojiZone, computeEma, computeAtr14 } from './dojiEngine';
+import { RawBar, DojiTimeframe, DojiZone, computeEma, computeAtr14, checkIsDoji } from './dojiEngine';
 import { DojiTrade } from './dojiSignalEngine';
 
 interface DojiChartProps {
@@ -19,6 +19,9 @@ interface DojiChartProps {
   showZones: boolean;
   showEma9: boolean;
   zones: DojiZone[];
+  minZoneStrength?: number;
+  showAllZones?: boolean;
+  flaggedOpenTimeSecs?: number[];
   activeTrade?: DojiTrade | null;
   latestTrigger: number;
   resetTrigger: number;
@@ -41,6 +44,9 @@ export const DojiChart: React.FC<DojiChartProps> = ({
   showZones,
   showEma9,
   zones,
+  minZoneStrength = 5,
+  showAllZones = false,
+  flaggedOpenTimeSecs,
   activeTrade,
   latestTrigger,
   resetTrigger,
@@ -56,6 +62,12 @@ export const DojiChart: React.FC<DojiChartProps> = ({
 
   const zonesRef = useRef<DojiZone[]>(zones);
   zonesRef.current = zones;
+  const minZoneStrengthRef = useRef<number>(minZoneStrength);
+  minZoneStrengthRef.current = minZoneStrength;
+  const showAllZonesRef = useRef<boolean>(showAllZones);
+  showAllZonesRef.current = showAllZones;
+  const flaggedOpenTimeSecsRef = useRef<number[] | undefined>(flaggedOpenTimeSecs);
+  flaggedOpenTimeSecsRef.current = flaggedOpenTimeSecs;
   const showZonesRef = useRef<boolean>(showZones);
   showZonesRef.current = showZones;
   const timeframeRef = useRef<DojiTimeframe>(timeframe);
@@ -207,7 +219,9 @@ export const DojiChart: React.FC<DojiChartProps> = ({
       },
       localization: {
         timeFormatter: (utcTimestamp: number) => {
+          if (!Number.isFinite(utcTimestamp)) return '';
           const d = new Date(utcTimestamp * 1000);
+          if (isNaN(d.getTime())) return '';
           return new Intl.DateTimeFormat('en-GB', {
             timeZone: 'Asia/Dubai',
             hour: '2-digit',
@@ -242,33 +256,41 @@ export const DojiChart: React.FC<DojiChartProps> = ({
       priceLineStyle: LineStyle.Dotted,
       autoscaleInfoProvider: (original: () => any) => {
         const res = original();
-        const modeInfo = scaleModeRef.current;
-        if (modeInfo.mode === 'normal' || !res || !res.priceRange) {
+        if (!res || !res.priceRange) return res;
+
+        let minVal = Number(res.priceRange.minValue);
+        let maxVal = Number(res.priceRange.maxValue);
+        if (!Number.isFinite(minVal) || !Number.isFinite(maxVal) || minVal >= maxVal) {
           return res;
         }
 
-        let minVal = res.priceRange.minValue;
-        let maxVal = res.priceRange.maxValue;
+        const modeInfo = scaleModeRef.current;
+        if (modeInfo.mode === 'normal') {
+          return res;
+        }
 
         if (modeInfo.mode === 'fit_zones') {
           const tfZones = zonesRef.current.filter((z) => z.timeframe === timeframeRef.current);
           for (const z of tfZones) {
-            minVal = Math.min(minVal, z.low - 2);
-            maxVal = Math.max(maxVal, z.high + 2);
+            if (Number.isFinite(z.low)) minVal = Math.min(minVal, z.low - 2);
+            if (Number.isFinite(z.high)) maxVal = Math.max(maxVal, z.high + 2);
           }
         } else if (modeInfo.mode === 'focus_zone' && modeInfo.targetZone) {
           const z = modeInfo.targetZone;
-          minVal = Math.min(minVal, z.low - 4);
-          maxVal = Math.max(maxVal, z.high + 4);
+          if (Number.isFinite(z.low)) minVal = Math.min(minVal, z.low - 4);
+          if (Number.isFinite(z.high)) maxVal = Math.max(maxVal, z.high + 4);
         }
 
-        return {
-          ...res,
-          priceRange: {
-            minValue: minVal,
-            maxValue: maxVal,
-          },
-        };
+        if (Number.isFinite(minVal) && Number.isFinite(maxVal) && minVal < maxVal) {
+          return {
+            ...res,
+            priceRange: {
+              minValue: minVal,
+              maxValue: maxVal,
+            },
+          };
+        }
+        return res;
       },
     });
 
@@ -321,16 +343,39 @@ export const DojiChart: React.FC<DojiChartProps> = ({
     const closedBars = bars.filter((b) => !b.isOpen);
     currentAtrRef.current = computeAtr14(closedBars);
 
-    const formattedCandles: CandlePoint[] = bars.map((b) => {
-      const timeSec = Math.floor(new Date(b.openTime).getTime() / 1000) + 4 * 3600;
-      return {
+    const formattedCandles: CandlePoint[] = [];
+    for (const b of bars) {
+      if (!b || !b.openTime) continue;
+      const ms = new Date(b.openTime).getTime();
+      if (!Number.isFinite(ms)) continue;
+      const timeSec = Math.floor(ms / 1000) + 4 * 3600;
+
+      const open = Number(b.open);
+      const high = Number(b.high);
+      const low = Number(b.low);
+      const close = Number(b.close);
+      if (
+        !Number.isFinite(open) ||
+        !Number.isFinite(high) ||
+        !Number.isFinite(low) ||
+        !Number.isFinite(close) ||
+        open <= 0 ||
+        high <= 0 ||
+        low <= 0 ||
+        close <= 0
+      ) {
+        continue;
+      }
+      formattedCandles.push({
         time: timeSec,
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close,
-      };
-    });
+        open,
+        high: Math.max(high, open, close),
+        low: Math.min(low, open, close),
+        close,
+      });
+    }
+
+    formattedCandles.sort((a, b) => a.time - b.time);
 
     const uniqueCandles: CandlePoint[] = [];
     const seenTimes = new Set<number>();
@@ -342,7 +387,15 @@ export const DojiChart: React.FC<DojiChartProps> = ({
     }
 
     uniqueCandlesRef.current = uniqueCandles;
-    candleSeriesRef.current.setData(uniqueCandles as any);
+    if (uniqueCandles.length > 0) {
+      try {
+        candleSeriesRef.current.setData(uniqueCandles as any);
+      } catch (err) {
+        console.warn('[DojiChart] setData error:', err);
+      }
+    } else {
+      candleSeriesRef.current.setData([]);
+    }
     candleSeriesRef.current.setMarkers([]);
 
     if (showEma9) {
@@ -350,12 +403,17 @@ export const DojiChart: React.FC<DojiChartProps> = ({
       const uniqueEma: { time: any; value: number }[] = [];
       const seenEmaTimes = new Set<number>();
       for (const p of emaPoints) {
-        if (!seenEmaTimes.has(p.time)) {
+        if (p && Number.isFinite(p.time) && Number.isFinite(p.value) && !seenEmaTimes.has(p.time)) {
           seenEmaTimes.add(p.time);
           uniqueEma.push({ time: p.time as any, value: p.value });
         }
       }
-      emaSeriesRef.current.setData(uniqueEma);
+      uniqueEma.sort((a, b) => a.time - b.time);
+      try {
+        emaSeriesRef.current.setData(uniqueEma);
+      } catch {
+        emaSeriesRef.current.setData([]);
+      }
     } else {
       emaSeriesRef.current.setData([]);
     }
@@ -368,19 +426,55 @@ export const DojiChart: React.FC<DojiChartProps> = ({
 
   // 3. Update Latest Candle Real-Time with Live Price
   useEffect(() => {
-    if (!candleSeriesRef.current || !bars || bars.length === 0 || livePrice <= 0) return;
+    if (
+      !candleSeriesRef.current ||
+      !bars ||
+      bars.length === 0 ||
+      !livePrice ||
+      livePrice <= 0 ||
+      !Number.isFinite(livePrice)
+    ) {
+      return;
+    }
+    const unique = uniqueCandlesRef.current;
+    if (unique.length === 0) return;
 
     const lastBar = bars[bars.length - 1];
-    if (!lastBar) return;
+    if (!lastBar || !lastBar.openTime) return;
 
-    const timeSec = (Math.floor(new Date(lastBar.openTime).getTime() / 1000) + 4 * 3600) as any;
-    candleSeriesRef.current.update({
+    const ms = new Date(lastBar.openTime).getTime();
+    if (!Number.isFinite(ms)) return;
+    const timeSec = Math.floor(ms / 1000) + 4 * 3600;
+
+    const open = Number(lastBar.open);
+    if (!Number.isFinite(open) || open <= 0) return;
+
+    const lastCandle = unique[unique.length - 1];
+    if (timeSec < lastCandle.time) return;
+
+    const barHigh = Number(lastBar.high);
+    const barLow = Number(lastBar.low);
+    const high = Math.max(Number.isFinite(barHigh) ? barHigh : open, livePrice, open);
+    const low = Math.min(Number.isFinite(barLow) ? barLow : open, livePrice, open);
+    const updatedCandle: CandlePoint = {
       time: timeSec,
-      open: lastBar.open,
-      high: Math.max(lastBar.high, livePrice),
-      low: Math.min(lastBar.low, livePrice),
+      open,
+      high,
+      low,
       close: livePrice,
-    });
+    };
+
+    if (timeSec === lastCandle.time) {
+      unique[unique.length - 1] = updatedCandle;
+    } else {
+      unique.push(updatedCandle);
+    }
+
+    try {
+      candleSeriesRef.current.update(updatedCandle as any);
+    } catch {
+      // ignore transient ordering or timing issue
+    }
   }, [livePrice, bars]);
 
   // 4. Draw Price Lines for Open Trade on Selected Timeframe
@@ -533,16 +627,6 @@ export const DojiChart: React.FC<DojiChartProps> = ({
       const height = canvas.height;
       ctx.clearRect(0, 0, width, height);
 
-      if (!showZonesRef.current) {
-        if (offscreenKeyRef.current !== '') {
-          offscreenKeyRef.current = '';
-          setOffscreenAbove([]);
-          setOffscreenBelow([]);
-        }
-        animId = requestAnimationFrame(renderOverlay);
-        return;
-      }
-
       const candles = uniqueCandlesRef.current;
       if (candles.length === 0) {
         animId = requestAnimationFrame(renderOverlay);
@@ -557,11 +641,85 @@ export const DojiChart: React.FC<DojiChartProps> = ({
       ctx.rect(0, 0, plotWidth, plotHeight);
       ctx.clip();
 
-      const lastCandle = candles[candles.length - 1];
-      const currentBarX = getXForTime(chart, lastCandle.time);
+      // Draw a small blue X marker under every flagged candle on the Doji chart
+      const explicitFlagged = flaggedOpenTimeSecsRef.current;
+      const flaggedSet =
+        explicitFlagged !== undefined
+          ? new Set<number>(explicitFlagged)
+          : new Set<number>(
+              candles
+                .slice(0, -1)
+                .filter(
+                  (c) =>
+                    checkIsDoji(
+                      {
+                        openTime: new Date((c.time - 4 * 3600) * 1000).toISOString(),
+                        open: c.open,
+                        high: c.high,
+                        low: c.low,
+                        close: c.close,
+                      },
+                      currentAtrRef.current || 3.5,
+                      true,
+                      'indicator'
+                    ).isDoji
+                )
+                .map((c) => c.time)
+            );
+
+      if (flaggedSet.size > 0) {
+        ctx.save();
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 1.5;
+        ctx.lineCap = 'round';
+        const halfSize = 2.5;
+        for (const c of candles) {
+          if (!flaggedSet.has(c.time)) continue;
+          const cx = getXForTime(chart, c.time);
+          if (cx === null || cx < -6 || cx > plotWidth + 6) continue;
+          const yLow = candleSeries.priceToCoordinate(c.low);
+          if (yLow === null) continue;
+          const cy = yLow + 8;
+          if (cy < -6 || cy > plotHeight + 6) continue;
+          ctx.beginPath();
+          ctx.moveTo(cx - halfSize, cy - halfSize);
+          ctx.lineTo(cx + halfSize, cy + halfSize);
+          ctx.moveTo(cx - halfSize, cy + halfSize);
+          ctx.lineTo(cx + halfSize, cy - halfSize);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      if (!showZonesRef.current) {
+        ctx.restore();
+        if (offscreenKeyRef.current !== '') {
+          offscreenKeyRef.current = '';
+          setOffscreenAbove([]);
+          setOffscreenBelow([]);
+        }
+        animId = requestAnimationFrame(renderOverlay);
+        return;
+      }
+
       const currentTfZones = zonesRef.current.filter((z) => z.timeframe === timeframeRef.current);
-      const refPrice = livePriceRef.current > 0 ? livePriceRef.current : lastCandle.close;
+      const lastCandle = candles[candles.length - 1];
+      const refPrice = livePriceRef.current > 0 ? livePriceRef.current : (lastCandle?.close ?? 0);
       const atr = currentAtrRef.current || 3.5;
+
+      const aboveZones = currentTfZones
+        .filter((z) => (z.high + z.low) / 2 >= refPrice)
+        .sort((a, b) => (a.high + a.low) / 2 - (b.high + b.low) / 2);
+
+      const belowZones = currentTfZones
+        .filter((z) => (z.high + z.low) / 2 < refPrice)
+        .sort((a, b) => (b.high + b.low) / 2 - (a.high + a.low) / 2);
+
+      // Reduce clutter: by default show only the 3 nearest zones above and 3 nearest below the price.
+      // If showAllZones is true, show all zones.
+      const zonesToRender = showAllZonesRef.current
+        ? currentTfZones
+        : [...aboveZones.slice(0, 3), ...belowZones.slice(0, 3)];
 
       // Active trade price line Y-coordinates for label collision check
       const tradeLineYs: number[] = [];
@@ -598,6 +756,7 @@ export const DojiChart: React.FC<DojiChartProps> = ({
         color: string;
         strength: number;
         isRetestLive: boolean;
+        isDimmed: boolean;
       }
 
       const pendingLabels: PendingLabel[] = [];
@@ -607,32 +766,18 @@ export const DojiChart: React.FC<DojiChartProps> = ({
       ctx.font = '600 11px "JetBrains Mono", monospace';
       ctx.textBaseline = 'top';
 
-      for (const zone of currentTfZones) {
-        const distFromLevel =
-          refPrice >= zone.low && refPrice <= zone.high
-            ? 0
-            : Math.min(Math.abs(refPrice - zone.high), Math.abs(refPrice - zone.low));
-        const isWithin5Atr =
-          zone.isWithin5Atr !== undefined ? zone.isWithin5Atr : distFromLevel <= 5 * atr;
-        const isFocused =
-          (scaleModeRef.current.mode === 'focus_zone' &&
-            scaleModeRef.current.targetZone?.id === zone.id) ||
-          scaleModeRef.current.mode === 'fit_zones';
+      for (const zone of zonesToRender) {
+        const zoneMid = (zone.high + zone.low) / 2;
+        const isSellZone = zoneMid >= refPrice;
+
+        if (isSellZone) {
+          aboveSet.set(zone.id, zone);
+        } else {
+          belowSet.set(zone.id, zone);
+        }
 
         const yHigh = candleSeries.priceToCoordinate(zone.high);
         const yLow = candleSeries.priceToCoordinate(zone.low);
-
-        // Zones outside 5 ATR belong in the consolidated edge chip (and are only drawn if explicitly focused)
-        if (!isWithin5Atr) {
-          if (zone.distancePts >= 0) {
-            aboveSet.set(zone.id, zone);
-          } else {
-            belowSet.set(zone.id, zone);
-          }
-          if (!isFocused) {
-            continue;
-          }
-        }
 
         if (yHigh === null || yLow === null) continue;
 
@@ -640,65 +785,84 @@ export const DojiChart: React.FC<DojiChartProps> = ({
         const rectBottom = Math.max(yHigh, yLow);
 
         // Check if zone is completely outside the currently visible vertical price range
-        if (rectBottom < 2) {
-          aboveSet.set(zone.id, zone);
-          continue;
-        }
-        if (rectTop > plotHeight - 2) {
-          belowSet.set(zone.id, zone);
+        if (rectBottom < 2 || rectTop > plotHeight - 2) {
           continue;
         }
 
         const dojiX = getXForTime(chart, zone.openTimeSec);
-        if (dojiX === null || currentBarX === null) continue;
+        if (dojiX === null) continue;
 
-        const rectStartX = Math.min(dojiX, currentBarX);
-        const rectEndX = Math.max(dojiX, currentBarX);
+        // Draw each zone as a clear box from the doji candle to the right edge of the chart (plotWidth)
+        const rectStartX = Math.max(0, dojiX);
+        const rectEndX = plotWidth;
+        const rectWidth = Math.max(0, rectEndX - rectStartX);
 
-        if (rectEndX < 0 || rectStartX > plotWidth) continue;
+        if (rectWidth <= 0 || dojiX > plotWidth) continue;
 
-        const clampedStartX = Math.max(0, rectStartX);
-        const clampedEndX = Math.min(plotWidth, rectEndX);
-        const rectWidth = Math.max(0, clampedEndX - clampedStartX);
         const rectY = rectTop;
         const rectHeight = Math.max(2, Math.abs(yLow - yHigh));
 
-        const isUsed = Boolean(zone.isUsed);
+        const isArmed = zone.zoneState === 'armed';
+        const isBelowMinStrength = zone.strength < minZoneStrengthRef.current;
 
-        // 1) Light red fill from doji to current bar
-        ctx.fillStyle = isUsed ? 'rgba(229, 88, 79, 0.05)' : 'rgba(229, 88, 79, 0.10)';
-        ctx.fillRect(clampedStartX, rectY, rectWidth, rectHeight);
+        // Solid border + visible fill for waiting zones, dashed border for armed zones.
+        // Zones with strength below Min strength are drawn lighter but still clearly visible (fill opacity at least 0.12), never nearly invisible.
+        const fillColor = isSellZone
+          ? isBelowMinStrength
+            ? 'rgba(229, 88, 79, 0.13)'
+            : isArmed
+            ? 'rgba(229, 88, 79, 0.18)'
+            : 'rgba(229, 88, 79, 0.22)'
+          : isBelowMinStrength
+          ? 'rgba(63, 191, 143, 0.13)'
+          : isArmed
+          ? 'rgba(63, 191, 143, 0.18)'
+          : 'rgba(63, 191, 143, 0.22)';
 
-        // 2) Dotted red border from doji to current bar (55% opacity when used, full red when unused)
+        const strokeColor = isSellZone
+          ? isBelowMinStrength
+            ? 'rgba(229, 88, 79, 0.55)'
+            : '#e5584f'
+          : isBelowMinStrength
+          ? 'rgba(63, 191, 143, 0.55)'
+          : '#3fbf8f';
+
+        // 1) Clear box fill from doji candle to right edge
+        ctx.fillStyle = fillColor;
+        ctx.fillRect(rectStartX, rectY, rectWidth, rectHeight);
+
+        // 2) Border: solid for waiting zones, dashed for armed zones
         ctx.save();
-        ctx.setLineDash([3, 3]);
-        ctx.strokeStyle = isUsed ? 'rgba(229, 88, 79, 0.55)' : '#e5584f';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(clampedStartX, rectY, rectWidth, rectHeight);
+        if (isArmed) {
+          ctx.setLineDash([5, 4]);
+        } else {
+          ctx.setLineDash([]);
+        }
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = isBelowMinStrength ? 1 : 1.3;
+        ctx.strokeRect(rectStartX, rectY, rectWidth, rectHeight);
         ctx.restore();
 
-        // 3) Hollow red border on the Doji candle itself
+        // 3) Hollow marker border on the Doji candle itself
         if (dojiX >= -10 && dojiX <= plotWidth + 10) {
           ctx.save();
           ctx.setLineDash([]);
-          ctx.strokeStyle = isUsed ? 'rgba(229, 88, 79, 0.55)' : '#e5584f';
+          ctx.strokeStyle = strokeColor;
           ctx.lineWidth = 1.5;
           const boxW = 7;
           ctx.strokeRect(dojiX - boxW / 2, rectY - 1, boxW, rectHeight + 2);
           ctx.restore();
         }
 
-        // 4) Prepare strength label at top-left corner inside rectangle (or above if height < 20px)
-        const labelText = isUsed
-          ? `${zone.strength.toFixed(1)}/10 · used`
-          : `${zone.strength.toFixed(1)}/10`;
+        // 4) Label with strength only (e.g. 6.4) in the corner
+        const labelText = zone.strength.toFixed(1);
         const textWidth = ctx.measureText(labelText).width;
         const pillText = 'RETEST LIVE';
         const pillW = zone.isRetestLive ? ctx.measureText(pillText).width + 16 : 0;
         const totalW = textWidth + pillW;
 
-        const labelX = Math.max(4, Math.min(clampedStartX + 5, Math.max(4, plotWidth - totalW - 6)));
-        let rawLabelY = rectHeight < 20 ? rectY - 14 : rectY + 3;
+        const labelX = Math.max(4, Math.min(rectStartX + 5, Math.max(4, plotWidth - totalW - 6)));
+        let rawLabelY = rectHeight < 18 ? rectY - 14 : rectY + 3;
         if (rawLabelY < 2) {
           rawLabelY = Math.min(plotHeight - 14, rectBottom + 3);
         }
@@ -710,9 +874,10 @@ export const DojiChart: React.FC<DojiChartProps> = ({
           y: labelY,
           w: textWidth,
           h: 12,
-          color: zone.strengthColor,
+          color: isBelowMinStrength ? 'rgba(240, 234, 219, 0.7)' : zone.strengthColor,
           strength: zone.strength,
           isRetestLive: Boolean(zone.isRetestLive),
+          isDimmed: isBelowMinStrength,
         });
       }
 
@@ -757,10 +922,13 @@ export const DojiChart: React.FC<DojiChartProps> = ({
         }
 
         // Small dark background patch behind text so candles don't obscure it
+        ctx.save();
+        ctx.globalAlpha = lbl.isDimmed ? 0.55 : 1.0;
         ctx.fillStyle = 'rgba(10, 9, 7, 0.88)';
         ctx.fillRect(curX - 3, curY - 1, lbl.w + 6, lbl.h + 2);
         ctx.fillStyle = lbl.color;
         ctx.fillText(lbl.text, curX, curY);
+        ctx.restore();
 
         // If live price is touching this armed zone, draw a small "RETEST LIVE" pill on the zone
         if (lbl.isRetestLive) {
@@ -885,51 +1053,70 @@ export const DojiChart: React.FC<DojiChartProps> = ({
         className="absolute inset-0 pointer-events-none z-10"
       />
 
-      {/* Consolidated Top Edge Chip: "▲ 3 zones · nearest 4034.24 (+$29)" */}
-      {showZones && nearestAbove && (
-        <div className="absolute top-2 left-2 right-[65px] z-20 flex items-center pointer-events-none">
-          <button
-            type="button"
-            onClick={handleTopChipClick}
-            className="pointer-events-auto cursor-pointer px-2.5 py-1 rounded bg-[#12100c]/95 border border-[#d9b25a]/60 hover:border-[#d9b25a] text-[11px] font-['JetBrains_Mono',monospace] tabular-nums text-[#f0eadb] flex items-center gap-1.5 transition-colors"
-          >
-            <span className="text-[#3fbf8f] font-bold">▲</span>
-            <span className="font-semibold">
-              {offscreenAbove.length} {offscreenAbove.length === 1 ? 'zone' : 'zones'}
-            </span>
-            <span className="text-[#9d947e]">·</span>
-            <span className="text-[#9d947e]">nearest</span>
-            <span className="font-semibold text-[#f2d78f]">
-              {nearestAbove.high.toFixed(2)}
-            </span>
-            <span className="text-[#3fbf8f]">
-              (+${Math.round(Math.abs(nearestAbove.distancePts))})
-            </span>
-          </button>
-        </div>
-      )}
+      {/* Pill always showing both sides: "nearest above" (sell/red) and "nearest below" (buy/green) */}
+      {showZones && (
+        <div className="absolute top-2 left-2 right-[65px] z-20 flex flex-wrap items-center gap-1.5 pointer-events-none">
+          <div className="pointer-events-auto px-2.5 py-1 rounded bg-[#12100c]/95 border border-[#d9b25a]/60 text-[11px] font-['JetBrains_Mono',monospace] tabular-nums text-[#f0eadb] flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleTopChipClick}
+              disabled={!nearestAbove}
+              className={`flex items-center gap-1 transition-colors ${
+                nearestAbove ? 'cursor-pointer hover:text-[#f2d78f]' : 'cursor-default opacity-75'
+              }`}
+              title="Sell zones above current price"
+            >
+              <span className="text-[#e5584f] font-bold">▲</span>
+              <span className="font-semibold">
+                {offscreenAbove.length}
+              </span>
+              <span className="text-[#9d947e]">·</span>
+              <span className="text-[#9d947e]">nearest above</span>
+              {nearestAbove ? (
+                <>
+                  <span className="font-semibold text-[#f2d78f]">
+                    {nearestAbove.low.toFixed(2)}
+                  </span>
+                  <span className="text-[#e5584f]">
+                    (+${Math.round(Math.abs(nearestAbove.distancePts))})
+                  </span>
+                </>
+              ) : (
+                <span className="text-[#9d947e]">none</span>
+              )}
+            </button>
 
-      {/* Consolidated Bottom Edge Chip: "▼ 1 zone · nearest 3980.10 (–$15)" */}
-      {showZones && nearestBelow && (
-        <div className="absolute bottom-7 left-2 right-[65px] z-20 flex items-center pointer-events-none">
-          <button
-            type="button"
-            onClick={handleBottomChipClick}
-            className="pointer-events-auto cursor-pointer px-2.5 py-1 rounded bg-[#12100c]/95 border border-[#d9b25a]/60 hover:border-[#d9b25a] text-[11px] font-['JetBrains_Mono',monospace] tabular-nums text-[#f0eadb] flex items-center gap-1.5 transition-colors"
-          >
-            <span className="text-[#e5584f] font-bold">▼</span>
-            <span className="font-semibold">
-              {offscreenBelow.length} {offscreenBelow.length === 1 ? 'zone' : 'zones'}
-            </span>
-            <span className="text-[#9d947e]">·</span>
-            <span className="text-[#9d947e]">nearest</span>
-            <span className="font-semibold text-[#f2d78f]">
-              {nearestBelow.low.toFixed(2)}
-            </span>
-            <span className="text-[#e5584f]">
-              (–${Math.round(Math.abs(nearestBelow.distancePts))})
-            </span>
-          </button>
+            <span className="text-[#2b261b]">|</span>
+
+            <button
+              type="button"
+              onClick={handleBottomChipClick}
+              disabled={!nearestBelow}
+              className={`flex items-center gap-1 transition-colors ${
+                nearestBelow ? 'cursor-pointer hover:text-[#f2d78f]' : 'cursor-default opacity-75'
+              }`}
+              title="Buy zones below current price"
+            >
+              <span className="text-[#3fbf8f] font-bold">▼</span>
+              <span className="font-semibold">
+                {offscreenBelow.length}
+              </span>
+              <span className="text-[#9d947e]">·</span>
+              <span className="text-[#9d947e]">nearest below</span>
+              {nearestBelow ? (
+                <>
+                  <span className="font-semibold text-[#f2d78f]">
+                    {nearestBelow.high.toFixed(2)}
+                  </span>
+                  <span className="text-[#3fbf8f]">
+                    (–${Math.round(Math.abs(nearestBelow.distancePts))})
+                  </span>
+                </>
+              ) : (
+                <span className="text-[#9d947e]">none</span>
+              )}
+            </button>
+          </div>
         </div>
       )}
     </div>

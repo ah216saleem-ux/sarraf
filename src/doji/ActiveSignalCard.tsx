@@ -10,6 +10,8 @@ import { DojiTrade, computeLivePnl } from './dojiSignalEngine';
 import {
   DojiTimeframe,
   DojiZone,
+  ActiveDojiSignal,
+  calculateRealRiskReward,
   formatSignedDollar,
   formatRoundedSignedDollar,
   formatOpenedTime,
@@ -20,6 +22,7 @@ const ALL_TIMEFRAMES: DojiTimeframe[] = ['15m', '30m', '1h', '4h'];
 
 interface ActiveSignalCardProps {
   trade: DojiTrade | null;
+  signal?: ActiveDojiSignal | null;
   activeTradesMap?: Record<DojiTimeframe, DojiTrade | null>;
   onSelectTimeframe?: (tf: DojiTimeframe) => void;
   timeframe: DojiTimeframe;
@@ -31,6 +34,7 @@ interface ActiveSignalCardProps {
 
 export const ActiveSignalCard: React.FC<ActiveSignalCardProps> = ({
   trade,
+  signal,
   activeTradesMap,
   onSelectTimeframe,
   timeframe,
@@ -218,6 +222,34 @@ export const ActiveSignalCard: React.FC<ActiveSignalCardProps> = ({
     ? trade.currentSl - trade.entryPrice
     : trade.entryPrice - trade.currentSl;
 
+  const realRisk =
+    signal && signal.status === 'ACTIVE' && signal.risk > 0
+      ? signal.risk
+      : typeof trade.risk === 'number' && trade.risk > 0
+      ? trade.risk
+      : Number(Math.abs(trade.entryPrice - trade.initialSl).toFixed(2));
+
+  const tp1Reward = Number(Math.abs(trade.tp1 - trade.entryPrice).toFixed(2));
+  const tp2Reward = Number(Math.abs(trade.tp2 - trade.entryPrice).toFixed(2));
+  const tp3Reward = Number(Math.abs(trade.tp3 - trade.entryPrice).toFixed(2));
+
+  const tp1Rr =
+    (signal && signal.status === 'ACTIVE' && signal.tp1Rr) ||
+    trade.tp1Rr ||
+    calculateRealRiskReward(trade.entryPrice, trade.initialSl, trade.tp1);
+  const tp2Rr =
+    (signal && signal.status === 'ACTIVE' && signal.tp2Rr) ||
+    trade.tp2Rr ||
+    calculateRealRiskReward(trade.entryPrice, trade.initialSl, trade.tp2);
+  const tp3Rr =
+    (signal && signal.status === 'ACTIVE' && signal.tp3Rr) ||
+    trade.tp3Rr ||
+    calculateRealRiskReward(trade.entryPrice, trade.initialSl, trade.tp3);
+  const riskRewardDisplay =
+    (signal && signal.status === 'ACTIVE' && signal.riskReward) ||
+    trade.riskReward ||
+    tp3Rr;
+
   const levels = [
     {
       label: 'Entry',
@@ -233,31 +265,31 @@ export const ActiveSignalCard: React.FC<ActiveSignalCardProps> = ({
       distance: formatSignedDollar(slDistance),
       tone: 'text-[#e5584f]',
       hit: false,
-      extra: trade.isBreakeven ? 'BE' : '',
+      extra: trade.isBreakeven ? `BE · Risk $${realRisk.toFixed(2)}` : `Risk $${realRisk.toFixed(2)}`,
     },
     {
       label: 'TP1',
       price: trade.tp1,
-      distance: formatSignedDollar(6),
+      distance: formatSignedDollar(tp1Reward),
       tone: 'text-[#3fbf8f]',
       hit: trade.tp1Hit,
-      extra: '',
+      extra: tp1Rr,
     },
     {
       label: 'TP2',
       price: trade.tp2,
-      distance: formatSignedDollar(11),
+      distance: formatSignedDollar(tp2Reward),
       tone: 'text-[#3fbf8f]',
       hit: trade.tp2Hit,
-      extra: '',
+      extra: tp2Rr,
     },
     {
       label: 'TP3',
       price: trade.tp3,
-      distance: formatSignedDollar(15),
+      distance: formatSignedDollar(tp3Reward),
       tone: 'text-[#3fbf8f]',
       hit: trade.tp3Hit,
-      extra: '',
+      extra: tp3Rr,
     },
   ];
 
@@ -308,6 +340,14 @@ export const ActiveSignalCard: React.FC<ActiveSignalCardProps> = ({
             }}
           >
             {trade.zoneStrength.toFixed(1)}/10
+          </span>
+
+          {/* Real Risk:Reward chip */}
+          <span
+            className="px-2 py-0.5 rounded bg-[#1a1711] border border-[#2b261b] text-[#f2d78f] text-[11px] font-bold font-['JetBrains_Mono',monospace] tabular-nums"
+            title={`Risk $${realRisk.toFixed(2)} · TP1 ${tp1Rr} · TP2 ${tp2Rr} · TP3 ${tp3Rr}`}
+          >
+            R:R {riskRewardDisplay}
           </span>
 
           {/* Opened timestamp ("Opened Fri 23 Oct 19:00") */}
@@ -400,13 +440,16 @@ export const ActiveSignalCard: React.FC<ActiveSignalCardProps> = ({
                   {row.distance}
                 </td>
                 <td className="py-2 px-3 text-right font-['JetBrains_Mono',monospace] tabular-nums">
-                  {row.hit ? (
-                    <span className="inline-block px-1.5 py-0.5 rounded bg-[#3fbf8f]/15 border border-[#3fbf8f]/40 text-[#3fbf8f] text-[10px] font-bold">
-                      Hit
-                    </span>
-                  ) : row.extra ? (
-                    <span className="text-[11px] text-[#9d947e]">{row.extra}</span>
-                  ) : null}
+                  <div className="inline-flex items-center justify-end gap-1.5">
+                    {row.extra ? (
+                      <span className="text-[11px] text-[#9d947e]">{row.extra}</span>
+                    ) : null}
+                    {row.hit ? (
+                      <span className="inline-block px-1.5 py-0.5 rounded bg-[#3fbf8f]/15 border border-[#3fbf8f]/40 text-[#3fbf8f] text-[10px] font-bold">
+                        Hit
+                      </span>
+                    ) : null}
+                  </div>
                 </td>
               </tr>
             ))}

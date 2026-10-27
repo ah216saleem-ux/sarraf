@@ -5,6 +5,8 @@ import { commandStore } from '../command/data/commandFeedStore';
 import {
   DojiTimeframe,
   DojiZoneState,
+  DojiMode,
+  DojiZoneLifetime,
   RawBar,
   DojiZone,
   DojiTimeframeStats,
@@ -39,7 +41,18 @@ function getIntervalMs(tf: DojiTimeframe): number {
   }
 }
 
-export function useDojiFeed(selectedTf: DojiTimeframe) {
+export function useDojiFeed(
+  selectedTf: DojiTimeframe,
+  initialMode: DojiMode = 'indicator',
+  bodyPctParam?: number,
+  wickDiffPctParam: number = 0.15,
+  minRangeAtrParam?: number,
+  maxZonesPerTfParam: number = 50,
+  maxDistanceAtrParam: number = 0,
+  initialMinZoneStrength: number = 5,
+  slAtrMultiplierParam: number = 0.25,
+  initialZoneLifetime: DojiZoneLifetime = 'untilBroken'
+) {
   const [barsMap, setBarsMap] = useState<Record<DojiTimeframe, RawBar[]>>({
     '15m': [],
     '30m': [],
@@ -63,6 +76,25 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
   const [lastTickTime, setLastTickTime] = useState<number>(0);
   const [isLoadingCandles, setIsLoadingCandles] = useState<boolean>(true);
   const [redOnly, setRedOnly] = useState<boolean>(true);
+  const [dojiMode, setDojiMode] = useState<DojiMode>(initialMode);
+  const [zoneLifetime, setZoneLifetime] = useState<DojiZoneLifetime>(initialZoneLifetime);
+  const [minZoneStrength, setMinZoneStrength] = useState<number>(initialMinZoneStrength);
+  const [trendFilter, setTrendFilter] = useState<boolean>(true);
+  const [zoneMerge, setZoneMerge] = useState<boolean>(true);
+  const [retestConfirm, setRetestConfirm] = useState<boolean>(true);
+  const [tp1R, setTp1R] = useState<number>(1.0);
+  const [tp2R, setTp2R] = useState<number>(2.0);
+  const [tp3R, setTp3R] = useState<number>(3.0);
+  const [showAllZones, setShowAllZones] = useState<boolean>(false);
+  const [maxZonesPerTf, setMaxZonesPerTf] = useState<number>(maxZonesPerTfParam);
+  const [maxDistanceAtr, setMaxDistanceAtr] = useState<number>(maxDistanceAtrParam);
+
+  const effectiveBodyPct = bodyPctParam ?? (dojiMode === 'loose' ? 0.10 : 0.20);
+  const effectiveWickDiffPct = wickDiffPctParam ?? 0.15;
+  const effectiveMinRangeAtr = minRangeAtrParam ?? (dojiMode === 'strict' ? 0.5 : 0.2);
+  const effectiveMaxZonesPerTf = maxZonesPerTf;
+  const effectiveMaxDistanceAtr = maxDistanceAtr;
+  const effectiveSlAtrMultiplier = slAtrMultiplierParam ?? 0.25;
 
   const [zonesMap, setZonesMap] = useState<Record<DojiTimeframe, DojiZone[]>>({
     '15m': [],
@@ -105,6 +137,38 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
   selectedTfRef.current = selectedTf;
   const redOnlyRef = useRef<boolean>(redOnly);
   redOnlyRef.current = redOnly;
+  const dojiModeRef = useRef<DojiMode>(dojiMode);
+  dojiModeRef.current = dojiMode;
+  const zoneLifetimeRef = useRef<DojiZoneLifetime>(zoneLifetime);
+  zoneLifetimeRef.current = zoneLifetime;
+  const trendFilterRef = useRef<boolean>(trendFilter);
+  trendFilterRef.current = trendFilter;
+  const zoneMergeRef = useRef<boolean>(zoneMerge);
+  zoneMergeRef.current = zoneMerge;
+  const retestConfirmRef = useRef<boolean>(retestConfirm);
+  retestConfirmRef.current = retestConfirm;
+  const bodyPctRef = useRef<number>(effectiveBodyPct);
+  bodyPctRef.current = effectiveBodyPct;
+  const wickDiffPctRef = useRef<number>(effectiveWickDiffPct);
+  wickDiffPctRef.current = effectiveWickDiffPct;
+  const minRangeAtrRef = useRef<number>(effectiveMinRangeAtr);
+  minRangeAtrRef.current = effectiveMinRangeAtr;
+  const maxZonesPerTfRef = useRef<number>(effectiveMaxZonesPerTf);
+  maxZonesPerTfRef.current = effectiveMaxZonesPerTf;
+  const maxDistanceAtrRef = useRef<number>(effectiveMaxDistanceAtr);
+  maxDistanceAtrRef.current = effectiveMaxDistanceAtr;
+  const minZoneStrengthRef = useRef<number>(minZoneStrength);
+  minZoneStrengthRef.current = minZoneStrength;
+  const tp1RRef = useRef<number>(tp1R);
+  tp1RRef.current = tp1R;
+  const tp2RRef = useRef<number>(tp2R);
+  tp2RRef.current = tp2R;
+  const tp3RRef = useRef<number>(tp3R);
+  tp3RRef.current = tp3R;
+  const slAtrMultiplierRef = useRef<number>(effectiveSlAtrMultiplier);
+  slAtrMultiplierRef.current = effectiveSlAtrMultiplier;
+  const tfStatsMapRef = useRef<Record<DojiTimeframe, DojiTimeframeStats>>(tfStatsMap);
+  tfStatsMapRef.current = tfStatsMap;
   const zonesMapRef = useRef<Record<DojiTimeframe, DojiZone[]>>({
     '15m': [],
     '30m': [],
@@ -120,114 +184,227 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
   const isSyncingToCommandStoreRef = useRef<boolean>(false);
 
   // Re-extract zones and run trade simulation from closed bars across all 4 timeframes
-  const reExtractAllZones = useCallback((currentP: number, redOnlyOverride?: boolean) => {
-    const useRedOnly = typeof redOnlyOverride === 'boolean' ? redOnlyOverride : redOnlyRef.current;
-    const currentBars = barsRef.current;
-    const newZonesMap: Record<DojiTimeframe, DojiZone[]> = {
-      '15m': [],
-      '30m': [],
-      '1h': [],
-      '4h': [],
-    };
-    const newStatsMap: Record<DojiTimeframe, DojiTimeframeStats> = {
-      '15m': { timeframe: '15m', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-      '30m': { timeframe: '30m', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-      '1h': { timeframe: '1h', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-      '4h': { timeframe: '4h', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-    };
-    const combinedZones: DojiZone[] = [];
-    const newActiveTrades: Record<DojiTimeframe, DojiTrade | null> = {
-      '15m': null,
-      '30m': null,
-      '1h': null,
-      '4h': null,
-    };
-    const combinedTrades: DojiTrade[] = [];
+  const reExtractAllZones = useCallback(
+    (
+      currentP: number,
+      redOnlyOverride?: boolean,
+      modeOverride?: DojiMode,
+      bodyPctOverride?: number,
+      wickDiffPctOverride?: number,
+      minRangeAtrOverride?: number,
+      maxZonesPerTfOverride?: number,
+      maxDistanceAtrOverride?: number,
+      minZoneStrengthOverride?: number,
+      slAtrMultiplierOverride?: number,
+      zoneLifetimeOverride?: DojiZoneLifetime,
+      trendFilterOverride?: boolean,
+      zoneMergeOverride?: boolean,
+      retestConfirmOverride?: boolean
+    ) => {
+      const useRedOnly = typeof redOnlyOverride === 'boolean' ? redOnlyOverride : redOnlyRef.current;
+      const useMode = modeOverride ?? dojiModeRef.current;
+      const useZoneLifetime = zoneLifetimeOverride ?? zoneLifetimeRef.current;
+      const useTrendFilter =
+        typeof trendFilterOverride === 'boolean' ? trendFilterOverride : trendFilterRef.current;
+      const useZoneMerge =
+        typeof zoneMergeOverride === 'boolean' ? zoneMergeOverride : zoneMergeRef.current;
+      const useRetestConfirm =
+        typeof retestConfirmOverride === 'boolean'
+          ? retestConfirmOverride
+          : retestConfirmRef.current;
+      const useBodyPct =
+        typeof bodyPctOverride === 'number'
+          ? bodyPctOverride
+          : bodyPctParam ?? (useMode === 'loose' ? 0.10 : 0.20);
+      const useWickDiffPct =
+        typeof wickDiffPctOverride === 'number' ? wickDiffPctOverride : wickDiffPctRef.current;
+      const useMinRangeAtr =
+        typeof minRangeAtrOverride === 'number'
+          ? minRangeAtrOverride
+          : minRangeAtrParam ?? (useMode === 'strict' ? 0.5 : 0.2);
+      const useMaxZonesPerTf =
+        typeof maxZonesPerTfOverride === 'number'
+          ? maxZonesPerTfOverride
+          : maxZonesPerTfRef.current;
+      const useMaxDistanceAtr =
+        typeof maxDistanceAtrOverride === 'number'
+          ? maxDistanceAtrOverride
+          : maxDistanceAtrRef.current;
+      const useMinZoneStrength =
+        typeof minZoneStrengthOverride === 'number'
+          ? minZoneStrengthOverride
+          : minZoneStrengthRef.current;
+      const useSlAtrMultiplier =
+        typeof slAtrMultiplierOverride === 'number'
+          ? slAtrMultiplierOverride
+          : slAtrMultiplierRef.current;
 
-    for (const tf of TIMEFRAMES) {
-      const tfBars = currentBars[tf];
-      if (tfBars && tfBars.length > 0) {
-        const refPrice = currentP > 0 ? currentP : tfBars[tfBars.length - 1].close;
+      const currentBars = barsRef.current;
+      const newZonesMap: Record<DojiTimeframe, DojiZone[]> = {
+        '15m': [],
+        '30m': [],
+        '1h': [],
+        '4h': [],
+      };
+      const newStatsMap: Record<DojiTimeframe, DojiTimeframeStats> = {
+        '15m': { timeframe: '15m', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
+        '30m': { timeframe: '30m', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
+        '1h': { timeframe: '1h', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
+        '4h': { timeframe: '4h', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
+      };
+      const combinedZones: DojiZone[] = [];
+      const newActiveTrades: Record<DojiTimeframe, DojiTrade | null> = {
+        '15m': null,
+        '30m': null,
+        '1h': null,
+        '4h': null,
+      };
+      const combinedTrades: DojiTrade[] = [];
 
-        // 1. Run deterministic signal engine per timeframe (strictly separate break and retest bars)
-        const { trades, activeTrade, consumedOpenTimes } = simulateTradesForTimeframe(
-          tfBars,
-          tf,
-          useRedOnly,
-          refPrice
-        );
-        newActiveTrades[tf] = activeTrade;
-        combinedTrades.push(...trades);
-        if (activeTrade) {
-          combinedTrades.push(activeTrade);
-        }
+      for (const tf of TIMEFRAMES) {
+        const tfBars = currentBars[tf];
+        if (tfBars && tfBars.length > 0) {
+          const refPrice = currentP > 0 ? currentP : tfBars[tfBars.length - 1].close;
+          const htfBars =
+            tf === '15m' || tf === '30m'
+              ? currentBars['1h']
+              : tf === '1h'
+              ? currentBars['4h']
+              : undefined;
 
-        // 2. Extract up to 5 valid zones per timeframe (including "used" zones where a retest trade was taken)
-        const { zones: tfZones, stats } = extractValidDojiZonesWithStats(
-          tfBars,
-          tf,
-          refPrice,
-          useRedOnly,
-          consumedOpenTimes
-        );
+          // 1. Run deterministic signal engine per timeframe (strictly separate break and retest bars)
+          const { trades, activeTrade, consumedOpenTimes, filterStats } =
+            simulateTradesForTimeframe(
+              tfBars,
+              tf,
+              useRedOnly,
+              refPrice,
+              useMode,
+              useBodyPct,
+              useWickDiffPct,
+              useMinRangeAtr,
+              useMinZoneStrength,
+              useSlAtrMultiplier,
+              useTrendFilter,
+              useZoneMerge,
+              useRetestConfirm,
+              htfBars,
+              tp1RRef.current,
+              tp2RRef.current,
+              tp3RRef.current
+            );
+          newActiveTrades[tf] = activeTrade;
+          combinedTrades.push(...trades);
+          if (activeTrade) {
+            combinedTrades.push(activeTrade);
+          }
 
-        // 3. Enforce strict check: a zone is marked "used" if and only if an actual retest trade opened on it
-        const tfTradeZoneTimes = new Set<string>(trades.map((t) => t.zoneOpenTime));
-        if (activeTrade) {
-          tfTradeZoneTimes.add(activeTrade.zoneOpenTime);
-        }
-
-        const verifiedTfZones = tfZones.map((z) => {
-          const hasTradeInLog = tfTradeZoneTimes.has(z.openTime);
-          const zoneState: DojiZoneState = hasTradeInLog
-            ? 'used'
-            : z.isBroken
-            ? 'armed'
-            : 'waiting';
-          const liveRetest = evaluateZoneLiveRetest(
-            {
-              barIndex: z.barIndex,
-              high: z.high,
-              low: z.low,
-              isBroken: z.isBroken,
-              breakDirection: z.breakDirection,
-              breakBarIndex: z.breakBarIndex,
-              isUsed: hasTradeInLog,
-            },
+          // 2. Extract up to useMaxZonesPerTf valid zones per timeframe (default 50, maxDistanceAtr default 0)
+          const { zones: tfZones, stats } = extractValidDojiZonesWithStats(
             tfBars,
             tf,
-            refPrice
+            refPrice,
+            useRedOnly,
+            consumedOpenTimes,
+            useMode,
+            useBodyPct,
+            useWickDiffPct,
+            useMinRangeAtr,
+            useMaxZonesPerTf,
+            useMaxDistanceAtr,
+            useZoneLifetime,
+            useZoneMerge
           );
-          return {
-            ...z,
-            zoneState,
-            isUsed: hasTradeInLog,
-            hasSignalFormed: hasTradeInLog,
-            ...liveRetest,
+
+          // 3. Enforce strict check: a zone is marked "used" if and only if an actual retest trade opened on it
+          const tfTradeZoneTimes = new Set<string>(trades.map((t) => t.zoneOpenTime));
+          if (activeTrade) {
+            tfTradeZoneTimes.add(activeTrade.zoneOpenTime);
+          }
+
+          const verifiedTfZones = tfZones.map((z) => {
+            const openTimes = z.mergedOpenTimes ?? [z.openTime];
+            const hasTradeInLog = openTimes.some((ot) => tfTradeZoneTimes.has(ot));
+            const zoneState: DojiZoneState = hasTradeInLog
+              ? 'used'
+              : z.isBroken
+              ? 'armed'
+              : 'waiting';
+            const canTrade = z.strength >= useMinZoneStrength;
+            const liveRetest = canTrade
+              ? evaluateZoneLiveRetest(
+                  {
+                    barIndex: z.barIndex,
+                    high: z.high,
+                    low: z.low,
+                    isBroken: z.isBroken,
+                    breakDirection: z.breakDirection,
+                    breakBarIndex: z.breakBarIndex,
+                    isUsed: hasTradeInLog,
+                  },
+                  tfBars,
+                  tf,
+                  refPrice
+                )
+              : {
+                  isRetestLive: false,
+                  retestLiveCloseTime: null,
+                  retestLiveText: null,
+                };
+            return {
+              ...z,
+              zoneState,
+              isUsed: hasTradeInLog,
+              hasSignalFormed: hasTradeInLog,
+              ...liveRetest,
+            };
+          });
+
+          newZonesMap[tf] = verifiedTfZones;
+          newStatsMap[tf] = {
+            ...stats,
+            blockedByTrend: filterStats.blockedByTrend,
+            blockedByConfirm: filterStats.blockedByConfirm,
+            mergedDojisCount: stats.mergedDojisCount ?? filterStats.mergedDojis,
+            trendFilter: useTrendFilter,
+            zoneMerge: useZoneMerge,
+            retestConfirm: useRetestConfirm,
           };
-        });
-
-        newZonesMap[tf] = verifiedTfZones;
-        newStatsMap[tf] = stats;
-        combinedZones.push(...verifiedTfZones);
+          combinedZones.push(...verifiedTfZones);
+        }
       }
-    }
 
-    combinedTrades.sort((a, b) => new Date(b.entryTime).getTime() - new Date(a.entryTime).getTime());
+      combinedTrades.sort((a, b) => new Date(b.entryTime).getTime() - new Date(a.entryTime).getTime());
 
-    zonesMapRef.current = newZonesMap;
-    setZonesMap(newZonesMap);
-    setTfStatsMap(newStatsMap);
-    setAllValidZones(combinedZones);
+      zonesMapRef.current = newZonesMap;
+      tfStatsMapRef.current = newStatsMap;
+      setZonesMap(newZonesMap);
+      setTfStatsMap(newStatsMap);
+      setAllValidZones(combinedZones);
 
-    activeTradesMapRef.current = newActiveTrades;
-    setActiveTradesMap(newActiveTrades);
-    setAllTrades(combinedTrades);
-    saveTradesToStorage(combinedTrades);
+      activeTradesMapRef.current = newActiveTrades;
+      setActiveTradesMap(newActiveTrades);
+      setAllTrades(combinedTrades);
+      saveTradesToStorage(combinedTrades);
 
-    const sig = computeActiveSignal(currentP, selectedTfRef.current, combinedZones);
-    setActiveSignal(sig);
-  }, []);
+      const selTf = selectedTfRef.current;
+      const selAtr = newStatsMap[selTf]?.atr || 3.5;
+      const sig = computeActiveSignal(
+        currentP,
+        selTf,
+        combinedZones,
+        selAtr,
+        useSlAtrMultiplier,
+        useMinZoneStrength,
+        newActiveTrades[selTf],
+        tp1RRef.current,
+        tp2RRef.current,
+        tp3RRef.current
+      );
+      setActiveSignal(sig);
+    },
+    [bodyPctParam, minRangeAtrParam]
+  );
 
   // Live strength, live retest heads-up & open trade P/L update on each tick
   const updateLiveStrengths = useCallback((currentP: number) => {
@@ -260,6 +437,7 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
             barIndex: z.barIndex,
             isBroken: z.isBroken,
             breakDirection: z.breakDirection,
+            mergedCount: z.mergedCount,
           },
           currentP,
           ema9,
@@ -268,6 +446,7 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
         );
 
         const distPts = Number((((z.high + z.low) / 2) - currentP).toFixed(2));
+        const side: 'SELL' | 'BUY' = distPts >= 0 ? 'SELL' : 'BUY';
         const retestDistancePts =
           z.retestLevel !== null
             ? Number((z.retestLevel - currentP).toFixed(2))
@@ -278,25 +457,33 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
             : Math.min(Math.abs(currentP - z.high), Math.abs(currentP - z.low));
         const isWithin5Atr = distFromLevel <= 5 * atr;
 
-        const liveRetest = evaluateZoneLiveRetest(
-          {
-            barIndex: z.barIndex,
-            high: z.high,
-            low: z.low,
-            isBroken: z.isBroken,
-            breakDirection: z.breakDirection,
-            breakBarIndex: z.breakBarIndex,
-            isUsed: z.isUsed,
-          },
-          bars,
-          tf,
-          currentP
-        );
+        const canTrade = s.strength >= minZoneStrengthRef.current;
+        const liveRetest = canTrade
+          ? evaluateZoneLiveRetest(
+              {
+                barIndex: z.barIndex,
+                high: z.high,
+                low: z.low,
+                isBroken: z.isBroken,
+                breakDirection: z.breakDirection,
+                breakBarIndex: z.breakBarIndex,
+                isUsed: z.isUsed,
+              },
+              bars,
+              tf,
+              currentP
+            )
+          : {
+              isRetestLive: false,
+              retestLiveCloseTime: null,
+              retestLiveText: null,
+            };
 
         return {
           ...z,
           ...s,
           distancePts: distPts,
+          side,
           retestDistancePts,
           isWithin5Atr,
           ...liveRetest,
@@ -312,7 +499,17 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
       zonesMapRef.current = updatedMap;
       setZonesMap(updatedMap);
       setAllValidZones(combinedZones);
-      const sig = computeActiveSignal(currentP, selectedTfRef.current, combinedZones);
+      const selTf = selectedTfRef.current;
+      const selAtr = tfStatsMapRef.current[selTf]?.atr || 3.5;
+      const sig = computeActiveSignal(
+        currentP,
+        selTf,
+        combinedZones,
+        selAtr,
+        slAtrMultiplierRef.current,
+        minZoneStrengthRef.current,
+        activeTradesMapRef.current[selTf]
+      );
       setActiveSignal(sig);
     }
 
@@ -345,6 +542,65 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
       );
     }
   }, []);
+
+  const fetchOhlcPage = useCallback(async (query: string): Promise<RawBar[]> => {
+    const urls = [
+      `/api/doji/ohlc?${query}`,
+      `https://biquote.io/api/XAUUSD/ohlc?${query}`,
+    ];
+
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, { headers: { Accept: 'application/json' } });
+        if (res.ok) {
+          const data = await res.json();
+          const rawBars = data?.data?.bars || data?.bars;
+          if (Array.isArray(rawBars) && rawBars.length > 0) {
+            return [...rawBars].reverse();
+          }
+        }
+      } catch {}
+    }
+    return [];
+  }, []);
+
+  const refetchClosedTimeframe = useCallback(
+    async (tf: DojiTimeframe) => {
+      try {
+        const officialBars = await fetchOhlcPage(`interval=${tf}&limit=1000&nocache=1`);
+        if (!officialBars || officialBars.length === 0) return;
+
+        const existingBars = barsRef.current[tf] || [];
+        // Merge existing bars with officialBars last so official server candles replace locally tick-built candles
+        let merged = deduplicateBars([...existingBars, ...officialBars]);
+        if (merged.length > 1000) {
+          merged = merged.slice(-1000);
+        }
+
+        // Ensure the currently forming bar reflects the latest live tick price if open
+        const currentLive = livePriceRef.current;
+        if (merged.length > 0 && currentLive > 0 && !isMarketClosedRef.current) {
+          const lastIdx = merged.length - 1;
+          const lastBar = { ...merged[lastIdx] };
+          if (lastBar.isOpen) {
+            lastBar.close = currentLive;
+            lastBar.high = Math.max(lastBar.high, currentLive);
+            lastBar.low = Math.min(lastBar.low, currentLive);
+            merged[lastIdx] = lastBar;
+          }
+        }
+
+        const updatedMap = {
+          ...barsRef.current,
+          [tf]: merged,
+        };
+        barsRef.current = updatedMap;
+        setBarsMap(updatedMap);
+        reExtractAllZones(livePriceRef.current);
+      } catch {}
+    },
+    [fetchOhlcPage, reExtractAllZones]
+  );
 
   // Unified handler for incoming price & marketState updates (used by SignalR, fallback polling, and commandStore)
   const applyIncomingQuote = useCallback(
@@ -432,13 +688,13 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
       }
 
       // Market is open: update active bar across all 4 timeframes
-      let anyBarClosed = false;
+      const closedTimeframes: DojiTimeframe[] = [];
       const currentMap = barsRef.current;
       const updatedMap = { ...currentMap };
 
       for (const tf of TIMEFRAMES) {
-        const bars = updatedMap[tf];
-        if (!bars || bars.length === 0) continue;
+        const bars = updatedMap[tf] ? [...updatedMap[tf]] : [];
+        if (bars.length === 0) continue;
 
         const lastIndex = bars.length - 1;
         const currentBar = { ...bars[lastIndex] };
@@ -461,26 +717,31 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
             tickVolume: 1,
           };
           bars.push(newBar);
-          anyBarClosed = true;
+          updatedMap[tf] = bars;
+          closedTimeframes.push(tf);
         } else {
           currentBar.close = p;
           currentBar.high = Math.max(currentBar.high, p);
           currentBar.low = Math.min(currentBar.low, p);
           currentBar.tickVolume = (currentBar.tickVolume || 0) + 1;
           bars[lastIndex] = currentBar;
+          updatedMap[tf] = bars;
         }
       }
 
       barsRef.current = updatedMap;
       setBarsMap(updatedMap);
 
-      if (anyBarClosed) {
+      if (closedTimeframes.length > 0) {
         reExtractAllZones(p);
+        for (const tf of closedTimeframes) {
+          void refetchClosedTimeframe(tf);
+        }
       } else {
         updateLiveStrengths(p);
       }
     },
-    [reExtractAllZones, updateLiveStrengths]
+    [reExtractAllZones, refetchClosedTimeframe, updateLiveStrengths]
   );
 
   // Subscribe to commandStore so top Sarraf bar and DOJI tab always share the exact same live price and update together
@@ -551,27 +812,6 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
   // 1. Initial Load: Fetch candles for all 4 timeframes and rebuild trades from candles
   useEffect(() => {
     let isCancelled = false;
-
-    async function fetchOhlcPage(query: string): Promise<RawBar[]> {
-      const urls = [
-        `https://biquote.io/api/XAUUSD/ohlc?${query}`,
-        `/api/doji/ohlc?${query}`,
-      ];
-
-      for (const url of urls) {
-        try {
-          const res = await fetch(url, { headers: { Accept: 'application/json' } });
-          if (res.ok) {
-            const data = await res.json();
-            const rawBars = data?.data?.bars || data?.bars;
-            if (Array.isArray(rawBars) && rawBars.length > 0) {
-              return [...rawBars].reverse();
-            }
-          }
-        } catch {}
-      }
-      return [];
-    }
 
     async function fetchTimeframeCandles(tf: DojiTimeframe): Promise<RawBar[]> {
       let collected = deduplicateBars(await fetchOhlcPage(`interval=${tf}&limit=1000`));
@@ -672,21 +912,79 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
     return () => {
       isCancelled = true;
     };
-  }, [reExtractAllZones, pollBiquoteLatest]);
+  }, [fetchOhlcPage, reExtractAllZones, pollBiquoteLatest]);
 
-  // When redOnly setting changes, re-extract zones and trades across all 4 timeframes
+  // When redOnly, dojiMode, zoneLifetime, trendFilter, zoneMerge, retestConfirm, minZoneStrength, or configurable threshold parameters change, re-extract zones and trades across all 4 timeframes
   useEffect(() => {
     redOnlyRef.current = redOnly;
-    reExtractAllZones(livePriceRef.current, redOnly);
-  }, [redOnly, reExtractAllZones]);
+    dojiModeRef.current = dojiMode;
+    zoneLifetimeRef.current = zoneLifetime;
+    trendFilterRef.current = trendFilter;
+    zoneMergeRef.current = zoneMerge;
+    retestConfirmRef.current = retestConfirm;
+    bodyPctRef.current = effectiveBodyPct;
+    wickDiffPctRef.current = effectiveWickDiffPct;
+    minRangeAtrRef.current = effectiveMinRangeAtr;
+    maxZonesPerTfRef.current = effectiveMaxZonesPerTf;
+    maxDistanceAtrRef.current = effectiveMaxDistanceAtr;
+    minZoneStrengthRef.current = minZoneStrength;
+    slAtrMultiplierRef.current = effectiveSlAtrMultiplier;
+    tp1RRef.current = tp1R;
+    tp2RRef.current = tp2R;
+    tp3RRef.current = tp3R;
+    reExtractAllZones(
+      livePriceRef.current,
+      redOnly,
+      dojiMode,
+      effectiveBodyPct,
+      effectiveWickDiffPct,
+      effectiveMinRangeAtr,
+      effectiveMaxZonesPerTf,
+      effectiveMaxDistanceAtr,
+      minZoneStrength,
+      effectiveSlAtrMultiplier,
+      zoneLifetime,
+      trendFilter,
+      zoneMerge,
+      retestConfirm
+    );
+  }, [
+    redOnly,
+    dojiMode,
+    zoneLifetime,
+    trendFilter,
+    zoneMerge,
+    retestConfirm,
+    effectiveBodyPct,
+    effectiveWickDiffPct,
+    effectiveMinRangeAtr,
+    effectiveMaxZonesPerTf,
+    effectiveMaxDistanceAtr,
+    minZoneStrength,
+    effectiveSlAtrMultiplier,
+    tp1R,
+    tp2R,
+    tp3R,
+    reExtractAllZones,
+  ]);
 
   // When selected timeframe changes, update active signal
   useEffect(() => {
-    if (livePriceRef.current > 0 && allValidZones.length > 0) {
-      const sig = computeActiveSignal(livePriceRef.current, selectedTf, allValidZones);
-      setActiveSignal(sig);
-    }
-  }, [selectedTf, allValidZones]);
+    const selAtr = tfStatsMapRef.current[selectedTf]?.atr || 3.5;
+    const sig = computeActiveSignal(
+      livePriceRef.current,
+      selectedTf,
+      allValidZones,
+      selAtr,
+      effectiveSlAtrMultiplier,
+      minZoneStrength,
+      activeTradesMap[selectedTf],
+      tp1RRef.current,
+      tp2RRef.current,
+      tp3RRef.current
+    );
+    setActiveSignal(sig);
+  }, [selectedTf, allValidZones, activeTradesMap, minZoneStrength, effectiveSlAtrMultiplier, tp1R, tp2R, tp3R]);
 
   // 2. Real-time SignalR Connection to https://biquote.io/hubs/tick
   useEffect(() => {
@@ -777,6 +1075,34 @@ export function useDojiFeed(selectedTf: DojiTimeframe) {
     isLoadingCandles,
     redOnly,
     setRedOnly,
+    dojiMode,
+    setDojiMode,
+    zoneLifetime,
+    setZoneLifetime,
+    trendFilter,
+    setTrendFilter,
+    zoneMerge,
+    setZoneMerge,
+    retestConfirm,
+    setRetestConfirm,
+    minZoneStrength,
+    setMinZoneStrength,
+    tp1R,
+    setTp1R,
+    tp2R,
+    setTp2R,
+    tp3R,
+    setTp3R,
+    showAllZones,
+    setShowAllZones,
+    setMaxZonesPerTf,
+    setMaxDistanceAtr,
+    bodyPct: effectiveBodyPct,
+    wickDiffPct: effectiveWickDiffPct,
+    minRangeAtr: effectiveMinRangeAtr,
+    maxZonesPerTf: effectiveMaxZonesPerTf,
+    maxDistanceAtr: effectiveMaxDistanceAtr,
+    slAtrMultiplier: effectiveSlAtrMultiplier,
     zonesMap,
     tfStatsMap,
     allValidZones,

@@ -230,6 +230,7 @@ export const BlackstoneZoneChart: React.FC<BlackstoneZoneChartProps> = ({
       },
       localization: {
         timeFormatter: (utcTimestamp: number) => {
+          if (!Number.isFinite(utcTimestamp)) return '';
           const d = new Date(utcTimestamp * 1000);
           return new Intl.DateTimeFormat('en-GB', {
             timeZone: 'UTC',
@@ -270,9 +271,9 @@ export const BlackstoneZoneChart: React.FC<BlackstoneZoneChartProps> = ({
         const modeInfo = scaleModeRef.current;
         const candlesArr = uniqueCandlesRef.current;
         const fallbackRef =
-          livePriceRef.current && livePriceRef.current > 0
+          livePriceRef.current && Number.isFinite(livePriceRef.current) && livePriceRef.current > 0
             ? livePriceRef.current
-            : candlesArr.length > 0
+            : candlesArr.length > 0 && Number.isFinite(candlesArr[candlesArr.length - 1].close)
               ? candlesArr[candlesArr.length - 1].close
               : null;
 
@@ -286,12 +287,14 @@ export const BlackstoneZoneChart: React.FC<BlackstoneZoneChartProps> = ({
             minVal = Math.min(minVal, fallbackRef - 3.5);
             maxVal = Math.max(maxVal, fallbackRef + 3.5);
           }
-          return {
-            priceRange: {
-              minValue: minVal,
-              maxValue: maxVal,
-            },
-          };
+          if (Number.isFinite(minVal) && Number.isFinite(maxVal) && minVal < maxVal) {
+            return {
+              priceRange: {
+                minValue: minVal,
+                maxValue: maxVal,
+              },
+            };
+          }
         }
 
         if (!res || !res.priceRange) return res;
@@ -316,13 +319,17 @@ export const BlackstoneZoneChart: React.FC<BlackstoneZoneChartProps> = ({
           }
         }
 
-        return {
-          ...res,
-          priceRange: {
-            minValue: minVal,
-            maxValue: maxVal,
-          },
-        };
+        if (Number.isFinite(minVal) && Number.isFinite(maxVal) && minVal < maxVal) {
+          return {
+            ...res,
+            priceRange: {
+              minValue: minVal,
+              maxValue: maxVal,
+            },
+          };
+        }
+
+        return res;
       },
     });
 
@@ -365,14 +372,33 @@ export const BlackstoneZoneChart: React.FC<BlackstoneZoneChartProps> = ({
 
     const formatted: CandlePoint[] = [];
     for (const c of candles) {
+      if (!c) continue;
+      const open = typeof c.open === 'number' && Number.isFinite(c.open) ? c.open : null;
+      const high = typeof c.high === 'number' && Number.isFinite(c.high) ? c.high : null;
+      const low = typeof c.low === 'number' && Number.isFinite(c.low) ? c.low : null;
+      const close = typeof c.close === 'number' && Number.isFinite(c.close) ? c.close : null;
+      if (
+        open === null ||
+        high === null ||
+        low === null ||
+        close === null ||
+        open <= 0 ||
+        high <= 0 ||
+        low <= 0 ||
+        close <= 0
+      ) {
+        continue;
+      }
       const timeSec = isoToDubaiChartSec(c.openTime);
-      if (timeSec !== null) {
+      if (timeSec !== null && Number.isFinite(timeSec)) {
+        const safeHigh = Math.max(high, open, close);
+        const safeLow = Math.min(low, open, close);
         formatted.push({
           time: timeSec,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
+          open,
+          high: safeHigh,
+          low: safeLow,
+          close,
         });
       }
     }
@@ -380,28 +406,42 @@ export const BlackstoneZoneChart: React.FC<BlackstoneZoneChartProps> = ({
     formatted.sort((a, b) => a.time - b.time);
 
     const unique: CandlePoint[] = [];
-    const seen = new Set<number>();
+    let lastTime = -Infinity;
     for (const item of formatted) {
-      if (!seen.has(item.time)) {
-        seen.add(item.time);
+      if (item.time > lastTime) {
+        lastTime = item.time;
         unique.push(item);
       }
     }
 
     // Merge current live price into the latest candle if feed is live
-    if (isFeedLive && livePrice && livePrice > 0 && unique.length > 0) {
+    if (
+      isFeedLive &&
+      livePrice &&
+      Number.isFinite(livePrice) &&
+      livePrice > 0 &&
+      unique.length > 0
+    ) {
       const lastIdx = unique.length - 1;
       const last = unique[lastIdx];
-      unique[lastIdx] = {
-        ...last,
-        high: Math.max(last.high, livePrice),
-        low: Math.min(last.low, livePrice),
-        close: livePrice,
-      };
+      if (last && Number.isFinite(last.open)) {
+        unique[lastIdx] = {
+          ...last,
+          high: Math.max(last.high, livePrice, last.open),
+          low: Math.min(last.low, livePrice, last.open),
+          close: livePrice,
+        };
+      }
     }
 
     uniqueCandlesRef.current = unique;
-    candleSeries.setData(unique as any);
+    if (unique.length > 0) {
+      try {
+        candleSeries.setData(unique as any);
+      } catch (err) {
+        console.warn('Blackstone chart setData failed', err);
+      }
+    }
 
     if (initializedTfRef.current !== timeframe) {
       initializedTfRef.current = timeframe;
@@ -413,16 +453,25 @@ export const BlackstoneZoneChart: React.FC<BlackstoneZoneChartProps> = ({
   useEffect(() => {
     const candleSeries = candleSeriesRef.current;
     const unique = uniqueCandlesRef.current;
-    if (!candleSeries || !isFeedLive || !livePrice || livePrice <= 0 || unique.length === 0) {
+    if (
+      !candleSeries ||
+      !isFeedLive ||
+      !livePrice ||
+      !Number.isFinite(livePrice) ||
+      livePrice <= 0 ||
+      unique.length === 0
+    ) {
       return;
     }
 
     const lastIdx = unique.length - 1;
     const last = unique[lastIdx];
+    if (!last || !Number.isFinite(last.open) || !Number.isFinite(last.time)) return;
+
     const updated: CandlePoint = {
       ...last,
-      high: Math.max(last.high, livePrice),
-      low: Math.min(last.low, livePrice),
+      high: Math.max(last.high, livePrice, last.open),
+      low: Math.min(last.low, livePrice, last.open),
       close: livePrice,
     };
     unique[lastIdx] = updated;

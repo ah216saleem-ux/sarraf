@@ -2,6 +2,35 @@
 
 export type DojiTimeframe = '15m' | '30m' | '1h' | '4h';
 export type DojiZoneState = 'waiting' | 'armed' | 'used';
+export type DojiMode = 'indicator' | 'strict' | 'loose';
+export type DojiZoneLifetime = 'untilBroken' | 'armed';
+export type DojiDebugStatus =
+  | 'waiting'
+  | 'broken-up'
+  | 'broken-down'
+  | 'armed'
+  | 'used'
+  | 'cancelled'
+  | 'hidden-by-cap'
+  | 'hidden-by-distance';
+
+export interface FlaggedDojiDebugItem {
+  openTime: string;
+  barTime: string;
+  high: number;
+  low: number;
+  status: DojiDebugStatus;
+}
+
+export interface DojiRejectionCounts {
+  byBody: number;
+  byWickSymmetry: number;
+  byAtrRange: number;
+  byRedOnly: number;
+  byBreakCancel: number;
+  byDistance8Atr: number;
+  byMaxZonesCap: number;
+}
 
 export interface RawBar {
   openTime: string; // ISO 8601
@@ -61,7 +90,10 @@ export interface DojiZone {
   strengthColor: string;
 
   distancePts: number;
+  side?: 'SELL' | 'BUY';
   isWithin5Atr?: boolean;
+  mergedCount?: number;
+  mergedOpenTimes?: string[];
 }
 
 export interface DojiTimeframeStats {
@@ -75,6 +107,19 @@ export interface DojiTimeframeStats {
   redOnlyValidCount?: number;
   redOnlyUncappedValidCount?: number;
   atr?: number;
+  rejections?: DojiRejectionCounts;
+  flaggedOpenTimeSecs?: number[];
+  last10FlaggedDubaiTimes?: string[];
+  last15FlaggedDojis?: FlaggedDojiDebugItem[];
+  maxZonesPerTf?: number;
+  maxDistanceAtr?: number;
+  zoneLifetime?: DojiZoneLifetime;
+  blockedByTrend?: number;
+  blockedByConfirm?: number;
+  mergedDojisCount?: number;
+  trendFilter?: boolean;
+  zoneMerge?: boolean;
+  retestConfirm?: boolean;
 }
 
 export interface ActiveDojiSignal {
@@ -84,9 +129,13 @@ export interface ActiveDojiSignal {
   targetZone: string;
   entryPrice: number;
   stopLoss: number;
+  risk: number;
   tp1: number;
   tp2: number;
   tp3: number;
+  tp1Rr: string;
+  tp2Rr: string;
+  tp3Rr: string;
   distanceToZone: string;
   riskReward: string;
   confidenceScore: number;
@@ -280,20 +329,39 @@ export function formatHeldDuration(barsHeld: number, timeframe: DojiTimeframe): 
   return `${mins}m`;
 }
 
-/**
- * Deduplicate bars chronologically by openTime
- */
 export function deduplicateBars(bars: RawBar[]): RawBar[] {
-  const seen = new Set<string>();
-  const out: RawBar[] = [];
+  const byTime = new Map<number, RawBar>();
   for (const b of bars) {
     if (!b || !b.openTime) continue;
-    if (!seen.has(b.openTime)) {
-      seen.add(b.openTime);
-      out.push(b);
+    const ms = new Date(b.openTime).getTime();
+    if (!Number.isFinite(ms)) continue;
+    const open = Number(b.open);
+    const high = Number(b.high);
+    const low = Number(b.low);
+    const close = Number(b.close);
+    if (
+      !Number.isFinite(open) ||
+      !Number.isFinite(high) ||
+      !Number.isFinite(low) ||
+      !Number.isFinite(close) ||
+      open <= 0 ||
+      high <= 0 ||
+      low <= 0 ||
+      close <= 0
+    ) {
+      continue;
     }
+    byTime.set(ms, {
+      ...b,
+      open,
+      high: Math.max(high, open, close),
+      low: Math.min(low, open, close),
+      close,
+    });
   }
-  return out;
+  return Array.from(byTime.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map((entry) => entry[1]);
 }
 
 /**
@@ -319,15 +387,33 @@ export function computeAtr14(bars: RawBar[]): number {
 
 /**
  * Check if a candle matches Doji criteria:
- * - Red candle (if redOnly is true): close <= open
- * - body <= 20% of range
- * - upper and lower wick diff <= 15% of range
- * - range >= 0.5 * ATR(14)
+ * - 'indicator' mode (default, exact TradingView Pine logic):
+ *   - isRed = close < open
+ *   - bodySize = abs(open - close); totalRange = high - low
+ *   - upperWick = high - max(open, close); lowerWick = min(open, close) - low
+ *   - isSmallBody = bodySize <= totalRange * 0.20 (configurable bodyPct)
+ *   - wicksSymmetric = abs(upperWick - lowerWick) <= totalRange * 0.15 AND (upperWick > 0 OR lowerWick > 0) (configurable wickDiffPct)
+ *   - doji = isRed AND isSmallBody AND wicksSymmetric
+ *   - NO ATR filter, NO minimum range (range > 0.3) check, NO red-only toggle (red is always required)
+ * - 'strict' mode (exact legacy logic):
+ *   - Red candle (if redOnly is true): close <= open
+ *   - body <= bodyPct * range (default 20%)
+ *   - upper and lower wick diff <= wickDiffPct * range (default 15%)
+ *   - range >= minRangeAtr * ATR(14) (default 0.5) and range > 0.3
+ * - 'loose' mode:
+ *   - body <= bodyPct * range (default 10%)
+ *   - does NOT require wick symmetry
+ *   - does NOT require range >= 0.5 * ATR (uses configurable minRangeAtr, default 0.2)
+ *   - does NOT require red-only
  */
 export function checkIsDoji(
   bar: RawBar,
   atr: number,
-  redOnly: boolean
+  redOnly: boolean = true,
+  mode: DojiMode = 'indicator',
+  bodyPct: number = mode === 'loose' ? 0.10 : 0.20,
+  wickDiffPct: number = 0.15,
+  minRangeAtr: number = mode === 'strict' ? 0.5 : 0.2
 ): {
   isDoji: boolean;
   body: number;
@@ -336,35 +422,138 @@ export function checkIsDoji(
   lowerWick: number;
   wickDiff: number;
   isRed: boolean;
+  rejectedBy?: 'body' | 'wickSymmetry' | 'atrRange' | 'redOnly' | null;
 } {
+  const normBodyPct = bodyPct > 1 ? bodyPct / 100 : bodyPct;
+  const normWickDiffPct = wickDiffPct > 1 ? wickDiffPct / 100 : wickDiffPct;
+
+  if (mode === 'indicator') {
+    const isRed = bar.close < bar.open;
+    const bodySize = Math.abs(bar.open - bar.close);
+    const totalRange = bar.high - bar.low;
+    const upperWick = bar.high - Math.max(bar.open, bar.close);
+    const lowerWick = Math.min(bar.open, bar.close) - bar.low;
+    const wickDiff = Math.abs(upperWick - lowerWick);
+    const isSmallBody = bodySize <= totalRange * normBodyPct;
+    const wicksSymmetric =
+      wickDiff <= totalRange * normWickDiffPct && (upperWick > 0 || lowerWick > 0);
+    const isDoji = isRed && isSmallBody && wicksSymmetric;
+
+    let rejectedBy: 'body' | 'wickSymmetry' | 'atrRange' | 'redOnly' | null = null;
+    if (!isDoji) {
+      if (!isSmallBody) rejectedBy = 'body';
+      else if (!wicksSymmetric) rejectedBy = 'wickSymmetry';
+      else if (!isRed) rejectedBy = 'redOnly';
+    }
+
+    return {
+      isDoji,
+      body: bodySize,
+      range: totalRange,
+      upperWick,
+      lowerWick,
+      wickDiff,
+      isRed,
+      rejectedBy,
+    };
+  }
+
   const range = bar.high - bar.low;
   const isRed = bar.close <= bar.open;
-
-  if (range <= 0.3) {
-    return { isDoji: false, body: 0, range, upperWick: 0, lowerWick: 0, wickDiff: 0, isRed };
-  }
-
-  if (redOnly && !isRed) {
-    return { isDoji: false, body: 0, range, upperWick: 0, lowerWick: 0, wickDiff: 0, isRed };
-  }
 
   const body = Math.abs(bar.close - bar.open);
   const upperWick = bar.high - Math.max(bar.open, bar.close);
   const lowerWick = Math.min(bar.open, bar.close) - bar.low;
   const wickDiff = Math.abs(upperWick - lowerWick);
 
-  const cond1 = body <= 0.20 * range;
-  const cond2 = wickDiff <= 0.15 * range;
-  const cond3 = range >= 0.5 * atr;
+  if (mode === 'strict') {
+    const cond1 = range > 0 && body <= normBodyPct * range;
+    const cond2 = range > 0 && wickDiff <= normWickDiffPct * range;
+    const cond3 = range > 0.3 && range >= minRangeAtr * atr;
+    const condRed = !redOnly || isRed;
+
+    let rejectedBy: 'body' | 'wickSymmetry' | 'atrRange' | 'redOnly' | null = null;
+    if (!(cond1 && cond2 && cond3 && condRed)) {
+      if (!cond1) rejectedBy = 'body';
+      else if (!cond2) rejectedBy = 'wickSymmetry';
+      else if (!cond3) rejectedBy = 'atrRange';
+      else if (!condRed) rejectedBy = 'redOnly';
+    }
+
+    if (range <= 0.3) {
+      return {
+        isDoji: false,
+        body: 0,
+        range,
+        upperWick: 0,
+        lowerWick: 0,
+        wickDiff: 0,
+        isRed,
+        rejectedBy,
+      };
+    }
+
+    if (redOnly && !isRed) {
+      return {
+        isDoji: false,
+        body: 0,
+        range,
+        upperWick: 0,
+        lowerWick: 0,
+        wickDiff: 0,
+        isRed,
+        rejectedBy,
+      };
+    }
+
+    return {
+      isDoji: cond1 && cond2 && cond3,
+      body,
+      range,
+      upperWick,
+      lowerWick,
+      wickDiff,
+      isRed,
+      rejectedBy,
+    };
+  }
+
+  // 'loose' mode:
+  // - body <= bodyPct * range (default 10%)
+  // - do NOT require wick symmetry
+  // - do NOT require range >= 0.5*ATR (use configurable minRangeAtr, default 0.2)
+  // - do NOT require red-only
+  if (range <= 0) {
+    return {
+      isDoji: false,
+      body: 0,
+      range,
+      upperWick: 0,
+      lowerWick: 0,
+      wickDiff: 0,
+      isRed,
+      rejectedBy: 'atrRange',
+    };
+  }
+
+  const condBody = body <= normBodyPct * range;
+  const condAtr = range >= minRangeAtr * atr;
+  const isDoji = condBody && condAtr;
+  let rejectedBy: 'body' | 'wickSymmetry' | 'atrRange' | 'redOnly' | null = null;
+  if (!isDoji) {
+    if (!condBody) rejectedBy = 'body';
+    else if (!condAtr) rejectedBy = 'atrRange';
+  }
 
   return {
-    isDoji: cond1 && cond2 && cond3,
+    isDoji,
     body,
     range,
     upperWick,
     lowerWick,
     wickDiff,
     isRed,
+    rejectedBy,
   };
 }
 
@@ -399,6 +588,137 @@ export function computeEma(bars: RawBar[], period: number = 9): { time: number; 
 /**
  * Calculate dynamic strength score (0.0 to 10.0) for a zone
  */
+export interface HtfEma21Point {
+  openMs: number;
+  close: number;
+  ema21: number;
+  slope: number;
+}
+
+export function getHtfTimeframe(tf: DojiTimeframe): DojiTimeframe | null {
+  if (tf === '15m' || tf === '30m') return '1h';
+  if (tf === '1h') return '4h';
+  return null;
+}
+
+/**
+ * Build EMA21 + slope series from higher-timeframe bars for trend filtering
+ */
+export function buildHtfEma21Series(htfBars?: RawBar[]): HtfEma21Point[] {
+  if (!htfBars || htfBars.length === 0) return [];
+  const closed = deduplicateBars(htfBars).filter((b) => !b.isOpen);
+  if (closed.length === 0) return [];
+
+  const period = 21;
+  const k = 2 / (period + 1);
+  const series: HtfEma21Point[] = [];
+
+  let sum = 0;
+  let ema = closed[0].close;
+
+  for (let i = 0; i < closed.length; i++) {
+    const c = closed[i].close;
+    const prevEma = ema;
+    if (i < period) {
+      sum += c;
+      ema = sum / (i + 1);
+    } else {
+      ema = c * k + ema * (1 - k);
+    }
+    const openMs = new Date(closed[i].openTime).getTime();
+    const slope = i > 0 ? ema - prevEma : 0;
+    series.push({
+      openMs,
+      close: c,
+      ema21: ema,
+      slope,
+    });
+  }
+
+  return series;
+}
+
+/**
+ * Check higher-timeframe trend filter:
+ * - For 15m and 30m: 1h trend (price above/below 1h EMA21 and EMA21 slope)
+ * - For 1h: 4h trend (price above/below 4h EMA21 and EMA21 slope)
+ * - For 4h: no filter (always returns true)
+ */
+export function checkHtfTrendAtTime(
+  side: 'BUY' | 'SELL',
+  timeframe: DojiTimeframe,
+  barTimeMs: number,
+  currentPrice: number,
+  htfSeries?: HtfEma21Point[]
+): boolean {
+  if (timeframe === '4h') return true;
+  if (!htfSeries || htfSeries.length === 0) return true;
+
+  // Find latest HTF closed candle at or before barTimeMs
+  let idx = 0;
+  for (let j = htfSeries.length - 1; j >= 0; j--) {
+    if (htfSeries[j].openMs <= barTimeMs) {
+      idx = j;
+      break;
+    }
+  }
+  const pt = htfSeries[idx];
+  if (!pt) return true;
+
+  if (side === 'BUY') {
+    return currentPrice > pt.ema21 && pt.slope > 0;
+  }
+  return currentPrice < pt.ema21 && pt.slope < 0;
+}
+
+/**
+ * Check retest confirmation on a closed candle:
+ * - Rejects the zone with a wick at least 50% of candle range on the zone side, OR
+ * - Engulfing close away from the zone
+ */
+export function checkRetestConfirmation(
+  side: 'BUY' | 'SELL',
+  currentBar: RawBar,
+  prevBar?: RawBar
+): boolean {
+  const range = currentBar.high - currentBar.low;
+  if (range <= 0) return false;
+
+  const upperWick = currentBar.high - Math.max(currentBar.open, currentBar.close);
+  const lowerWick = Math.min(currentBar.open, currentBar.close) - currentBar.low;
+
+  if (side === 'BUY') {
+    const hasRejectionWick = lowerWick >= 0.5 * range;
+    const prevBodyHigh = prevBar ? Math.max(prevBar.open, prevBar.close) : Infinity;
+    const prevBodyLow = prevBar ? Math.min(prevBar.open, prevBar.close) : -Infinity;
+    const isBullishEngulfing = Boolean(
+      prevBar &&
+        currentBar.close > currentBar.open &&
+        (currentBar.close > prevBar.high ||
+          (currentBar.close >= prevBodyHigh &&
+            currentBar.open <= prevBodyLow &&
+            currentBar.close - currentBar.open > Math.abs(prevBar.close - prevBar.open)))
+    );
+    return hasRejectionWick || isBullishEngulfing;
+  }
+
+  const hasRejectionWick = upperWick >= 0.5 * range;
+  const prevBodyHigh = prevBar ? Math.max(prevBar.open, prevBar.close) : Infinity;
+  const prevBodyLow = prevBar ? Math.min(prevBar.open, prevBar.close) : -Infinity;
+  const isBearishEngulfing = Boolean(
+    prevBar &&
+      currentBar.close < currentBar.open &&
+      (currentBar.close < prevBar.low ||
+        (currentBar.close <= prevBodyLow &&
+          currentBar.open >= prevBodyHigh &&
+          currentBar.open - currentBar.close > Math.abs(prevBar.close - prevBar.open)))
+  );
+  return hasRejectionWick || isBearishEngulfing;
+}
+
+/**
+ * Calculate dynamic strength score (0.0 to 10.0) for a zone
+ */
 export function calculateZoneStrength(
   zone: {
     high: number;
@@ -409,6 +729,7 @@ export function calculateZoneStrength(
     barIndex: number;
     isBroken: boolean;
     breakDirection: 'UP' | 'DOWN' | null;
+    mergedCount?: number;
   },
   currentPrice: number,
   currentEma9: number,
@@ -425,15 +746,16 @@ export function calculateZoneStrength(
   strengthLabel: 'Strong' | 'Medium' | 'Weak';
   strengthColor: string;
 } {
-  const { high, low, range, body, wickDiff, barIndex, isBroken, breakDirection } = zone;
+  const { high, low, range, body, wickDiff, barIndex, isBroken, breakDirection, mergedCount } = zone;
+  const safeRange = Math.max(range, 0.01);
 
   // 1. Shape (max 3): 1.5*(1 - body/(range*0.20)) + 1.5*(1 - wickDiff/(range*0.15)), each part >= 0
-  const shapePart1 = Math.max(0, 1.5 * (1 - body / (range * 0.20)));
-  const shapePart2 = Math.max(0, 1.5 * (1 - wickDiff / (range * 0.15)));
+  const shapePart1 = Math.max(0, 1.5 * (1 - body / (safeRange * 0.20)));
+  const shapePart2 = Math.max(0, 1.5 * (1 - wickDiff / (safeRange * 0.15)));
   const shapeScore = clamp(shapePart1 + shapePart2, 0, 3);
 
-  // 2. Cost (max 2): risk = (high - low) + 2.5; 2 * clamp((25 - risk)/17, 0, 1)
-  const risk = high - low + 2.5;
+  // 2. Cost (max 2): risk = range + 2.5; 2 * clamp((25 - risk)/17, 0, 1)
+  const risk = safeRange + 2.5;
   const costScore = 2 * clamp((25 - risk) / 17, 0, 1);
 
   // 3. Trend (max 2): zone break ho chuka aur price EMA9 ke usi taraf = 2; break nahi hua = 1; ulta = 0
@@ -462,7 +784,10 @@ export function calculateZoneStrength(
     closenessScore = Math.max(0, 1 - dist / atr / 1.5);
   }
 
-  const rawStrength = shapeScore + costScore + trendScore + stageScore + freshnessScore + closenessScore;
+  // +1 to strength per additional merged doji (max 10)
+  const mergeBonus = Math.max(0, (mergedCount ?? 1) - 1);
+  const rawStrength =
+    shapeScore + costScore + trendScore + stageScore + freshnessScore + closenessScore + mergeBonus;
   const strength = Number(clamp(rawStrength, 0, 10).toFixed(1));
 
   let strengthLabel: 'Strong' | 'Medium' | 'Weak' = 'Weak';
@@ -489,23 +814,197 @@ export function calculateZoneStrength(
 }
 
 /**
+ * Merge Doji zones that overlap or are within 0.3 * ATR of each other into a single zone (min low to max high)
+ * and add +1 to strength per additional merged doji (max 10).
+ */
+export function mergeDojiZonesList(
+  zones: DojiZone[],
+  atr: number,
+  currentPrice: number,
+  currentEma9: number,
+  totalClosedBars: number
+): { mergedZones: DojiZone[]; mergedExtraCount: number } {
+  if (!zones || zones.length <= 1) {
+    return { mergedZones: zones || [], mergedExtraCount: 0 };
+  }
+
+  const maxGap = 0.3 * (atr > 0 ? atr : 3.5);
+  interface Cluster {
+    low: number;
+    high: number;
+    items: DojiZone[];
+  }
+
+  const clusters: Cluster[] = zones.map((z) => ({
+    low: z.low,
+    high: z.high,
+    items: [z],
+  }));
+
+  // Iteratively merge any two clusters that overlap or are within 0.3 * ATR and share the same break state
+  let didMerge = true;
+  while (didMerge) {
+    didMerge = false;
+    for (let i = 0; i < clusters.length; i++) {
+      for (let j = i + 1; j < clusters.length; j++) {
+        const a = clusters[i];
+        const b = clusters[j];
+        const aRep = a.items[a.items.length - 1];
+        const bRep = b.items[b.items.length - 1];
+        const sameDirection = aRep.breakDirection === bRep.breakDirection;
+        const gap = Math.max(a.low, b.low) - Math.min(a.high, b.high);
+
+        if (sameDirection && gap <= maxGap) {
+          a.low = Number(Math.min(a.low, b.low).toFixed(2));
+          a.high = Number(Math.max(a.high, b.high).toFixed(2));
+          a.items.push(...b.items);
+          a.items.sort((x, y) => x.barIndex - y.barIndex);
+          clusters.splice(j, 1);
+          didMerge = true;
+          break;
+        }
+      }
+      if (didMerge) break;
+    }
+  }
+
+  let mergedExtraCount = 0;
+  const mergedZones: DojiZone[] = clusters.map((cluster) => {
+    if (cluster.items.length === 1) {
+      const single = cluster.items[0];
+      return {
+        ...single,
+        mergedCount: single.mergedCount ?? 1,
+        mergedOpenTimes: single.mergedOpenTimes ?? [single.openTime],
+      };
+    }
+
+    const items = cluster.items;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const best = [...items].sort((x, y) => y.strength - x.strength)[0];
+    const totalMergedDojis = items.reduce((acc, z) => acc + (z.mergedCount ?? 1), 0);
+    mergedExtraCount += totalMergedDojis - 1;
+
+    const low = cluster.low;
+    const high = cluster.high;
+    const mid = Number(((high + low) / 2).toFixed(2));
+    const isBroken = items.some((z) => z.isBroken);
+    const breakItem = [...items].reverse().find((z) => z.isBroken) || last;
+    const breakDirection = breakItem.breakDirection;
+    const isUsed = items.some((z) => z.isUsed);
+    const zoneState: DojiZoneState = isUsed ? 'used' : isBroken ? 'armed' : 'waiting';
+
+    const retestLevel: number | null = isBroken
+      ? breakDirection === 'UP'
+        ? high
+        : low
+      : null;
+    const retestDistancePts =
+      retestLevel !== null
+        ? Number((retestLevel - currentPrice).toFixed(2))
+        : Number((mid - currentPrice).toFixed(2));
+
+    const distPts = Number((mid - currentPrice).toFixed(2));
+    const side: 'SELL' | 'BUY' = distPts >= 0 ? 'SELL' : 'BUY';
+    const distFromLevel =
+      currentPrice >= low && currentPrice <= high
+        ? 0
+        : Math.min(Math.abs(currentPrice - high), Math.abs(currentPrice - low));
+    const isWithin5Atr = distFromLevel <= 5 * (atr > 0 ? atr : 3.5);
+
+    const strengthRes = calculateZoneStrength(
+      {
+        high,
+        low,
+        range: best.range,
+        body: best.body,
+        wickDiff: best.wickDiff,
+        barIndex: last.barIndex,
+        isBroken,
+        breakDirection,
+        mergedCount: totalMergedDojis,
+      },
+      currentPrice,
+      currentEma9,
+      atr,
+      totalClosedBars
+    );
+
+    const allOpenTimes = Array.from(
+      new Set(items.flatMap((z) => z.mergedOpenTimes ?? [z.openTime]))
+    );
+
+    return {
+      ...last,
+      id: first.id,
+      barIndex: last.barIndex,
+      openTime: first.openTime,
+      openTimeSec: first.openTimeSec,
+      barTime: last.barTime,
+      high,
+      low,
+      range: best.range,
+      body: best.body,
+      wickDiff: best.wickDiff,
+      zoneState,
+      isBroken,
+      breakDirection,
+      breakBarIndex: breakItem.breakBarIndex,
+      breakTime: breakItem.breakTime,
+      breakTimeDisplay: breakItem.breakTimeDisplay,
+      retestLevel,
+      retestDistancePts,
+      hasSignalFormed: isUsed,
+      isUsed,
+      ...strengthRes,
+      distancePts: distPts,
+      side,
+      isWithin5Atr,
+      mergedCount: totalMergedDojis,
+      mergedOpenTimes: allOpenTimes,
+    };
+  });
+
+  mergedZones.sort((a, b) => a.openTimeSec - b.openTimeSec);
+  return { mergedZones, mergedExtraCount };
+}
+
+/**
  * Extract valid Doji zones and diagnostic stats for a specific timeframe from all loaded bars:
- * - Red candle only (when redOnly is true) or all candles (when redOnly is false)
- * - body <= 20% range, wickDiff <= 15% range, range >= 0.5 ATR(14)
- * - Zone remains valid until broken (closes on one side then closes on the other side) or price moves > 8 ATR away
+ * - Supports 'indicator', 'strict', and 'loose' DojiMode with configurable bodyPct, wickDiffPct, minRangeAtr
+ * - Zone remains valid until broken (closes on one side then closes on the other side) or price moves > maxDistanceAtr ATR away (default 8 ATR)
  * - Trade execution does NOT remove the zone from the chart; it marks the zone as "used" (isUsed: true)
- * - Max 5 valid zones per timeframe (keep 5 newest, combining used and unused)
+ * - Configurable max valid zones per timeframe (default keep last 10, combining used and unused)
  */
 export function extractValidDojiZonesWithStats(
   bars: RawBar[],
   timeframe: DojiTimeframe,
   currentPrice: number,
-  redOnly: boolean,
-  consumedOpenTimes?: Set<string>
+  redOnly: boolean = true,
+  consumedOpenTimes?: Set<string>,
+  mode: DojiMode = 'indicator',
+  bodyPct: number = mode === 'loose' ? 0.10 : 0.20,
+  wickDiffPct: number = 0.15,
+  minRangeAtr: number = mode === 'strict' ? 0.5 : 0.2,
+  maxZonesPerTf: number = 50,
+  maxDistanceAtr: number = 0,
+  zoneLifetime: DojiZoneLifetime = 'untilBroken',
+  zoneMerge: boolean = true
 ): {
   zones: DojiZone[];
   stats: DojiTimeframeStats;
 } {
+  const rejections: DojiRejectionCounts = {
+    byBody: 0,
+    byWickSymmetry: 0,
+    byAtrRange: 0,
+    byRedOnly: 0,
+    byBreakCancel: 0,
+    byDistance8Atr: 0,
+    byMaxZonesCap: 0,
+  };
+
   const uniqueBars = deduplicateBars(bars || []);
   const barsCount = uniqueBars.length;
   const closedBars = uniqueBars.filter((b) => !b.isOpen);
@@ -524,6 +1023,15 @@ export function extractValidDojiZonesWithStats(
         redOnlyValidCount: 0,
         redOnlyUncappedValidCount: 0,
         atr: 3.5,
+        rejections,
+        flaggedOpenTimeSecs: [],
+        last10FlaggedDubaiTimes: [],
+        last15FlaggedDojis: [],
+        maxZonesPerTf,
+        maxDistanceAtr,
+        zoneLifetime,
+        zoneMerge,
+        mergedDojisCount: 0,
       },
     };
   }
@@ -532,12 +1040,15 @@ export function extractValidDojiZonesWithStats(
   const rollingAtrs = closedBars.map((_, idx) =>
     computeAtr14(closedBars.slice(0, Math.max(2, idx + 1)))
   );
-  const peakAtr = Math.max(latestAtr, ...rollingAtrs);
 
   const emaList = computeEma(closedBars, 9);
   const currentEma9 = emaList.length > 0 ? emaList[emaList.length - 1].value : currentPrice;
 
   const validZones: DojiZone[] = [];
+  const flaggedOpenTimeSecs: number[] = [];
+  const flaggedDubaiTimes: string[] = [];
+  const flaggedDebugItems: FlaggedDojiDebugItem[] = [];
+  const debugItemByOpenTime = new Map<string, FlaggedDojiDebugItem>();
   const totalClosed = closedBars.length;
   let dojisCount = 0;
   let redOnlyDojisCount = 0;
@@ -548,36 +1059,63 @@ export function extractValidDojiZonesWithStats(
     const atrAtBar = rollingAtrs[i] || latestAtr;
     const effectiveAtrForDoji = Math.min(latestAtr, atrAtBar);
 
-    const checkRed = checkIsDoji(bar, effectiveAtrForDoji, true);
+    const checkRed = checkIsDoji(
+      bar,
+      effectiveAtrForDoji,
+      true,
+      mode,
+      bodyPct,
+      wickDiffPct,
+      minRangeAtr
+    );
     if (checkRed.isDoji) {
       redOnlyDojisCount += 1;
     }
 
-    const check = checkIsDoji(bar, effectiveAtrForDoji, redOnly);
-    if (!check.isDoji) continue;
+    const check = checkIsDoji(
+      bar,
+      effectiveAtrForDoji,
+      redOnly,
+      mode,
+      bodyPct,
+      wickDiffPct,
+      minRangeAtr
+    );
+    if (!check.isDoji) {
+      if (check.rejectedBy === 'body') rejections.byBody += 1;
+      else if (check.rejectedBy === 'wickSymmetry') rejections.byWickSymmetry += 1;
+      else if (check.rejectedBy === 'atrRange') rejections.byAtrRange += 1;
+      else if (check.rejectedBy === 'redOnly') rejections.byRedOnly += 1;
+      continue;
+    }
 
     dojisCount += 1;
+    const openTimeSec = Math.floor(new Date(bar.openTime).getTime() / 1000) + 4 * 3600;
+    flaggedOpenTimeSecs.push(openTimeSec);
+    const barTime = formatDubaiShortTime(bar.openTime);
+    flaggedDubaiTimes.push(barTime);
 
     const high = Number(bar.high.toFixed(2));
     const low = Number(bar.low.toFixed(2));
     const mid = Number(((high + low) / 2).toFixed(2));
 
-    // Invalidation check 1: Distance > 8 ATR
-    const distFromLevel =
-      currentPrice >= low && currentPrice <= high
-        ? 0
-        : Math.min(Math.abs(currentPrice - high), Math.abs(currentPrice - low));
-    if (distFromLevel > 8 * peakAtr) {
-      continue;
-    }
+    const debugItem: FlaggedDojiDebugItem = {
+      openTime: bar.openTime,
+      barTime,
+      high,
+      low,
+      status: 'waiting',
+    };
+    flaggedDebugItems.push(debugItem);
+    debugItemByOpenTime.set(bar.openTime, debugItem);
 
-    // Follow subsequent closed bars to track break & cancellation (close on one side then close on the other side)
+    // Follow subsequent closed bars to track break above high or below low
     let isBroken = false;
     let breakDirection: 'UP' | 'DOWN' | null = null;
     let breakBarIndex: number | null = null;
     let breakTime: string | null = null;
     let breakTimeDisplay: string | null = null;
-    let isCancelled = false;
+    let isFailed = false;
 
     for (let j = i + 1; j < totalClosed; j++) {
       const nextBar = closedBars[j];
@@ -597,25 +1135,50 @@ export function extractValidDojiZonesWithStats(
           breakTimeDisplay = formatDubaiShortTime(nextBar.openTime);
         }
       } else {
+        // Price closed back through the zone after the break -> failed
         if (breakDirection === 'UP' && nextBar.close < low) {
-          isCancelled = true;
+          isFailed = true;
           break;
-        }
-        if (breakDirection === 'DOWN' && nextBar.close > high) {
-          isCancelled = true;
+        } else if (breakDirection === 'DOWN' && nextBar.close > high) {
+          isFailed = true;
           break;
         }
       }
     }
 
-    if (isCancelled) continue;
+    const isUsed = consumedOpenTimes ? consumedOpenTimes.has(bar.openTime) : false;
+
+    // Single lifecycle: zone stays while 'waiting' or 'armed'.
+    // Remove when used (setup taken) or failed (price closed back through it).
+    if (isFailed) {
+      rejections.byBreakCancel += 1;
+      debugItem.status = 'cancelled';
+      continue;
+    }
+    if (isUsed) {
+      rejections.byBreakCancel += 1;
+      debugItem.status = 'used';
+      continue;
+    }
+
+    // Distance filter: when on (maxDistanceAtr > 0), use latestAtr, not peakAtr
+    const distFromLevel =
+      currentPrice >= low && currentPrice <= high
+        ? 0
+        : Math.min(Math.abs(currentPrice - high), Math.abs(currentPrice - low));
+    if (maxDistanceAtr > 0 && distFromLevel > maxDistanceAtr * latestAtr) {
+      rejections.byDistance8Atr += 1;
+      debugItem.status = 'hidden-by-distance';
+      continue;
+    }
 
     if (checkRed.isDoji) {
       redOnlyUncappedValidCount += 1;
     }
 
-    const isUsed = consumedOpenTimes ? consumedOpenTimes.has(bar.openTime) : false;
     const zoneState: DojiZoneState = isUsed ? 'used' : isBroken ? 'armed' : 'waiting';
+    debugItem.status = zoneState;
+
     const retestLevel: number | null = isBroken
       ? breakDirection === 'UP'
         ? high
@@ -651,6 +1214,7 @@ export function extractValidDojiZonesWithStats(
         barIndex: i,
         isBroken,
         breakDirection,
+        mergedCount: 1,
       },
       currentPrice,
       currentEma9,
@@ -658,9 +1222,8 @@ export function extractValidDojiZonesWithStats(
       totalClosed
     );
 
-    const openTimeSec = Math.floor(new Date(bar.openTime).getTime() / 1000) + 4 * 3600;
-    const barTime = formatDubaiShortTime(bar.openTime);
     const distPts = Number((mid - currentPrice).toFixed(2));
+    const side: 'SELL' | 'BUY' = distPts >= 0 ? 'SELL' : 'BUY';
     const isWithin5Atr = distFromLevel <= 5 * latestAtr;
 
     validZones.push({
@@ -693,11 +1256,45 @@ export function extractValidDojiZonesWithStats(
       ...liveRetestInfo,
       ...strengthRes,
       distancePts: distPts,
+      side,
       isWithin5Atr,
+      mergedCount: 1,
+      mergedOpenTimes: [bar.openTime],
     });
   }
 
-  const keptZones = validZones.slice(-5);
+  let effectiveValidZones = validZones;
+  let mergedDojisCount = 0;
+
+  if (zoneMerge && validZones.length > 1) {
+    const mergedResult = mergeDojiZonesList(
+      validZones,
+      latestAtr,
+      currentPrice,
+      currentEma9,
+      totalClosed
+    );
+    effectiveValidZones = mergedResult.mergedZones;
+    mergedDojisCount = mergedResult.mergedExtraCount;
+  }
+
+  const keptZones =
+    maxZonesPerTf > 0 ? effectiveValidZones.slice(-maxZonesPerTf) : effectiveValidZones;
+  rejections.byMaxZonesCap = Math.max(0, effectiveValidZones.length - keptZones.length);
+
+  if (rejections.byMaxZonesCap > 0) {
+    const keptOpenTimes = new Set<string>(
+      keptZones.flatMap((z) => z.mergedOpenTimes ?? [z.openTime])
+    );
+    for (const z of validZones) {
+      if (!keptOpenTimes.has(z.openTime)) {
+        const dbg = debugItemByOpenTime.get(z.openTime);
+        if (dbg) {
+          dbg.status = 'hidden-by-cap';
+        }
+      }
+    }
+  }
 
   return {
     zones: keptZones,
@@ -707,11 +1304,23 @@ export function extractValidDojiZonesWithStats(
       requestedBars: 1000,
       dojisCount,
       validCount: keptZones.length,
-      totalUncappedValidCount: validZones.length,
+      totalUncappedValidCount: effectiveValidZones.length,
       redOnlyDojisCount,
-      redOnlyValidCount: Math.min(5, redOnlyUncappedValidCount),
+      redOnlyValidCount:
+        maxZonesPerTf > 0
+          ? Math.min(maxZonesPerTf, redOnlyUncappedValidCount)
+          : redOnlyUncappedValidCount,
       redOnlyUncappedValidCount,
       atr: latestAtr,
+      rejections,
+      flaggedOpenTimeSecs,
+      last10FlaggedDubaiTimes: flaggedDubaiTimes.slice(-10),
+      last15FlaggedDojis: flaggedDebugItems.slice(-15),
+      maxZonesPerTf,
+      maxDistanceAtr,
+      zoneLifetime,
+      zoneMerge,
+      mergedDojisCount,
     },
   };
 }
@@ -720,15 +1329,31 @@ export function extractValidDojiZones(
   bars: RawBar[],
   timeframe: DojiTimeframe,
   currentPrice: number,
-  redOnly: boolean,
-  consumedOpenTimes?: Set<string>
+  redOnly: boolean = true,
+  consumedOpenTimes?: Set<string>,
+  mode: DojiMode = 'indicator',
+  bodyPct: number = mode === 'loose' ? 0.10 : 0.20,
+  wickDiffPct: number = 0.15,
+  minRangeAtr: number = mode === 'strict' ? 0.5 : 0.2,
+  maxZonesPerTf: number = 50,
+  maxDistanceAtr: number = 0,
+  zoneLifetime: DojiZoneLifetime = 'untilBroken',
+  zoneMerge: boolean = true
 ): DojiZone[] {
   return extractValidDojiZonesWithStats(
     bars,
     timeframe,
     currentPrice,
     redOnly,
-    consumedOpenTimes
+    consumedOpenTimes,
+    mode,
+    bodyPct,
+    wickDiffPct,
+    minRangeAtr,
+    maxZonesPerTf,
+    maxDistanceAtr,
+    zoneLifetime,
+    zoneMerge
   ).zones;
 }
 
@@ -764,67 +1389,210 @@ export function getNearestValidZone(
 }
 
 /**
- * Compute active signal based on current price and nearest valid Doji zone
+ * Calculate real risk:reward string (e.g. "1:2.4") from entry price, stop loss, and a TP level.
+ */
+export function calculateRealRiskReward(
+  entryPrice: number,
+  stopLoss: number,
+  tpPrice: number
+): string {
+  const risk = Math.abs(entryPrice - stopLoss);
+  const reward = Math.abs(tpPrice - entryPrice);
+  if (risk <= 0 || reward <= 0) {
+    return '—';
+  }
+  return `1:${(reward / risk).toFixed(1)}`;
+}
+
+/**
+ * Compute active signal setup for the selected timeframe:
+ * - Only issues an ACTIVE trade setup when a doji zone from the indicator is broken and then retested
+ *   (and meets the minimum zone strength to trade, default 7).
+ * - Calculates real risk from entry to stop loss based on zone high/low plus an ATR-based buffer (default 0.25 * ATR).
+ * - Calculates real risk:reward from the TP levels.
  */
 export function computeActiveSignal(
   currentPrice: number,
   timeframe: DojiTimeframe,
-  zones: DojiZone[]
+  zones: DojiZone[],
+  atr: number = 3.5,
+  slAtrMultiplier: number = 0.25,
+  minZoneStrength: number = 5,
+  activeTrade?: {
+    side: 'BUY' | 'SELL';
+    entryPrice: number;
+    initialSl: number;
+    currentSl?: number;
+    risk?: number;
+    tp1: number;
+    tp2: number;
+    tp3: number;
+    tp1Rr?: string;
+    tp2Rr?: string;
+    tp3Rr?: string;
+    riskReward?: string;
+    zoneId?: string;
+    zoneOpenTime?: string;
+    zoneStrength?: number;
+    entryTimeDisplay?: string;
+    status?: 'OPEN' | 'CLOSED';
+  } | null,
+  tp1R: number = 1.0,
+  tp2R: number = 2.0,
+  tp3R: number = 3.0
 ): ActiveDojiSignal {
-  const target = getNearestValidZone(zones, timeframe, currentPrice);
-
   const nowDubaiStr = new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Asia/Dubai',
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date());
 
-  if (!target) {
+  const tfZones = zones.filter((z) => z.timeframe === timeframe);
+
+  // If activeTrade is explicitly passed (from simulateTradesForTimeframe), only issue setup if an OPEN retest trade exists and meets minZoneStrength.
+  // If activeTrade is undefined (standalone call), look for a zone on the timeframe that is broken AND retested (hasSignalFormed / isUsed) and meets minZoneStrength.
+  const openTradeValid =
+    activeTrade &&
+    activeTrade.status === 'OPEN' &&
+    (typeof activeTrade.zoneStrength !== 'number' || activeTrade.zoneStrength >= minZoneStrength)
+      ? activeTrade
+      : null;
+
+  const retestedZones = tfZones.filter(
+    (z) =>
+      z.isBroken &&
+      z.breakDirection !== null &&
+      (z.hasSignalFormed || z.isUsed || z.zoneState === 'used') &&
+      z.strength >= minZoneStrength
+  );
+
+  const matchedZone = openTradeValid
+    ? tfZones.find(
+        (z) =>
+          (openTradeValid.zoneOpenTime && z.openTime === openTradeValid.zoneOpenTime) ||
+          (openTradeValid.zoneId && z.id === openTradeValid.zoneId)
+      ) ||
+      retestedZones[retestedZones.length - 1] ||
+      null
+    : activeTrade === undefined
+    ? retestedZones[retestedZones.length - 1] || null
+    : null;
+
+  if (!openTradeValid && !matchedZone) {
+    const nearest = getNearestValidZone(zones, timeframe, currentPrice);
+    const isBuyLean = nearest ? nearest.breakDirection === 'UP' : true;
     return {
-      status: 'WATCHING',
-      direction: 'BUY',
+      status: nearest ? 'WATCHING' : 'WAITING FOR DOJI CLOSE',
+      direction: isBuyLean ? 'BUY' : 'SELL',
       timeframe,
-      targetZone: `Scanning ${timeframe} zones`,
-      entryPrice: Number((currentPrice - 2.0).toFixed(2)),
-      stopLoss: Number((currentPrice - 7.0).toFixed(2)),
-      tp1: Number((currentPrice + 4.5).toFixed(2)),
-      tp2: Number((currentPrice + 9.0).toFixed(2)),
-      tp3: Number((currentPrice + 15.0).toFixed(2)),
-      distanceToZone: '0.0 pts',
-      riskReward: '1:3.0',
-      confidenceScore: 80,
-      issuedTime: `${nowDubaiStr} Dubai`,
+      targetZone: nearest
+        ? `${nearest.low.toFixed(2)} – ${nearest.high.toFixed(2)}`
+        : `Scanning ${timeframe} zones`,
+      entryPrice: 0,
+      stopLoss: 0,
+      risk: 0,
+      tp1: 0,
+      tp2: 0,
+      tp3: 0,
+      tp1Rr: '—',
+      tp2Rr: '—',
+      tp3Rr: '—',
+      distanceToZone: nearest ? formatSignedDollar(nearest.distancePts) : '—',
+      riskReward: '—',
+      confidenceScore: nearest ? Math.round(nearest.strength * 10) : 0,
+      issuedTime: nearest ? nearest.barTime : `${nowDubaiStr} Dubai`,
     };
   }
 
-  const isBuy = target.breakDirection === 'UP' || currentPrice >= target.high;
-  const entryPrice = isBuy ? target.high : target.low;
-  const slOffset = 3.5;
-  const stopLoss = isBuy
-    ? Number((target.low - slOffset).toFixed(2))
-    : Number((target.high + slOffset).toFixed(2));
+  const safeAtr = typeof atr === 'number' && atr > 0 ? atr : 3.5;
+  const slBuffer = slAtrMultiplier * safeAtr;
 
-  const risk = Math.max(Math.abs(entryPrice - stopLoss), 2.5);
-  const tp1 = isBuy ? Number((entryPrice + risk * 1.5).toFixed(2)) : Number((entryPrice - risk * 1.5).toFixed(2));
-  const tp2 = isBuy ? Number((entryPrice + risk * 2.5).toFixed(2)) : Number((entryPrice - risk * 2.5).toFixed(2));
-  const tp3 = isBuy ? Number((entryPrice + risk * 4.0).toFixed(2)) : Number((entryPrice - risk * 4.0).toFixed(2));
+  const isBuy = openTradeValid
+    ? openTradeValid.side === 'BUY'
+    : matchedZone!.breakDirection === 'UP';
+
+  const entryPrice = openTradeValid
+    ? Number(openTradeValid.entryPrice.toFixed(2))
+    : Number((isBuy ? matchedZone!.high : matchedZone!.low).toFixed(2));
+
+  // Stop loss based on zone high/low plus ATR-based buffer (default 0.25 * ATR)
+  const zoneBasedSl = matchedZone
+    ? Number((isBuy ? matchedZone.low - slBuffer : matchedZone.high + slBuffer).toFixed(2))
+    : Number(openTradeValid!.initialSl.toFixed(2));
+
+  const stopLoss = openTradeValid
+    ? Number(openTradeValid.initialSl.toFixed(2))
+    : zoneBasedSl;
+
+  // Real risk from entry to stop loss
+  const risk = Number(Math.abs(entryPrice - stopLoss).toFixed(2));
+
+  // Skip any setup whose risk is larger than 2.5 * ATR
+  const maxAllowedRisk = 2.5 * safeAtr;
+  if (risk > maxAllowedRisk && !openTradeValid) {
+    const nearest = getNearestValidZone(zones, timeframe, currentPrice);
+    const isBuyLean = nearest ? nearest.breakDirection === 'UP' : true;
+    return {
+      status: nearest ? 'WATCHING' : 'WAITING FOR DOJI CLOSE',
+      direction: isBuyLean ? 'BUY' : 'SELL',
+      timeframe,
+      targetZone: nearest
+        ? `${nearest.low.toFixed(2)} – ${nearest.high.toFixed(2)}`
+        : `Scanning ${timeframe} zones`,
+      entryPrice: 0,
+      stopLoss: 0,
+      risk: 0,
+      tp1: 0,
+      tp2: 0,
+      tp3: 0,
+      tp1Rr: '—',
+      tp2Rr: '—',
+      tp3Rr: '—',
+      distanceToZone: nearest ? formatSignedDollar(nearest.distancePts) : '—',
+      riskReward: '—',
+      confidenceScore: nearest ? Math.round(nearest.strength * 10) : 0,
+      issuedTime: nearest ? nearest.barTime : `${nowDubaiStr} Dubai`,
+    };
+  }
+
+  const tp1 = openTradeValid
+    ? Number(openTradeValid.tp1.toFixed(2))
+    : Number((isBuy ? entryPrice + tp1R * risk : entryPrice - tp1R * risk).toFixed(2));
+  const tp2 = openTradeValid
+    ? Number(openTradeValid.tp2.toFixed(2))
+    : Number((isBuy ? entryPrice + tp2R * risk : entryPrice - tp2R * risk).toFixed(2));
+  const tp3 = openTradeValid
+    ? Number(openTradeValid.tp3.toFixed(2))
+    : Number((isBuy ? entryPrice + tp3R * risk : entryPrice - tp3R * risk).toFixed(2));
+
+  const tp1Rr = calculateRealRiskReward(entryPrice, stopLoss, tp1);
+  const tp2Rr = calculateRealRiskReward(entryPrice, stopLoss, tp2);
+  const tp3Rr = calculateRealRiskReward(entryPrice, stopLoss, tp3);
+  const riskReward = tp3Rr;
 
   const distancePts = Math.abs(currentPrice - entryPrice).toFixed(1);
-  const confidence = Math.round(target.strength * 10);
+  const zoneStrength = openTradeValid?.zoneStrength ?? matchedZone?.strength ?? 0;
+  const confidence = Math.round(zoneStrength * 10);
 
   return {
-    status: target.isBroken ? 'ACTIVE' : 'WATCHING',
+    status: 'ACTIVE',
     direction: isBuy ? 'BUY' : 'SELL',
     timeframe,
-    targetZone: `${target.breakDirection === 'UP' ? '▲ Breakout' : target.breakDirection === 'DOWN' ? '▼ Breakdown' : 'Zone'} (${target.low.toFixed(1)} - ${target.high.toFixed(1)})`,
+    targetZone: matchedZone
+      ? `${matchedZone.breakDirection === 'UP' ? '▲ Breakout' : '▼ Breakdown'} (${matchedZone.low.toFixed(2)} – ${matchedZone.high.toFixed(2)})`
+      : `${isBuy ? '▲ Breakout' : '▼ Breakdown'}`,
     entryPrice,
     stopLoss,
+    risk,
     tp1,
     tp2,
     tp3,
+    tp1Rr,
+    tp2Rr,
+    tp3Rr,
     distanceToZone: `${distancePts} pts`,
-    riskReward: '1:3.2',
+    riskReward,
     confidenceScore: confidence,
-    issuedTime: `${nowDubaiStr} Dubai`,
+    issuedTime: openTradeValid?.entryTimeDisplay || matchedZone?.barTime || `${nowDubaiStr} Dubai`,
   };
 }

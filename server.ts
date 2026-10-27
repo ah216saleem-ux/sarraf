@@ -244,6 +244,18 @@ import {
   getSpyHistoryStats,
   SpyExpiryOption,
 } from './server/spy/index.ts';
+import {
+  DojiTimeframe,
+  DojiMode,
+  RawBar,
+  deduplicateBars,
+  extractValidDojiZonesWithStats,
+  getHtfTimeframe,
+} from './src/doji/dojiEngine.ts';
+import {
+  DojiTrade,
+  simulateTradesForTimeframe,
+} from './src/doji/dojiSignalEngine.ts';
 
 dotenv.config();
 
@@ -840,30 +852,132 @@ app.get('/api/candles', (_req, res) => {
   });
 });
 
-// GET /api/doji/ohlc - Proxy to biquote.io ohlc endpoint with in-memory caching
+// GET /api/doji/ohlc - Configurable OHLC candle proxy (CANDLE_SOURCE='biquote' default | 'oanda') with in-memory caching & biquote fallback
 const dojiOhlcCache = new Map<string, { time: number; data: any }>();
+
+const OANDA_GRANULARITY_MAP: Record<string, string> = {
+  '15m': 'M15',
+  '30m': 'M30',
+  '1h': 'H1',
+  '4h': 'H4',
+  M15: 'M15',
+  M30: 'M30',
+  H1: 'H1',
+  H4: 'H4',
+};
+
+async function fetchOandaOhlc(interval: string, limit: string, to?: string): Promise<{ bars: any[]; data: { bars: any[] } }> {
+  const apiKey = (process.env.OANDA_API_KEY || '').trim();
+  if (!apiKey) {
+    throw new Error('OANDA_API_KEY is not configured');
+  }
+  const accountEnv = (process.env.OANDA_ACCOUNT_ENV || 'practice').toLowerCase().trim();
+  const baseUrl =
+    accountEnv === 'live'
+      ? 'https://api-fxtrade.oanda.com'
+      : 'https://api-fxpractice.oanda.com';
+  const granularity = OANDA_GRANULARITY_MAP[interval] || 'M15';
+  const parsedCount = parseInt(limit, 10);
+  const count = Number.isFinite(parsedCount) && parsedCount > 0 ? Math.min(5000, parsedCount) : 1000;
+
+  const params = new URLSearchParams({
+    price: 'M',
+    granularity,
+    count: String(count),
+  });
+  if (to) {
+    params.set('to', to);
+  }
+
+  const url = `${baseUrl}/v3/instruments/XAU_USD/candles?${params.toString()}`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: 'application/json',
+      'Accept-Datetime-Format': 'RFC3339',
+    },
+  });
+
+  if (!res.ok) {
+    throw new Error(`OANDA v20 status ${res.status}`);
+  }
+
+  const json: any = await res.json();
+  if (!Array.isArray(json?.candles)) {
+    throw new Error('Invalid OANDA candles payload');
+  }
+
+  // OANDA returns chronological (oldest -> newest). Convert to biquote bar shape and reverse to newest-first
+  // so the frontend's existing [...rawBars].reverse() receives the exact same ordering and schema.
+  const bars = json.candles
+    .filter((c: any) => c && c.time && c.mid)
+    .map((c: any) => {
+      const vol = Number(c.volume ?? 0);
+      return {
+        openTime: new Date(c.time).toISOString(),
+        open: Number(c.mid.o),
+        high: Number(c.mid.h),
+        low: Number(c.mid.l),
+        close: Number(c.mid.c),
+        volume: vol,
+        tickVolume: vol,
+        isOpen: !Boolean(c.complete),
+      };
+    })
+    .reverse();
+
+  return { bars, data: { bars } };
+}
+
+async function fetchBiquoteOhlc(interval: string, limit: string, from?: string, to?: string): Promise<any> {
+  const params = new URLSearchParams({
+    interval,
+    limit,
+  });
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+
+  const upstreamRes = await fetch(`https://biquote.io/api/XAUUSD/ohlc?${params.toString()}`, {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': 'SARRAF-Terminal/1.0',
+    },
+  });
+  if (!upstreamRes.ok) {
+    throw new Error(`Biquote upstream status ${upstreamRes.status}`);
+  }
+  return await upstreamRes.json();
+}
+
 app.get('/api/doji/ohlc', async (req, res) => {
   const interval = (req.query.interval as string) || '15m';
-  const limit = (req.query.limit as string) || '500';
-  const cacheKey = `${interval}_${limit}`;
+  const limit = (req.query.limit as string) || '1000';
+  const from = req.query.from as string | undefined;
+  const to = req.query.to as string | undefined;
+  const nocache = req.query.nocache === '1' || req.query.nocache === 'true';
+
+  const candleSource = (process.env.CANDLE_SOURCE || 'biquote').toLowerCase().trim();
+  const cacheKey = `${candleSource}_${interval}_${limit}_${from || ''}_${to || ''}`;
   const now = Date.now();
   const cached = dojiOhlcCache.get(cacheKey);
 
-  if (cached && now - cached.time < 3000) {
+  if (!nocache && cached && now - cached.time < 3000) {
     return res.json(cached.data);
   }
 
   try {
-    const upstreamRes = await fetch(`https://biquote.io/api/XAUUSD/ohlc?interval=${interval}&limit=${limit}`, {
-      headers: {
-        Accept: 'application/json',
-        'User-Agent': 'SARRAF-Terminal/1.0',
-      },
-    });
-    if (!upstreamRes.ok) {
-      throw new Error(`Upstream status ${upstreamRes.status}`);
+    let data: any;
+    if (candleSource === 'oanda') {
+      try {
+        data = await fetchOandaOhlc(interval, limit, to);
+      } catch (oandaErr: any) {
+        console.warn(`[DOJI OHLC] OANDA fetch failed (${oandaErr?.message || oandaErr}), falling back to biquote.io`);
+        data = await fetchBiquoteOhlc(interval, limit, from, to);
+      }
+    } else {
+      data = await fetchBiquoteOhlc(interval, limit, from, to);
     }
-    const data = await upstreamRes.json();
+
     dojiOhlcCache.set(cacheKey, { time: now, data });
     return res.json(data);
   } catch (err: any) {
@@ -871,6 +985,431 @@ app.get('/api/doji/ohlc', async (req, res) => {
       return res.json(cached.data);
     }
     return res.status(502).json({ error: 'Failed to fetch upstream OHLC', message: err?.message });
+  }
+});
+
+// Helper & cache to fetch last 1000 candles for Doji backtest
+const dojiBacktestCandlesCache = new Map<DojiTimeframe, { time: number; bars: RawBar[] }>();
+
+function getDojiIntervalMs(tf: DojiTimeframe): number {
+  switch (tf) {
+    case '15m':
+      return 15 * 60 * 1000;
+    case '30m':
+      return 30 * 60 * 1000;
+    case '1h':
+      return 60 * 60 * 1000;
+    case '4h':
+      return 4 * 60 * 60 * 1000;
+  }
+}
+
+async function fetchDojiOhlcPageOnServer(
+  tf: DojiTimeframe,
+  limit: string = '1000',
+  from?: string,
+  to?: string
+): Promise<RawBar[]> {
+  const candleSource = (process.env.CANDLE_SOURCE || 'biquote').toLowerCase().trim();
+  let data: any;
+  if (candleSource === 'oanda') {
+    try {
+      data = await fetchOandaOhlc(tf, limit, to);
+    } catch {
+      data = await fetchBiquoteOhlc(tf, limit, from, to);
+    }
+  } else {
+    data = await fetchBiquoteOhlc(tf, limit, from, to);
+  }
+  const rawBars = data?.data?.bars || data?.bars;
+  if (Array.isArray(rawBars) && rawBars.length > 0) {
+    return [...rawBars].reverse();
+  }
+  return [];
+}
+
+async function getLast1000DojiCandles(tf: DojiTimeframe, nocache: boolean = false): Promise<RawBar[]> {
+  const now = Date.now();
+  const cached = dojiBacktestCandlesCache.get(tf);
+  if (!nocache && cached && now - cached.time < 15000 && cached.bars.length > 0) {
+    return cached.bars;
+  }
+
+  const store = getCandleStore();
+  const storeKey = tf === '15m' ? 'M15' : tf === '30m' ? 'M30' : tf === '1h' ? 'H1' : 'H4';
+  const rawLocalCandles = (store as any)?.[storeKey] || [];
+  const localBars: RawBar[] = Array.isArray(rawLocalCandles)
+    ? rawLocalCandles
+        .filter((c: any) => c && (c.openTime || c.time))
+        .map((c: any) => ({
+          openTime: c.openTime || new Date(c.time).toISOString(),
+          open: Number(c.open),
+          high: Number(c.high),
+          low: Number(c.low),
+          close: Number(c.close),
+          volume: Number(c.volume || 0),
+          isOpen: c.isClosed === false,
+        }))
+    : [];
+
+  try {
+    let collected = deduplicateBars([
+      ...localBars,
+      ...(await fetchDojiOhlcPageOnServer(tf, '1000')),
+    ]);
+    let pageAttempt = 0;
+    const intervalMs = getDojiIntervalMs(tf);
+
+    while (collected.length > 0 && collected.length < 1000 && pageAttempt < 5) {
+      pageAttempt += 1;
+      const oldestOpenTime = collected[0]?.openTime;
+      if (!oldestOpenTime) break;
+      const oldestMs = new Date(oldestOpenTime).getTime();
+      if (!Number.isFinite(oldestMs)) break;
+
+      const needed = Math.max(200, 1000 - collected.length + 50);
+      const fromIso = new Date(oldestMs - needed * intervalMs).toISOString();
+      const olderBatch = await fetchDojiOhlcPageOnServer(tf, '1000', fromIso, oldestOpenTime);
+
+      const strictlyOlder = olderBatch.filter(
+        (b) => b?.openTime && new Date(b.openTime).getTime() < oldestMs
+      );
+      if (strictlyOlder.length === 0) {
+        break;
+      }
+
+      collected = deduplicateBars([...strictlyOlder, ...collected]);
+      if (collected.length >= 1000) {
+        collected = collected.slice(-1000);
+        break;
+      }
+    }
+
+    const finalBars = collected.slice(-1000);
+    if (finalBars.length > 0) {
+      dojiBacktestCandlesCache.set(tf, { time: now, bars: finalBars });
+      return finalBars;
+    }
+  } catch (err: any) {
+    console.warn(`[DOJI BACKTEST] Upstream candle fetch failed for ${tf}: ${err?.message || err}`);
+  }
+
+  if (cached && cached.bars.length > 0) {
+    return cached.bars;
+  }
+
+  return deduplicateBars(localBars).slice(-1000);
+}
+
+interface BacktestBucketStats {
+  key: string;
+  label: string;
+  range: string;
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  breakevens: number;
+  winRate: number;
+  averageR: number;
+  totalR: number;
+  maxDrawdown: number;
+  maxDrawdownR: number;
+  maxDrawdownDollars: number;
+  totalPnlDollars: number;
+}
+
+function computeDojiBacktestBucketStats(
+  bucketTrades: DojiTrade[],
+  key: string = 'all',
+  label: string = 'All Trades',
+  range: string = '0 - 10'
+): BacktestBucketStats {
+  const totalTrades = bucketTrades.length;
+  let wins = 0;
+  let losses = 0;
+  let breakevens = 0;
+  let sumR = 0;
+  let sumPnlDollars = 0;
+
+  let cumR = 0;
+  let peakR = 0;
+  let maxDdR = 0;
+
+  let cumDollars = 0;
+  let peakDollars = 0;
+  let maxDdDollars = 0;
+
+  for (const t of bucketTrades) {
+    const risk =
+      typeof t.risk === 'number' && t.risk > 0
+        ? t.risk
+        : Math.abs(t.entryPrice - t.initialSl);
+    const r = risk > 0 ? t.pnlDollars / risk : 0;
+
+    if (t.pnlDollars > 0) {
+      wins += 1;
+    } else if (t.pnlDollars < 0) {
+      losses += 1;
+    } else {
+      breakevens += 1;
+    }
+
+    sumR += r;
+    sumPnlDollars += t.pnlDollars;
+
+    cumR += r;
+    if (cumR > peakR) peakR = cumR;
+    const ddR = peakR - cumR;
+    if (ddR > maxDdR) maxDdR = ddR;
+
+    cumDollars += t.pnlDollars;
+    if (cumDollars > peakDollars) peakDollars = cumDollars;
+    const ddDollars = peakDollars - cumDollars;
+    if (ddDollars > maxDdDollars) maxDdDollars = ddDollars;
+  }
+
+  const winRate = totalTrades > 0 ? Number(((wins / totalTrades) * 100).toFixed(2)) : 0;
+  const averageR = totalTrades > 0 ? Number((sumR / totalTrades).toFixed(2)) : 0;
+  const totalR = Number(sumR.toFixed(2));
+  const maxDrawdownR = Number(maxDdR.toFixed(2));
+  const maxDrawdownDollars = Number(maxDdDollars.toFixed(2));
+  const totalPnlDollars = Number(sumPnlDollars.toFixed(2));
+
+  return {
+    key,
+    label,
+    range,
+    totalTrades,
+    wins,
+    losses,
+    breakevens,
+    winRate,
+    averageR,
+    totalR,
+    maxDrawdown: maxDrawdownR,
+    maxDrawdownR,
+    maxDrawdownDollars,
+    totalPnlDollars,
+  };
+}
+
+// GET /api/doji/backtest?tf=15m|30m|1h|4h&mode=indicator|strict|loose&trend=0|1&merge=0|1&confirm=0|1
+app.get('/api/doji/backtest', async (req, res) => {
+  try {
+    const rawTf = String(req.query.tf || req.query.timeframe || '15m').toLowerCase().trim();
+    const tfMap: Record<string, DojiTimeframe> = {
+      '15m': '15m',
+      m15: '15m',
+      '30m': '30m',
+      m30: '30m',
+      '1h': '1h',
+      h1: '1h',
+      '4h': '4h',
+      h4: '4h',
+    };
+    const tf: DojiTimeframe = tfMap[rawTf] || '15m';
+
+    const rawMode = String(req.query.mode || 'indicator').toLowerCase().trim();
+    const validModes: DojiMode[] = ['indicator', 'strict', 'loose'];
+    const mode: DojiMode = validModes.includes(rawMode as DojiMode)
+      ? (rawMode as DojiMode)
+      : 'indicator';
+
+    const redOnly =
+      req.query.redOnly !== undefined
+        ? req.query.redOnly !== 'false' && req.query.redOnly !== '0'
+        : true;
+    const trendFilter =
+      req.query.trend !== undefined
+        ? req.query.trend !== '0' && req.query.trend !== 'false'
+        : true;
+    const zoneMerge =
+      req.query.merge !== undefined
+        ? req.query.merge !== '0' && req.query.merge !== 'false'
+        : true;
+    const retestConfirm =
+      req.query.confirm !== undefined
+        ? req.query.confirm !== '0' && req.query.confirm !== 'false'
+        : true;
+    const bodyPct =
+      req.query.bodyPct !== undefined
+        ? Number(req.query.bodyPct)
+        : mode === 'loose'
+        ? 0.10
+        : 0.20;
+    const wickDiffPct =
+      req.query.wickDiffPct !== undefined ? Number(req.query.wickDiffPct) : 0.15;
+    const minRangeAtr =
+      req.query.minRangeAtr !== undefined
+        ? Number(req.query.minRangeAtr)
+        : mode === 'strict'
+        ? 0.5
+        : 0.2;
+    const slAtrMultiplier =
+      req.query.slAtrMultiplier !== undefined ? Number(req.query.slAtrMultiplier) : 0.25;
+    // Default minZoneStrength to 0 in backtest so all zone strength buckets (<5, 5-7, >7) are evaluated
+    const minZoneStrength =
+      req.query.minZoneStrength !== undefined ? Number(req.query.minZoneStrength) : 0;
+    const tp1R = req.query.tp1R !== undefined ? Number(req.query.tp1R) : 1.0;
+    const tp2R = req.query.tp2R !== undefined ? Number(req.query.tp2R) : 2.0;
+    const tp3R = req.query.tp3R !== undefined ? Number(req.query.tp3R) : 3.0;
+    const nocache = req.query.nocache === '1' || req.query.nocache === 'true';
+
+    const htf = trendFilter ? getHtfTimeframe(tf) : null;
+    const [bars, htfBars] = await Promise.all([
+      getLast1000DojiCandles(tf, nocache),
+      htf ? getLast1000DojiCandles(htf, nocache) : Promise.resolve(undefined),
+    ]);
+
+    if (!bars || bars.length === 0) {
+      return res.status(502).json({
+        error: 'No candles available for backtest',
+        tf,
+        mode,
+      });
+    }
+
+    const lastBar = bars[bars.length - 1];
+    const currentPrice = latestLiveQuote?.price && latestLiveQuote.price > 0
+      ? latestLiveQuote.price
+      : lastBar.close;
+
+    // 1. Run signal engine over the 1000 candles using current SL/TP logic and filters
+    const { trades, activeTrade, consumedOpenTimes, filterStats } = simulateTradesForTimeframe(
+      bars,
+      tf,
+      redOnly,
+      currentPrice,
+      mode,
+      bodyPct,
+      wickDiffPct,
+      minRangeAtr,
+      minZoneStrength,
+      slAtrMultiplier,
+      trendFilter,
+      zoneMerge,
+      retestConfirm,
+      htfBars,
+      tp1R,
+      tp2R,
+      tp3R
+    );
+
+    // 2. Run doji engine zone extraction for stats
+    const { zones, stats } = extractValidDojiZonesWithStats(
+      bars,
+      tf,
+      currentPrice,
+      redOnly,
+      consumedOpenTimes,
+      mode,
+      bodyPct,
+      wickDiffPct,
+      minRangeAtr,
+      50,
+      0,
+      'untilBroken',
+      zoneMerge
+    );
+
+    // 3. Compute overall metrics and split by zone strength (below 5, 5 to 7, above 7)
+    const overall = computeDojiBacktestBucketStats(trades, 'all', 'All Trades', '0 - 10');
+
+    const tradesBelow5 = trades.filter((t) => t.zoneStrength < 5);
+    const trades5To7 = trades.filter((t) => t.zoneStrength >= 5 && t.zoneStrength <= 7);
+    const tradesAbove7 = trades.filter((t) => t.zoneStrength > 7);
+
+    const below5Stats = computeDojiBacktestBucketStats(
+      tradesBelow5,
+      'below5',
+      'Below 5',
+      '< 5'
+    );
+    const from5To7Stats = computeDojiBacktestBucketStats(
+      trades5To7,
+      '5to7',
+      '5 to 7',
+      '5 - 7'
+    );
+    const above7Stats = computeDojiBacktestBucketStats(
+      tradesAbove7,
+      'above7',
+      'Above 7',
+      '> 7'
+    );
+
+    const enrichedTrades = trades.map((t) => {
+      const risk =
+        typeof t.risk === 'number' && t.risk > 0
+          ? t.risk
+          : Number(Math.abs(t.entryPrice - t.initialSl).toFixed(2));
+      const rMultiple = risk > 0 ? Number((t.pnlDollars / risk).toFixed(2)) : 0;
+      return {
+        ...t,
+        risk,
+        rMultiple,
+      };
+    });
+
+    return res.json({
+      tf,
+      timeframe: tf,
+      mode,
+      filters: {
+        trend: trendFilter,
+        merge: zoneMerge,
+        confirm: retestConfirm,
+      },
+      blockedSetups: {
+        byTrend: filterStats.blockedByTrend,
+        byConfirm: filterStats.blockedByConfirm,
+        mergedDojis: stats.mergedDojisCount ?? filterStats.mergedDojis,
+      },
+      candlesCount: bars.length,
+      closedCandlesCount: stats.barsCount,
+      fromTime: bars[0]?.openTime || null,
+      toTime: lastBar?.openTime || null,
+      currentPrice,
+      slAtrMultiplier,
+      dojiEngine: {
+        dojisFlagged: stats.dojisCount,
+        validZonesCount: zones.length,
+        totalUncappedValidZones: stats.totalUncappedValidCount ?? zones.length,
+        atr: stats.atr ?? 0,
+        rejections: stats.rejections || null,
+        blockedByTrend: filterStats.blockedByTrend,
+        blockedByConfirm: filterStats.blockedByConfirm,
+        mergedDojisCount: stats.mergedDojisCount ?? filterStats.mergedDojis,
+      },
+      totalTrades: overall.totalTrades,
+      wins: overall.wins,
+      losses: overall.losses,
+      breakevens: overall.breakevens,
+      winRate: overall.winRate,
+      averageR: overall.averageR,
+      totalR: overall.totalR,
+      maxDrawdown: overall.maxDrawdown,
+      maxDrawdownR: overall.maxDrawdownR,
+      maxDrawdownDollars: overall.maxDrawdownDollars,
+      totalPnlDollars: overall.totalPnlDollars,
+      byZoneStrength: {
+        below5: below5Stats,
+        '5to7': from5To7Stats,
+        above7: above7Stats,
+        'below 5': below5Stats,
+        '5 to 7': from5To7Stats,
+        'above 7': above7Stats,
+      },
+      strengthBuckets: [below5Stats, from5To7Stats, above7Stats],
+      activeTrade: activeTrade || null,
+      trades: enrichedTrades,
+    });
+  } catch (err: any) {
+    console.error('[DOJI BACKTEST ERROR]', err);
+    return res.status(500).json({
+      error: 'Backtest execution failed',
+      message: err?.message || String(err),
+    });
   }
 });
 
@@ -3299,9 +3838,9 @@ async function startServer() {
   }, 15 * 1000);
 
   // 8. Fetch real Forex Factory news calendar and start 15-minute background refresh
-  await fetchForexFactoryCalendar();
+  await fetchForexFactoryCalendar().catch(() => false);
   setInterval(() => {
-    fetchForexFactoryCalendar();
+    fetchForexFactoryCalendar().catch(() => false);
   }, 15 * 60 * 1000);
 
   // 9. Start background Telegram dispatch worker and long-polling handler
@@ -3309,14 +3848,20 @@ async function startServer() {
   startCommandTelegramWorker();
 
   // 10. Start resilient background tick worker (first upstream connection)
-  fetchBiquoteTick();
+  fetchBiquoteTick().catch((err) => {
+    console.warn('[BIQUOTE TICK] Initial tick warning:', err?.message || err);
+  });
 
   // 10b. Initialize SPY S&P 500 Options Feed & Signals
   loadSpySignalsFromDisk();
-  initSpyFeed();
+  initSpyFeed().catch((err) => {
+    console.warn('[SPY FEED] Init warning:', err?.message || err);
+  });
 
   // 10c. Initialize 24/7 BTC Tide Node.js Backend & SQLite Database
-  await initBtcTideBackend();
+  await initBtcTideBackend().catch((err) => {
+    console.warn('[BTC TIDE] Init warning:', err?.message || err);
+  });
 
   // 10d. Start continuous live macro feed loop (20s FX/Yields + Kalshi/Polymarket discovery) & 30s newsDecision + live release logger worker
   startMacroFeedLoop();
@@ -3377,12 +3922,12 @@ function handleGracefulShutdown(signal: string) {
 process.on('uncaughtException', (err: any) => {
   const cat = err?.name || 'Error';
   const code = err?.code || 'UNCAUGHT';
-  console.error(`[PROCESS EXCEPTION] category=${cat} code=${code}`);
+  console.warn(`[PROCESS EXCEPTION CAUGHT] category=${cat} code=${code}`, err?.message || err);
 });
 
 process.on('unhandledRejection', (reason: any) => {
   const cat = reason?.name || (typeof reason === 'string' ? reason.slice(0, 30) : 'UnhandledRejection');
-  console.error(`[PROCESS REJECTION] category=${cat}`);
+  console.warn(`[PROCESS REJECTION CAUGHT] category=${cat}`, reason?.message || reason);
 });
 
 process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));

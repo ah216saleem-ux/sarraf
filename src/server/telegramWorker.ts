@@ -1939,20 +1939,26 @@ export function startTelegramWorker() {
   // Register commands menu with Telegram API
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (token && token !== '123456789:ABCdefGhIJKlmNoPQRstuVWXyz') {
-    registerBotCommands(token);
+    registerBotCommands(token).catch((err) => {
+      console.warn('[TELEGRAM WORKER] registerBotCommands warning:', err?.message || err);
+    });
   }
 
   // Send Bot Restarted server alert on startup
-  sendAdminAlert('BOT_RESTARTED');
+  sendAdminAlert('BOT_RESTARTED').catch(() => {});
 
   // 1. Outbox Queue Processor (Runs every 1.5s)
-  setInterval(async () => {
-    await triggerOutboxProcessing();
+  setInterval(() => {
+    triggerOutboxProcessing().catch((err) => {
+      console.warn('[TELEGRAM WORKER] Outbox process loop warning:', err?.message || err);
+    });
   }, 1500);
 
   // 2. Incoming Command & Callback Query Long-Polling Loop (Runs continuously every 2.5s)
-  setInterval(async () => {
-    await pollTelegramCommands();
+  setInterval(() => {
+    pollTelegramCommands().catch((err) => {
+      console.warn('[TELEGRAM WORKER] Telegram polling loop warning:', err?.message || err);
+    });
   }, 2500);
 
   // 3. Summaries & Periodic Health Checks Loop (Runs every 15s)
