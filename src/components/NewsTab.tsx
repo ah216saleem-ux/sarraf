@@ -1096,6 +1096,136 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
               </div>
             )}
 
+            {/* Directional Radar & Roadmap (Gold vs USD) */}
+            <div
+              id="focus-directional-roadmap"
+              className="p-3.5 rounded-xl border space-y-2.5 transition-colors"
+              style={{
+                backgroundColor: palette.bg,
+                borderColor:
+                  activeDecision?.verdict === 'BULLISH'
+                    ? `${palette.up}40`
+                    : activeDecision?.verdict === 'BEARISH'
+                    ? `${palette.down}40`
+                    : palette.line,
+              }}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="px-2.5 py-1 rounded-md font-mono text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 border"
+                    style={{
+                      backgroundColor:
+                        activeDecision?.verdict === 'BULLISH'
+                          ? `${palette.up}20`
+                          : activeDecision?.verdict === 'BEARISH'
+                          ? `${palette.down}20`
+                          : `${palette.gold}20`,
+                      color:
+                        activeDecision?.verdict === 'BULLISH'
+                          ? palette.up
+                          : activeDecision?.verdict === 'BEARISH'
+                          ? palette.down
+                          : palette.gold,
+                      borderColor:
+                        activeDecision?.verdict === 'BULLISH'
+                          ? `${palette.up}60`
+                          : activeDecision?.verdict === 'BEARISH'
+                          ? `${palette.down}60`
+                          : `${palette.gold}60`,
+                    }}
+                  >
+                    <span>
+                      {activeDecision?.verdict === 'BULLISH'
+                        ? '🟢 GOLD BULLISH'
+                        : activeDecision?.verdict === 'BEARISH'
+                        ? '🔴 GOLD BEARISH'
+                        : '⚪ NEUTRAL / WAIT'}
+                    </span>
+                    <span className="text-[10px] opacity-80">
+                      ({activeDecision?.verdict === 'BULLISH' ? 'BUY BIAS' : activeDecision?.verdict === 'BEARISH' ? 'SELL BIAS' : 'WATCH'})
+                    </span>
+                  </span>
+
+                  <span
+                    className="font-mono text-[11px] font-semibold"
+                    style={{ color: palette.muted }}
+                  >
+                    USD IMPACT:{' '}
+                    <span
+                      style={{
+                        color:
+                          activeDecision?.verdict === 'BULLISH'
+                            ? palette.down
+                            : activeDecision?.verdict === 'BEARISH'
+                            ? palette.up
+                            : palette.text,
+                      }}
+                    >
+                      {activeDecision?.verdict === 'BULLISH'
+                        ? 'BEARISH 📉 (Kamzor Dollar)'
+                        : activeDecision?.verdict === 'BEARISH'
+                        ? 'BULLISH 📈 (Mazboot Dollar)'
+                        : 'NEUTRAL ➡️'}
+                    </span>
+                  </span>
+                </div>
+
+                <span
+                  className="font-mono text-[10px] uppercase tracking-[0.14em]"
+                  style={{ color: palette.muted }}
+                >
+                  XAU/USD INVERSE DYNAMICS
+                </span>
+              </div>
+
+              {/* Clear Scenarios (Urdu & English) */}
+              <div
+                className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t text-[11px] font-mono"
+                style={{ borderColor: palette.line }}
+              >
+                <div
+                  className="p-2.5 rounded-lg border flex flex-col gap-0.5"
+                  style={{
+                    backgroundColor: palette.surface,
+                    borderColor: `${palette.down}30`,
+                  }}
+                >
+                  <span className="text-rose-400 font-bold flex items-center gap-1">
+                    <span>🔴 BEARISH GOLD SCENARIO:</span>
+                  </span>
+                  <span style={{ color: palette.text }}>
+                    {isReversedGoldIndicator(activeSelectedEvent.title)
+                      ? 'Actual < Forecast aya to USD Mazboot -> Gold Girega (Sell).'
+                      : 'Actual > Forecast aya to USD Mazboot -> Gold Girega (Sell).'}
+                  </span>
+                  <span className="text-[10px]" style={{ color: palette.muted }}>
+                    Hotter US data triggers higher real yields & strengthens dollar.
+                  </span>
+                </div>
+
+                <div
+                  className="p-2.5 rounded-lg border flex flex-col gap-0.5"
+                  style={{
+                    backgroundColor: palette.surface,
+                    borderColor: `${palette.up}30`,
+                  }}
+                >
+                  <span className="text-emerald-400 font-bold flex items-center gap-1">
+                    <span>🟢 BULLISH GOLD SCENARIO:</span>
+                  </span>
+                  <span style={{ color: palette.text }}>
+                    {isReversedGoldIndicator(activeSelectedEvent.title)
+                      ? 'Actual > Forecast aya to USD Kamzor -> Gold Barhega (Buy).'
+                      : 'Actual < Forecast aya to USD Kamzor -> Gold Barhega (Buy).'}
+                  </span>
+                  <span className="text-[10px]" style={{ color: palette.muted }}>
+                    Cooler US data weakens dollar and boosts gold safe-haven flow.
+                  </span>
+                </div>
+              </div>
+            </div>
+
             {/* Item 2a & Round 14 Item 2: Admin "Enter / Correct / Delete actual" field (admin session required, whitelisted units) */}
             {isSelectedEventReleased && (
               <form
@@ -1401,54 +1531,97 @@ export const NewsTab: React.FC<NewsTabProps> = React.memo(() => {
                       </div>
                     </div>
 
-                    {/* Right: Row Tag (Item 1 tiny arrow next to WAIT, Item 6 BEAT/MISS/INLINE with gold arrow or ACTUAL N/A for released) */}
+                    {/* Right: Row Tag showing clear BULLISH or BEARISH for Gold */}
                     {rowIsReleased ? (
                       rowResult ? (
                         <span
-                          className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded border font-mono text-[10px] uppercase tracking-[0.14em] font-semibold"
+                          className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border font-mono text-[10px] uppercase tracking-[0.14em] font-bold"
                           style={{
-                            color: palette.text,
-                            borderColor: palette.line,
-                            backgroundColor: palette.bg,
+                            color:
+                              rowResult.goldDirection === 'BULLISH'
+                                ? palette.up
+                                : rowResult.goldDirection === 'BEARISH'
+                                ? palette.down
+                                : palette.muted,
+                            borderColor:
+                              rowResult.goldDirection === 'BULLISH'
+                                ? `${palette.up}40`
+                                : rowResult.goldDirection === 'BEARISH'
+                                ? `${palette.down}40`
+                                : palette.line,
+                            backgroundColor:
+                              rowResult.goldDirection === 'BULLISH'
+                                ? `${palette.up}15`
+                                : rowResult.goldDirection === 'BEARISH'
+                                ? `${palette.down}15`
+                                : palette.bg,
                           }}
                         >
-                          <span style={{ color: palette.gold }}>{rowResult.goldArrow}</span>
-                          <span>{rowResult.outcomeTag}</span>
+                          <span>{rowResult.goldDirection === 'BULLISH' ? '🟢' : rowResult.goldDirection === 'BEARISH' ? '🔴' : '⚪'}</span>
+                          <span>{rowResult.goldDirection}</span>
+                        </span>
+                      ) : rowDecision.verdict === 'BULLISH' || rowDecision.verdict === 'BEARISH' ? (
+                        <span
+                          className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border font-mono text-[10px] uppercase tracking-[0.14em] font-bold"
+                          style={{
+                            color: rowDecision.verdict === 'BULLISH' ? palette.up : palette.down,
+                            borderColor: rowDecision.verdict === 'BULLISH' ? `${palette.up}40` : `${palette.down}40`,
+                            backgroundColor: rowDecision.verdict === 'BULLISH' ? `${palette.up}15` : `${palette.down}15`,
+                          }}
+                        >
+                          <span>{rowDecision.verdict === 'BULLISH' ? '🟢' : '🔴'}</span>
+                          <span>{rowDecision.verdict}</span>
                         </span>
                       ) : (
                         <span
-                          className="shrink-0 px-2 py-0.5 rounded border font-mono text-[10px] uppercase tracking-[0.14em] font-semibold"
+                          className="shrink-0 px-2.5 py-1 rounded-md border font-mono text-[10px] uppercase tracking-[0.14em] font-medium"
                           style={{
                             color: palette.muted,
                             borderColor: palette.line,
                             backgroundColor: palette.bg,
                           }}
                         >
-                          ACTUAL N/A
+                          RELEASED
                         </span>
                       )
                     ) : (
-                      <div className="shrink-0 inline-flex items-center gap-1">
-                        {rowDecision.verdict === 'WAIT' &&
-                          (rowLean?.lean === 'BULLISH' || rowLean?.lean === 'BEARISH') && (
-                            <span
-                              className="font-mono text-[11px] leading-none"
-                              style={{ color: palette.muted }}
-                              title={`Forecast lean: ${rowLean.lean} for gold`}
-                            >
-                              {rowLean.lean === 'BULLISH' ? '↑' : '↓'}
-                            </span>
-                          )}
-                        <span
-                          className="px-2 py-0.5 rounded border font-mono text-[10px] uppercase tracking-[0.14em] font-semibold"
-                          style={{
-                            color: vColor,
-                            borderColor: palette.line,
-                            backgroundColor: palette.bg,
-                          }}
-                        >
-                          {rowDecision.verdict}
-                        </span>
+                      <div className="shrink-0 inline-flex items-center gap-1.5">
+                        {rowDecision.verdict === 'BULLISH' || rowDecision.verdict === 'BEARISH' ? (
+                          <span
+                            className="px-2.5 py-1 rounded-md border font-mono text-[10px] uppercase tracking-[0.14em] font-bold inline-flex items-center gap-1"
+                            style={{
+                              color: rowDecision.verdict === 'BULLISH' ? palette.up : palette.down,
+                              borderColor: rowDecision.verdict === 'BULLISH' ? `${palette.up}40` : `${palette.down}40`,
+                              backgroundColor: rowDecision.verdict === 'BULLISH' ? `${palette.up}15` : `${palette.down}15`,
+                            }}
+                          >
+                            <span>{rowDecision.verdict === 'BULLISH' ? '🟢' : '🔴'}</span>
+                            <span>{rowDecision.verdict}</span>
+                          </span>
+                        ) : rowLean?.lean === 'BULLISH' || rowLean?.lean === 'BEARISH' ? (
+                          <span
+                            className="px-2.5 py-1 rounded-md border font-mono text-[10px] uppercase tracking-[0.14em] font-bold inline-flex items-center gap-1"
+                            style={{
+                              color: rowLean.lean === 'BULLISH' ? palette.up : palette.down,
+                              borderColor: rowLean.lean === 'BULLISH' ? `${palette.up}40` : `${palette.down}40`,
+                              backgroundColor: rowLean.lean === 'BULLISH' ? `${palette.up}15` : `${palette.down}15`,
+                            }}
+                          >
+                            <span>{rowLean.lean === 'BULLISH' ? '🟢' : '🔴'}</span>
+                            <span>LEAN {rowLean.lean}</span>
+                          </span>
+                        ) : (
+                          <span
+                            className="px-2.5 py-1 rounded-md border font-mono text-[10px] uppercase tracking-[0.14em] font-medium"
+                            style={{
+                              color: palette.muted,
+                              borderColor: palette.line,
+                              backgroundColor: palette.bg,
+                            }}
+                          >
+                            {rowDecision.verdict}
+                          </span>
+                        )}
                       </div>
                     )}
                   </div>

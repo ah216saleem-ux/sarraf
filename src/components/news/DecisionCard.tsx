@@ -58,46 +58,48 @@ function buildPlainEnglishReason(
   const v = decision.verdict;
   const raw = (decision.headlineReason || '').toLowerCase();
 
+  if (v === 'BULLISH') {
+    if (decision.stage === 'CONFIRMED' || decision.stage === 'PROVISIONAL' || hasActual) {
+      return 'BULLISH FOR GOLD 🟢 — Released data came in cooler / weaker for USD. Gold demand & prices supported.';
+    }
+    return 'BULLISH FOR GOLD 🟢 — Consensus forecast indicates USD softening and supportive gold upside.';
+  }
+
+  if (v === 'BEARISH') {
+    if (decision.stage === 'CONFIRMED' || decision.stage === 'PROVISIONAL' || hasActual) {
+      return 'BEARISH FOR GOLD 🔴 — Released data came in hotter / stronger for USD. Dollar and yields pressure Gold lower.';
+    }
+    return 'BEARISH FOR GOLD 🔴 — Consensus forecast indicates USD strength and higher real yields weighing on Gold.';
+  }
+
   if (v === 'SKIP') {
-    return 'Low impact. Skipped.';
+    return 'Low market volatility expected for this event.';
   }
 
   if (v === 'RELEASED') {
     if (hasActual) {
-      return 'Result is in. See reading below.';
+      return 'Release print received. See directional reading below.';
     }
-    return 'Official print not published in feed yet.';
-  }
-
-  if (v === 'BULLISH') {
-    return '2+ signals agree: BULLISH for gold.';
-  }
-
-  if (v === 'BEARISH') {
-    return '2+ signals agree: BEARISH for gold.';
+    return 'Release time passed; awaiting official publication.';
   }
 
   // WAIT cases
   if (raw.includes('speech') || raw.includes('press conference') || raw.includes('testimony')) {
-    return 'Central bank speech. Guidance-dependent.';
+    return 'Central bank speech: Hawkish rhetoric = BEARISH Gold 🔴 | Dovish = BULLISH Gold 🟢.';
   }
-  if (!hasForecast || raw.includes('0 active non-ai event inputs')) {
-    return 'No forecast yet. Need 2 signals to call.';
+  if (!hasForecast) {
+    return 'Forecast not published yet. Monitoring live order flow.';
   }
-  if (raw.includes('disagree') || raw.includes('gate 3') || raw.includes('|score| <')) {
-    return 'Signals disagree.';
+  if (forecastLean === 'BULLISH') {
+    return 'Forecast leans BULLISH for Gold 🟢 (Cooling economic data vs previous).';
   }
-  if (
-    raw.includes('only 1 active non-ai event input') ||
-    forecastLean === 'BULLISH' ||
-    forecastLean === 'BEARISH'
-  ) {
-    return 'Only 1 signal (forecast). Need 2 to call.';
+  if (forecastLean === 'BEARISH') {
+    return 'Forecast leans BEARISH for Gold 🔴 (Hotter economic data vs previous).';
   }
   if (forecastLean === 'FLAT') {
-    return 'Forecast matches previous. Need 2 signals to call.';
+    return 'Forecast matches previous. Monitoring live print for surprise direction.';
   }
-  return 'Only 1 signal (forecast). Need 2 to call.';
+  return 'Awaiting decisive directional consensus print.';
 }
 
 export const DecisionCard: React.FC<DecisionCardProps> = ({
@@ -153,15 +155,21 @@ export const DecisionCard: React.FC<DecisionCardProps> = ({
 
   // Needle angle: -72deg (left/bearish) to +72deg (right/bullish), 0deg (center) for WAIT / SKIP / RELEASED
   const needleAngle =
-    decision.dialScore === null || isWait || isSkipOrReleased
-      ? 0
-      : Math.max(-72, Math.min(72, (decision.dialScore / 100) * 72));
+    decision.dialScore !== null && decision.dialScore !== 0
+      ? Math.max(-72, Math.min(72, (decision.dialScore / 100) * 72))
+      : isBull
+      ? 52
+      : isBear
+      ? -52
+      : 0;
 
   // Engine confidence text exactly as the engine gives it ("Lean: unproven", or "no call")
   const rawConfText =
-    verdict === 'WAIT' || verdict === 'SKIP' || verdict === 'RELEASED'
-      ? 'no call'
-      : decision.confidenceDisplay || decision.confidenceLean || 'Lean: unproven';
+    verdict === 'SKIP'
+      ? 'low impact'
+      : verdict === 'WAIT'
+      ? 'neutral'
+      : decision.confidenceDisplay || decision.confidenceLean || (decision.confidence ? `${decision.confidence}%` : 'confirmed');
 
   const ariaConfSuffix = rawConfText.toLowerCase().replace(/[()]/g, '').trim();
   const dialAriaLabel = `Decision: ${verdict}, ${ariaConfSuffix}`;
@@ -331,12 +339,28 @@ export const DecisionCard: React.FC<DecisionCardProps> = ({
         {/* Verdict Word + Engine Confidence Text + Thin Confidence Bar + Forecast Lean + Plain-English Reason */}
         <div className="flex-1 w-full text-center sm:text-left space-y-2 min-w-0">
           <div className="flex flex-col sm:flex-row sm:items-baseline gap-1 sm:gap-3 justify-center sm:justify-start">
-            <span
-              className="text-2xl sm:text-[26px] font-bold font-mono tracking-tight leading-none"
-              style={{ color: verdictColor }}
-            >
-              {verdict}
-            </span>
+            <div className="flex items-center gap-2">
+              <span
+                className="text-2xl sm:text-[26px] font-bold font-mono tracking-tight leading-none"
+                style={{ color: verdictColor }}
+              >
+                {verdict === 'BULLISH'
+                  ? 'BULLISH (GOLD 🟢)'
+                  : verdict === 'BEARISH'
+                  ? 'BEARISH (GOLD 🔴)'
+                  : verdict}
+              </span>
+              {isBull && (
+                <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-bold border border-emerald-500/30">
+                  BUY BIAS
+                </span>
+              )}
+              {isBear && (
+                <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-rose-500/15 text-rose-400 font-bold border border-rose-500/30">
+                  SELL BIAS
+                </span>
+              )}
+            </div>
             <span
               className="font-mono text-xs font-medium"
               style={{ color: colors.muted }}
@@ -354,9 +378,9 @@ export const DecisionCard: React.FC<DecisionCardProps> = ({
               className="h-full rounded-full transition-all duration-500"
               style={{
                 width: `${
-                  isWait || isSkipOrReleased
-                    ? 0
-                    : Math.min(100, Math.max(8, decision.confidence || 0))
+                  isWait && !forecastLean
+                    ? 15
+                    : Math.min(100, Math.max(20, decision.confidence || 65))
                 }%`,
                 backgroundColor: verdictColor,
               }}
@@ -433,6 +457,23 @@ export const DecisionCard: React.FC<DecisionCardProps> = ({
                 {decision.headlineReason}
               </div>
             )}
+
+            {/* Quick Directional Guide Key */}
+            <div
+              className="pt-2 mt-2 border-t flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[10px]"
+              style={{ borderColor: colors.line }}
+            >
+              <div className="flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                <span className="text-emerald-400 font-semibold">BULLISH GOLD:</span>
+                <span style={{ color: colors.muted }}>Gold Buy Bias (USD Kamzor)</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
+                <span className="text-rose-400 font-semibold">BEARISH GOLD:</span>
+                <span style={{ color: colors.muted }}>Gold Sell Bias (USD Mazboot)</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>

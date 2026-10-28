@@ -55,11 +55,15 @@ export function computeUnifiedDecision(
   evt: EventDecisionInput,
   macro: MacroSnapshot | null
 ): UnifiedDecision {
+  const hasForecastOrActual =
+    (evt.forecastNum !== null && evt.forecastNum !== undefined) ||
+    (evt.actualNum !== null && evt.actualNum !== undefined);
   const isLowImpact =
-    evt.impact === 'Low' ||
-    (evt.ahmedTier !== undefined && evt.ahmedTier >= 3 && evt.impact !== 'High' && evt.impact !== 'Medium');
+    !hasForecastOrActual &&
+    (evt.impact === 'Low' ||
+      (evt.ahmedTier !== undefined && evt.ahmedTier >= 3 && evt.impact !== 'High' && evt.impact !== 'Medium'));
 
-  // Low impact rule: "Show exactly ONE verdict: BULLISH, BEARISH or WAIT (SKIP for low-impact news)"
+  // Low impact rule: Only skip if completely lacking forecast/actual numbers
   if (isLowImpact) {
     return {
       verdict: 'SKIP',
@@ -239,18 +243,18 @@ export function computeUnifiedDecision(
     else if (macro?.us10y?.change && macro.us10y.change > 0.01) bearScore += 10;
 
     const net = bullScore - bearScore;
-    if (net >= 20) {
+    if (net >= 10 || forecastSentiment === 'BULLISH') {
       verdict = 'BULLISH';
-      confidence = Math.min(70, Math.round(55 + (net / 100) * 25));
+      confidence = Math.min(85, Math.round(55 + (Math.max(0, net) / 100) * 30));
       reasonSentence = 'Cooling macro expectations and supportive technical alignment provide pre-news bullish asymmetry for gold.';
-    } else if (net <= -20) {
+    } else if (net <= -10 || forecastSentiment === 'BEARISH') {
       verdict = 'BEARISH';
-      confidence = Math.min(70, Math.round(55 + (Math.abs(net) / 100) * 25));
+      confidence = Math.min(85, Math.round(55 + (Math.abs(Math.min(0, net)) / 100) * 30));
       reasonSentence = 'Hotter projected release and yields pressure bullion safe-haven demand prior to the print.';
     } else {
       verdict = 'WAIT';
-      confidence = Math.min(70, Math.max(50, Math.round(50 + Math.abs(net) * 0.2)));
-      reasonSentence = 'Conflicting macro signals between forecast consensus and market indicators; awaiting release.';
+      confidence = 50;
+      reasonSentence = 'Conflicting or inline macro signals between forecast consensus and market indicators; awaiting release.';
     }
   } else if (!isPost5Min) {
     // Stage: POST-RELEASE 0 to 5 minutes -> PROVISIONAL
@@ -259,11 +263,11 @@ export function computeUnifiedDecision(
 
     if (forecastSentiment === 'BULLISH') {
       verdict = 'BULLISH';
-      confidence = 74;
+      confidence = 80;
       reasonSentence = 'Dovish release print verified; initial momentum favours immediate gold upside.';
     } else if (forecastSentiment === 'BEARISH') {
       verdict = 'BEARISH';
-      confidence = 74;
+      confidence = 80;
       reasonSentence = 'Hawkish release print verified; initial impulse favours dollar strength and gold pullback.';
     } else {
       verdict = 'WAIT';
@@ -271,24 +275,35 @@ export function computeUnifiedDecision(
       reasonSentence = 'Print arrived inline with forecast or pending verification; monitoring 5-minute reaction window.';
     }
   } else {
-    // Stage: BEYOND 5 MINUTES -> CONFIRMED or MIXED (MIXED means WAIT)
+    // Stage: BEYOND 5 MINUTES -> CONFIRMED or MIXED
     const goldMovedUp = typeof evt.goldMove15m === 'number' ? evt.goldMove15m > 0.5 : null;
     const goldMovedDown = typeof evt.goldMove15m === 'number' ? evt.goldMove15m < -0.5 : null;
 
-    if (forecastSentiment === 'BULLISH' && goldMovedUp !== false) {
+    if (forecastSentiment === 'BULLISH') {
       stage = 'CONFIRMED';
       stageLabel = 'CONFIRMED';
       verdict = 'BULLISH';
       confidence = 85;
       reasonSentence = 'Post-release 5m price reaction confirms dovish print with sustained institutional upside flow.';
-    } else if (forecastSentiment === 'BEARISH' && goldMovedDown !== false) {
+    } else if (forecastSentiment === 'BEARISH') {
       stage = 'CONFIRMED';
       stageLabel = 'CONFIRMED';
       verdict = 'BEARISH';
       confidence = 85;
       reasonSentence = 'Post-release price action confirms hawkish momentum with decisive downward displacement.';
+    } else if (goldMovedUp) {
+      stage = 'CONFIRMED';
+      stageLabel = 'CONFIRMED';
+      verdict = 'BULLISH';
+      confidence = 78;
+      reasonSentence = 'Post-release institutional buying confirmed upside impulse for gold.';
+    } else if (goldMovedDown) {
+      stage = 'CONFIRMED';
+      stageLabel = 'CONFIRMED';
+      verdict = 'BEARISH';
+      confidence = 78;
+      reasonSentence = 'Post-release institutional selling confirmed downward displacement for gold.';
     } else {
-      // Divergence or conflicting post-window move: MIXED means WAIT
       stage = 'MIXED';
       stageLabel = 'MIXED';
       verdict = 'WAIT';
