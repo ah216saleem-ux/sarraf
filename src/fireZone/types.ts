@@ -15,7 +15,7 @@ export interface Candle {
 export type FireZoneCandle = Candle;
 
 export type PivotType = 'HIGH' | 'LOW';
-export type PivotLevel = 5 | 15 | 20;
+export type PivotLevel = 5 | 15 | 20 | 50;
 
 export interface Pivot {
   index: number;
@@ -40,7 +40,7 @@ export interface StructureEvent {
 
 export type ZoneSide = 'BUY' | 'SELL';
 export type ZoneType = 'NEAREST' | 'DEEP' | 'SWING';
-export type ZoneStrengthLabel = 'CRITICAL' | 'STRONG' | 'MEDIUM';
+export type ZoneStrengthLabel = 'CRITICAL' | 'STRONG' | 'MODERATE' | 'MEDIUM';
 
 export type ZoneLifecycleState =
   | 'FRESH'
@@ -71,6 +71,18 @@ export interface FlippedLevelCandidate {
   bonusScore: number; // +2 rank bonus
 }
 
+export interface FlipWatch {
+  id: string; // "F" + Math.round(anchor), e.g. "F4103"
+  fromZoneId?: string;
+  side: ZoneSide; // opposite side of the broken zone (new target side once confirmed)
+  anchor: number;
+  score: number;
+  armed: boolean;
+  confirmed: boolean;
+  brokenAtTime?: number;
+  brokenBarIndex?: number;
+}
+
 export interface FireZonePersistedState {
   version: 1;
   activeZones: Array<{
@@ -85,6 +97,26 @@ export interface FireZonePersistedState {
   history: RetiredZoneHistoryItem[];
   flippedLevels: FlippedLevelCandidate[];
 }
+
+export interface FireZonePersistedStateV2 {
+  version: 2;
+  activeZoneIds: string[];
+  activeZones: Array<{
+    id: string;
+    side: ZoneSide;
+    anchor: number;
+    type: ZoneType;
+    state: 'FRESH';
+    createdBarTime: number;
+    score: number;
+    retests?: number;
+  }>;
+  brokenIds: string[];
+  flipWatches: FlipWatch[];
+  events: string[];
+  history?: RetiredZoneHistoryItem[];
+}
+
 
 export type LevelSourceKind =
   | 'H1'
@@ -240,6 +272,9 @@ export interface FireZoneEngineResult {
   recentlyBroken: FireZone[];
   retiredHistory: RetiredZoneHistoryItem[]; // Last 10 retired zones (HELD / BROKEN / EXPIRED)
   latestLevelEvent: string | null; // Formatted sentence for LEVEL EVENTS card
+  levelEvents?: string[]; // Last 4 lifecycle events (BROKE / FLIP / HELD)
+  brokenIds?: string[];
+  flipWatches?: FlipWatch[];
   structureEvents: StructureEvent[];
   dualStructure: DualStructureResult;
   levels: LevelWall[]; // Kept levels within +/-12*ATR(H1) + zone anchors
@@ -251,3 +286,4 @@ export interface FireZoneEngineResult {
   gateEval: GateEvaluation;
   ladder: LadderRow[];
 }
+

@@ -27,53 +27,43 @@ interface LearnItem {
 const LEARN_TOPICS: LearnItem[] = [
   {
     id: 'fixed-width-zones',
-    title: '1. Zones are fixed $4 bands on ranked levels',
-    body: 'Har Fire Zone bilkul 007 system ke mutabiq fixed $4.00 wide hota hai (anchor ± $2.00). Levels swing pivots, Previous Day High/Low (PDH/PDL), Previous Week High/Low (PWH/PWL), Equal Highs/Lows (EQH/EQL), aur $50/$100 round numbers ko cluster kar ke rank hote hain. Anchor point level ka mid price hota hai aur kabhi drift nahi hota.',
+    title: '1. Fixed $4.00 Zones & H1 Pivot Origins',
+    body: 'Har Fire Zone fixed $4.00 wide hota hai (anchor ± $2.00, LO = anchor - $2, HI = anchor + $2). Origins pichle 150 closed H1 candles ke confirmed swing highs (SELL) aur swing lows (BUY) se aate hain: L=5 (weight 1), L=20 (weight 3), aur L=50 (weight 5). Agle 12 candles ki departure move se +2/+3/+4 points milte hain, aur $3 ke andar same-side candidates merge ho kar prev-24h high/low (+2) aur $100/$50 round number (+2/+1) bonus lete hain. Score >= 11 CRITICAL, >= 8 STRONG, warna MODERATE hota hai.',
   },
   {
-    id: 'how-tp-snaps',
-    title: '2. How TP snaps to levels',
-    body: 'Take Profit targets (TP1, TP2, TP3) hawa mein nahi bante balki chart ke actual ranked levels par snap hote hain. TP1 entry se kam az kam $9 door agle level par baithta hai, TP2 kam az kam $13 door, aur TP3 kam az kam $18 door. Agar kisi slot par koi level na mile toh standard minimum spacing fallback use hoti hai.',
+    id: 'freshness-rule',
+    title: '2. Fresh Zones Are Stronger (Each Retest Weakens a Zone)',
+    body: 'Purane system ke baraks jahan touches points barhate thay, 007 engine mein FRESH zones sab se mazboot hotay hain: 0 retests = +4 points (fresh). Har retest zone ko kamzor karta hai (1 retest = +2 points, 2 retests = 0 points), aur 3rd retest ke baad zone retire / discard ho jata hai kyunke wahan ke resting orders absorb ho chuke hotay hain.',
   },
   {
-    id: 'how-level-plays',
-    title: '3. How a level "plays" (PLAYED_HELD)',
-    body: 'Jab market zone ke andar wick maarti hai aur phir price wahan se kam az kam 1×ATR door close ho jati hai (ya lagataar 3 candle closes zone ke sahi rukh par milti hain), toh level "PLAYED_HELD" kehlaata hai. Yeh proof hai ke level ne react kar diya aur liquidity absorb ho chuki hai.',
+    id: 'break-buffer-rule',
+    title: '3. Break Rules (Close + 0.25×ATR Buffer & Live 0.5×ATR)',
+    body: 'Wicks kabhi bhi zone ko break nahi kartin. Closed H1 candle par zone tabhi BROKEN maana jata hai jab candle far edge se 0.25 × ATR se zyada bahar close ho (SELL: close > HI + 0.25×ATR, BUY: close < LO - 0.25×ATR). Live tick par agar live price far edge se 0.5 × ATR se zyada nikal jaye toh zone foran BROKEN mark ho kar agle valid zone se replace ho jata hai.',
   },
   {
-    id: 'retire-and-flip',
-    title: '4. Retire and Flip Rules',
-    body: 'Jab koi zone PLAYED_HELD, BROKEN, ya EXPIRED (150 candles se purana) ho jata hai toh woh chart aur ladder se RETIRE ho jata hai aur engine foran usi slot ke liye naya best level muntakhib karta hai. Agar koi BUY zone toot-ta hai (close < LO - $1), toh uska anchor opposite side par candidate SELL level ban jata hai (+2 rank bonus ke sath) — aur SELL zone tootne par BUY candidate banta hai.',
+    id: 'flip-arm-retest',
+    title: '4. Flip Rule (Needs Arm + Retest)',
+    body: 'Jab koi zone break hota hai toh woh foran flip zone nahi banta balki Flip Watch (F<price>) mein jata hai. Flip ko pehle ARM hona parta hai (price broken anchor se break direction mein kam az kam 1 × ATR door jaye) aur phir RETEST hona parta hai (price wapas anchor ke 0.5 × ATR ke andar aaye bina far side par $1 se zyada close kiye). Jab tak arm + retest dono mukammal na hon, flip zone kabhi dikhaya nahi jata.',
   },
   {
-    id: 'sl-logic',
-    title: '5. Stop Loss (SL) Logic',
-    body: 'Stop Loss zone ke outer edge se door safe distance par rakha jata hai: SL = max($12.00, 1.2 × ATR). Is se market ki aam volatility aur liquidity wick sweeps se account bach jata hai jabke risk strictly predefined rehta hai.',
+    id: 'near-and-deep-selection',
+    title: '5. NEAR & DEEP Selection (Max 4 Zones)',
+    body: 'Chart, cards aur ladder par waqt mein zyada se zyada 4 zones (2 SELL + 2 BUY) hotay hain. NEAR sab se qareebi valid zone (score >= 6, 8×ATR ke andar) hota hai, aur DEEP NEAR se kam az kam $12 door (25×ATR ke andar) sab se highest score wala zone hota hai. Koi bhi SELL zone kabhi live price ke neeche nahi hota aur koi BUY zone kabhi live price ke oopar nahi hota.',
+  },
+  {
+    id: 'sl-and-tp-snapping',
+    title: '6. Trade Plan: SL & Snapped TP1 / TP2 / TP3',
+    body: 'Entry price BUY ke liye HI aur SELL ke liye LO hoti hai. Stop Loss zone ke far edge se max($12.00, 1.2 × ATR) bahar rakha jata hai. TP1, TP2 aur TP3 trade direction mein pehle teen distinct levels par snap hotay hain jo entry se kam az kam $9, $13 aur $18 door hon. R:R(TP1) = |TP1 - anchor| / |anchor - SL|.',
   },
   {
     id: 'single-source-truth',
-    title: '6. Single Source of Truth (Ladder, Chart, Cards)',
-    body: 'Poora Fire Zone tab aik single selector buildChartModel(engineResult) par chalta hai. Jo zones, levels aur targets Zone Ladder par dikhte hain, theek wahi chart overlay aur cards par drawn hotay hain. Koi price mismatch ya drifting mumkiin nahi.',
+    title: '7. Single Source of Truth & Timeframe Lock',
+    body: 'Zones, setup cards, Zone Ladder, chart boxes aur zone chips sab aik hi H1 engine selection se aate hain. Chart par 15m, 30m, 1H, 4H ya 1D button dabane se sirf candles badalti hain — zones, plans aur ladder hamesha fixed H1 basis par lock rehte hain.',
   },
   {
     id: 'confluence-gates',
-    title: '7. 7 Confluence Gates & Trade Allowed',
-    body: 'Entry se pehle 7 gates evaluate hotay hain: Structure Aligned, Discount/Premium Side, Zone Proximity (<= $6.00), Rejection Candle, Fresh BOS/CHoCH (40 candles), R:R (TP1) >= 1.00, aur Level Not Broken. Jab kam az kam 5 gates pass hon toh TRADE ALLOWED: YES ka signal milta hai.',
-  },
-  {
-    id: 'ladder-priority',
-    title: '8. Zone Ladder Hierarchy',
-    body: 'Zone Ladder sab se oopar (highest price) se sab se neeche (lowest price) tak ordered hota hai. Is mein SELL SL, Entry HI/LO ($4 wide), Retest anchors, Buy/Sell TP1..3, ranked LEVEL 1..n walls, aur gold NOW row aati hain. NOW row load par scroll container ke center mein rehti hai.',
-  },
-  {
-    id: 'risk-management',
-    title: '9. Position Sizing & Layered Execution',
-    body: 'Apne account balance ka 1% se zyada risk na karein. Smart 007 execution mein 60% position size NEAREST zone entry par aur 40% deep rejection par allocate kiya jata hai, jis se overall average entry price behtar ho jati hai.',
-  },
-  {
-    id: 'when-to-wait',
-    title: '10. When to WAIT',
-    body: 'Agar TRADE ALLOWED: NO ho ya price zone se $6 se zyada door ho, toh trade zabardasti enter na karein. Rejection candle aur zone proximity ka intezar karein.',
+    title: '8. 7 Execution Safety Gates',
+    body: 'Entry se pehle 7 gates check hotay hain: Structure aligned, Discount/Premium side, Zone proximity (<= $6.00), Rejection candle, Fresh BOS / CHoCH (40 candles), R:R minimum (>= 1.0), aur Level not broken. Jab kam az kam 5/7 gates pass hon tabhi setup READY hota hai.',
   },
 ];
 

@@ -375,11 +375,19 @@ export const FireZoneOtherZonesList: React.FC<{
  */
 export const FireZoneEventCard: React.FC<{
   latestLevelEvent: string | null;
+  levelEvents?: string[];
   retiredHistory: RetiredZoneHistoryItem[];
-}> = React.memo(({ latestLevelEvent, retiredHistory }) => {
+}> = React.memo(({ latestLevelEvent, levelEvents = [], retiredHistory }) => {
   const [showHistory, setShowHistory] = useState<boolean>(false);
 
-  if (!latestLevelEvent && retiredHistory.length === 0) {
+  const displayEvents =
+    levelEvents && levelEvents.length > 0
+      ? levelEvents.slice(0, 4)
+      : latestLevelEvent
+      ? [latestLevelEvent]
+      : [];
+
+  if (displayEvents.length === 0 && retiredHistory.length === 0) {
     return (
       <section className="space-y-2 fz-fade-up" style={glassCardStyle}>
         <div className="flex items-center gap-2">
@@ -425,14 +433,22 @@ export const FireZoneEventCard: React.FC<{
         )}
       </div>
 
-      {latestLevelEvent && (
-        <p
-          className="text-xs sm:text-sm font-semibold leading-relaxed"
-          style={{ color: 'var(--tx, #eef1f6)' }}
-        >
-          {latestLevelEvent}
-        </p>
+      {displayEvents.length > 0 && (
+        <div className="space-y-1.5">
+          {displayEvents.map((ev, idx) => (
+            <p
+              key={`${idx}-${ev}`}
+              className="text-xs sm:text-sm font-semibold leading-relaxed"
+              style={{
+                color: idx === 0 ? 'var(--tx, #eef1f6)' : 'var(--mu, #7e8794)',
+              }}
+            >
+              {ev}
+            </p>
+          ))}
+        </div>
       )}
+
 
       {showHistory && retiredHistory.length > 0 && (
         <div

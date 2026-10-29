@@ -2,28 +2,61 @@
 import {
   Candle,
   FireZone,
+  FlipWatch,
   FlippedLevelCandidate,
   LevelImportance,
   LevelKind,
   LevelSourceKind,
   LevelWall,
   Pivot,
+  PivotLevel,
   RetiredZoneHistoryItem,
   TradePlan,
   ZoneSide,
   ZoneStrengthLabel,
   ZoneType,
 } from './types';
-import { findPivots } from './engineCore';
+import { computeAtr, findPivots } from './engineCore';
 import {
   appendRetiredHistory,
   evaluateZoneClosedLifecycle,
   getLiveZoneDisplayState,
 } from './lifecycle';
 
+
 export const ZONE_HALF = 2.0; // Zone = anchor +/- $2 -> exact $4.00 width
 export const ZONE_WIDTH = 4.0;
 export const CLUSTER_RADIUS = 3.0; // Cluster candidates within $3 of each other
+
+export const PIVOT_ORIGIN_WEIGHTS: Record<5 | 20 | 50, number> = {
+  5: 1,
+  20: 3,
+  50: 5,
+};
+
+export interface ZoneOriginCandidate {
+  side: ZoneSide;
+  anchor: number;
+  HI: number;
+  LO: number;
+  pivotIndex: number;
+  pivotTime: number;
+  pivotLevel: PivotLevel;
+  originWeight: number;
+  departureAtr: number;
+  departurePoints: number;
+  retests: number;
+  freshnessPoints: number;
+  score: number;
+}
+
+export interface ClusteredZoneCandidate extends ZoneOriginCandidate {
+  id: string;
+  memberCount: number;
+  prev24Bonus: number;
+  roundBonus: number;
+  label: ZoneStrengthLabel;
+}
 
 export interface LevelCandidate {
   price: number;
@@ -45,120 +78,309 @@ const SOURCE_WEIGHTS: Record<LevelSourceKind, number> = {
   EQL: 3,
   ROUND_100: 4,
   ROUND_50: 2,
-  FLIP: 2, // +2 rank/score bonus for flipped broken level
+  FLIP: 2,
 };
 
 /**
- * Extract Previous Day High/Low (PDH/PDL) and Previous Week High/Low (PWH/PWL).
+ * Compute departure points from max distance price moved away from the pivot
+ * within the next 12 candles, divided by ATR:
+ * >= 3 ATR -> +4, >= 2 -> +3, >= 1.5 -> +2, else 0.
  */
-export function extractCalendarCandidates(
-  h1Candles: Candle[],
-  h4Candles: Candle[],
-  d1Candles: Candle[]
-): LevelCandidate[] {
-  const out: LevelCandidate[] = [];
-
-  if (d1Candles.length >= 2) {
-    const prevD = d1Candles[d1Candles.length - 2];
-    out.push(
-      { price: Number(prevD.high.toFixed(2)), source: 'PDH', label: 'PDH', time: prevD.time },
-      { price: Number(prevD.low.toFixed(2)), source: 'PDL', label: 'PDL', time: prevD.time }
-    );
-  } else if (h1Candles.length > 0) {
-    const dayBuckets = new Map<string, { high: number; low: number; time: number }>();
-    for (const c of h1Candles) {
-      const dStr = new Date(c.time * 1000).toISOString().slice(0, 10);
-      const ex = dayBuckets.get(dStr);
-      if (ex) {
-        ex.high = Math.max(ex.high, c.high);
-        ex.low = Math.min(ex.low, c.low);
-      } else {
-        dayBuckets.set(dStr, { high: c.high, low: c.low, time: c.time });
-      }
-    }
-    const sortedDays = Array.from(dayBuckets.keys()).sort();
-    if (sortedDays.length >= 2) {
-      const prevDay = dayBuckets.get(sortedDays[sortedDays.length - 2])!;
-      out.push(
-        { price: Number(prevDay.high.toFixed(2)), source: 'PDH', label: 'PDH', time: prevDay.time },
-        { price: Number(prevDay.low.toFixed(2)), source: 'PDL', label: 'PDL', time: prevDay.time }
-      );
-    }
-  }
-
-  const weekSource =
-    d1Candles.length >= 10 ? d1Candles : h4Candles.length >= 20 ? h4Candles : h1Candles;
-  if (weekSource.length > 0) {
-    const weekBuckets = new Map<string, { high: number; low: number; time: number }>();
-    for (const c of weekSource) {
-      const d = new Date(c.time * 1000);
-      const year = d.getUTCFullYear();
-      const oneJan = new Date(Date.UTC(year, 0, 1));
-      const dayOfYear = Math.floor((d.getTime() - oneJan.getTime()) / 86400000);
-      const week = Math.ceil((dayOfYear + oneJan.getUTCDay() + 1) / 7);
-      const weekKey = `${year}-W${String(week).padStart(2, '0')}`;
-      const ex = weekBuckets.get(weekKey);
-      if (ex) {
-        ex.high = Math.max(ex.high, c.high);
-        ex.low = Math.min(ex.low, c.low);
-      } else {
-        weekBuckets.set(weekKey, { high: c.high, low: c.low, time: c.time });
-      }
-    }
-    const sortedWeeks = Array.from(weekBuckets.keys()).sort();
-    if (sortedWeeks.length >= 2) {
-      const prevWeek = weekBuckets.get(sortedWeeks[sortedWeeks.length - 2])!;
-      out.push(
-        { price: Number(prevWeek.high.toFixed(2)), source: 'PWH', label: 'PWH', time: prevWeek.time },
-        { price: Number(prevWeek.low.toFixed(2)), source: 'PWL', label: 'PWL', time: prevWeek.time }
-      );
-    }
-  }
-
-  return out;
+export function computeDeparturePoints(departureAtr: number): number {
+  if (departureAtr >= 3.0) return 4;
+  if (departureAtr >= 2.0) return 3;
+  if (departureAtr >= 1.5) return 2;
+  return 0;
 }
 
 /**
- * Find Equal Highs / Equal Lows (two pivots of same type within $2).
+ * Compute freshness points from number of retest excursions:
+ * 0 retests -> +4 (fresh), 1 -> +2, 2 -> 0, 3 or more -> null (discard).
  */
-export function extractEqualHighsLows(pivots: Pivot[]): LevelCandidate[] {
-  const out: LevelCandidate[] = [];
-  const highs = pivots.filter((p) => p.type === 'HIGH');
-  const lows = pivots.filter((p) => p.type === 'LOW');
-
-  const usedHighPairs = new Set<number>();
-  for (let i = 0; i < highs.length; i++) {
-    if (usedHighPairs.has(i)) continue;
-    for (let j = i + 1; j < highs.length; j++) {
-      if (Math.abs(highs[i].price - highs[j].price) <= 2.0) {
-        const avg = Number(((highs[i].price + highs[j].price) / 2).toFixed(2));
-        out.push({ price: avg, source: 'EQH', label: 'EQH', time: highs[j].time });
-        usedHighPairs.add(i);
-        usedHighPairs.add(j);
-        break;
-      }
-    }
-  }
-
-  const usedLowPairs = new Set<number>();
-  for (let i = 0; i < lows.length; i++) {
-    if (usedLowPairs.has(i)) continue;
-    for (let j = i + 1; j < lows.length; j++) {
-      if (Math.abs(lows[i].price - lows[j].price) <= 2.0) {
-        const avg = Number(((lows[i].price + lows[j].price) / 2).toFixed(2));
-        out.push({ price: avg, source: 'EQL', label: 'EQL', time: lows[j].time });
-        usedLowPairs.add(i);
-        usedLowPairs.add(j);
-        break;
-      }
-    }
-  }
-
-  return out;
+export function computeFreshnessPoints(retests: number): number | null {
+  if (retests <= 0) return 4;
+  if (retests === 1) return 2;
+  if (retests === 2) return 0;
+  return null;
 }
 
 /**
- * Cluster level candidates within $3 of each other into one level (price = average, keep list of sources).
+ * Evaluate a single pivot candidate against subsequent closed H1 candles:
+ * - anchor = pivot price, HI = anchor + 2, LO = anchor - 2 (always $4 wide)
+ * - departure = max distance price moved away within next 12 candles / ATR
+ * - DEAD: if any later candle CLOSES beyond the far edge by > 0.25*ATR
+ *   (SELL: close > HI + 0.25*ATR, BUY: close < LO - 0.25*ATR) -> discard (return null).
+ *   Wicks beyond the far edge do NOT discard.
+ * - retests (freshness) = number of separate excursions after the pivot where a candle
+ *   wicked into [LO, HI] without closing beyond the far edge.
+ *   0 -> +4, 1 -> +2, 2 -> 0, >= 3 -> discard (return null).
+ * - score = originWeight + departurePoints + freshnessPoints.
+ */
+export function evaluateOriginCandidate(
+  pivot: Pick<Pivot, 'index' | 'time' | 'type' | 'price' | 'level'>,
+  closedH1Candles: Candle[],
+  atr: number,
+  explicitOriginWeight?: number
+): ZoneOriginCandidate | null {
+  const effectiveAtr = Math.max(0.5, atr);
+  const side: ZoneSide = pivot.type === 'HIGH' ? 'SELL' : 'BUY';
+  const anchor = Number(pivot.price.toFixed(2));
+  const HI = Number((anchor + ZONE_HALF).toFixed(2));
+  const LO = Number((anchor - ZONE_HALF).toFixed(2));
+
+  const originWeight =
+    explicitOriginWeight ??
+    (pivot.level === 50 ? 5 : pivot.level === 20 ? 3 : 1);
+
+  const n = closedH1Candles.length;
+
+  // 1. Departure within next 12 candles
+  let maxMove = 0;
+  const maxDepIdx = Math.min(n - 1, pivot.index + 12);
+  for (let k = pivot.index + 1; k <= maxDepIdx; k++) {
+    const c = closedH1Candles[k];
+    const dist = side === 'SELL' ? anchor - c.low : c.high - anchor;
+    if (dist > maxMove) maxMove = dist;
+  }
+  const departureAtr = maxMove / effectiveAtr;
+  const departurePoints = computeDeparturePoints(departureAtr);
+
+  // 2. DEAD check and Retests (freshness) across all candles after the pivot
+  let hasLeftZone = false;
+  let inExcursion = false;
+  let retests = 0;
+
+  for (let k = pivot.index + 1; k < n; k++) {
+    const c = closedH1Candles[k];
+
+    // DEAD: close beyond far edge by more than 0.25 * ATR
+    if (side === 'SELL') {
+      if (c.close > HI + 0.25 * effectiveAtr) {
+        return null;
+      }
+    } else {
+      if (c.close < LO - 0.25 * effectiveAtr) {
+        return null;
+      }
+    }
+
+    // Check if candle is completely outside [LO, HI] on the trade side
+    const outsideOnTradeSide = side === 'SELL' ? c.high < LO : c.low > HI;
+    if (outsideOnTradeSide) {
+      hasLeftZone = true;
+      inExcursion = false;
+      continue;
+    }
+
+    // Candle wicked into [LO, HI]
+    const wickedIntoZone = side === 'SELL' ? c.high >= LO : c.low <= HI;
+    const closedBeyondFarEdge = side === 'SELL' ? c.close > HI : c.close < LO;
+
+    if (hasLeftZone && wickedIntoZone && !closedBeyondFarEdge) {
+      if (!inExcursion) {
+        retests++;
+        if (retests >= 3) {
+          return null; // 3 or more retests -> discard candidate
+        }
+        inExcursion = true;
+      }
+    }
+  }
+
+  const freshnessPoints = computeFreshnessPoints(retests);
+  if (freshnessPoints === null) return null;
+
+  const score = originWeight + departurePoints + freshnessPoints;
+
+  return {
+    side,
+    anchor,
+    HI,
+    LO,
+    pivotIndex: pivot.index,
+    pivotTime: pivot.time,
+    pivotLevel: pivot.level,
+    originWeight,
+    departureAtr: Number(departureAtr.toFixed(2)),
+    departurePoints,
+    retests,
+    freshnessPoints,
+    score,
+  };
+}
+
+/**
+ * 1) Extract all valid zone origin candidates from the last 150 closed H1 candles
+ * using pivot lengths L=5 (weight 1), L=20 (weight 3), L=50 (weight 5).
+ */
+export function extractZoneOriginCandidates(
+  closedH1Candles: Candle[],
+  atr?: number
+): ZoneOriginCandidate[] {
+  if (!closedH1Candles || closedH1Candles.length === 0) return [];
+  const effectiveAtr = atr && atr > 0 ? atr : computeAtr(closedH1Candles, 14);
+  const minIndex = Math.max(0, closedH1Candles.length - 150);
+
+  const pivotsL5 = findPivots(closedH1Candles, 5);
+  const pivotsL20 = findPivots(closedH1Candles, 20);
+  const pivotsL50 = findPivots(closedH1Candles, 50);
+
+  // Deduplicate exact same (type, index) by keeping the largest pivot length L (highest weight)
+  const pivotByKey = new Map<string, Pivot>();
+  for (const p of [...pivotsL5, ...pivotsL20, ...pivotsL50]) {
+    if (p.index < minIndex) continue;
+    const key = `${p.type}:${p.index}`;
+    const existing = pivotByKey.get(key);
+    if (!existing || p.level > existing.level) {
+      pivotByKey.set(key, p);
+    }
+  }
+
+  const candidates: ZoneOriginCandidate[] = [];
+  for (const p of pivotByKey.values()) {
+    const weight = PIVOT_ORIGIN_WEIGHTS[p.level as 5 | 20 | 50] ?? 1;
+    const evaluated = evaluateOriginCandidate(p, closedH1Candles, effectiveAtr, weight);
+    if (evaluated) {
+      candidates.push(evaluated);
+    }
+  }
+
+  return candidates;
+}
+
+/**
+ * Labels: score >= 11 CRITICAL, >= 8 STRONG, else MODERATE.
+ */
+export function getZoneStrengthLabel(score: number): ZoneStrengthLabel {
+  if (score >= 11) return 'CRITICAL';
+  if (score >= 8) return 'STRONG';
+  return 'MODERATE';
+}
+
+/**
+ * 2) CLUSTER AND BONUS:
+ * - Merge same-side candidates within $3 of each other:
+ *   keep the member with the highest score as the anchor,
+ *   score = best score + (number of members - 1).
+ * - Add bonuses:
+ *   +2 if within $3 of the previous-24-candle high/low,
+ *   +2 if within $3 of a $100 round number (else +1 for a $50 round number).
+ * - Give each level an id like "S4103" / "B4015".
+ * - Labels: score >= 11 CRITICAL, >= 8 STRONG, else MODERATE.
+ */
+export function clusterAndBonusZoneCandidates(
+  candidates: ZoneOriginCandidate[],
+  closedH1Candles: Candle[] = []
+): ClusteredZoneCandidate[] {
+  if (candidates.length === 0) return [];
+
+  const last24 = closedH1Candles.slice(-24);
+  const prev24High =
+    last24.length > 0 ? Math.max(...last24.map((c) => c.high)) : Number.NaN;
+  const prev24Low =
+    last24.length > 0 ? Math.min(...last24.map((c) => c.low)) : Number.NaN;
+
+  const result: ClusteredZoneCandidate[] = [];
+  const usedIds = new Set<string>();
+
+  for (const side of ['SELL', 'BUY'] as ZoneSide[]) {
+    const sideCands = candidates
+      .filter((c) => c.side === side)
+      .sort((a, b) => a.anchor - b.anchor);
+
+    const clusters: ZoneOriginCandidate[][] = [];
+    for (const cand of sideCands) {
+      if (clusters.length === 0) {
+        clusters.push([cand]);
+        continue;
+      }
+      const currentCluster = clusters[clusters.length - 1];
+      const bestSoFar = currentCluster.reduce((best, item) =>
+        item.score > best.score ||
+        (item.score === best.score && item.originWeight > best.originWeight)
+          ? item
+          : best
+      );
+      const lastItem = currentCluster[currentCluster.length - 1];
+
+      if (
+        Math.abs(cand.anchor - bestSoFar.anchor) <= CLUSTER_RADIUS ||
+        Math.abs(cand.anchor - lastItem.anchor) <= CLUSTER_RADIUS
+      ) {
+        currentCluster.push(cand);
+      } else {
+        clusters.push([cand]);
+      }
+    }
+
+    for (const members of clusters) {
+      // Keep the member with the highest score as the anchor
+      const bestMember = members.reduce((best, item) => {
+        if (item.score !== best.score) return item.score > best.score ? item : best;
+        if (item.originWeight !== best.originWeight) {
+          return item.originWeight > best.originWeight ? item : best;
+        }
+        if (item.retests !== best.retests) {
+          return item.retests < best.retests ? item : best;
+        }
+        return item.pivotIndex >= best.pivotIndex ? item : best;
+      });
+
+      const anchor = Number(bestMember.anchor.toFixed(2));
+      const HI = Number((anchor + ZONE_HALF).toFixed(2));
+      const LO = Number((anchor - ZONE_HALF).toFixed(2));
+      const memberCount = members.length;
+
+      const clusterScore = bestMember.score + (memberCount - 1);
+
+      let prev24Bonus = 0;
+      if (
+        (Number.isFinite(prev24High) && Math.abs(anchor - prev24High) <= 3.0) ||
+        (Number.isFinite(prev24Low) && Math.abs(anchor - prev24Low) <= 3.0)
+      ) {
+        prev24Bonus = 2;
+      }
+
+      let roundBonus = 0;
+      const nearest100 = Math.round(anchor / 100) * 100;
+      const nearest50 = Math.round(anchor / 50) * 50;
+      if (Math.abs(anchor - nearest100) <= 3.0) {
+        roundBonus = 2;
+      } else if (Math.abs(anchor - nearest50) <= 3.0) {
+        roundBonus = 1;
+      }
+
+      const finalScore = clusterScore + prev24Bonus + roundBonus;
+      const label = getZoneStrengthLabel(finalScore);
+
+      const baseId = `${side === 'SELL' ? 'S' : 'B'}${Math.round(anchor)}`;
+      let id = baseId;
+      let suffix = 2;
+      while (usedIds.has(id)) {
+        id = `${baseId}-${suffix++}`;
+      }
+      usedIds.add(id);
+
+      result.push({
+        ...bestMember,
+        anchor,
+        HI,
+        LO,
+        id,
+        memberCount,
+        prev24Bonus,
+        roundBonus,
+        score: finalScore,
+        label,
+      });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Legacy helper preserved for backwards-compatible unit tests.
  */
 export function clusterCandidatesWithin3(
   candidates: LevelCandidate[]
@@ -211,31 +433,6 @@ export function clusterCandidatesWithin3(
   });
 }
 
-/**
- * Count candle wick touches within $1.5 of levelPrice that did NOT close beyond it.
- */
-export function countLevelTouches(h1Candles: Candle[], levelPrice: number): number {
-  const sample = h1Candles.slice(-150);
-  let touches = 0;
-
-  for (const c of sample) {
-    const upperTouch =
-      Math.abs(c.high - levelPrice) <= 1.5 && c.close < levelPrice && c.open <= levelPrice;
-    const lowerTouch =
-      Math.abs(c.low - levelPrice) <= 1.5 && c.close > levelPrice && c.open >= levelPrice;
-
-    if (upperTouch || lowerTouch) {
-      touches++;
-    }
-  }
-
-  return touches;
-}
-
-/**
- * Compute importance score from sources and touches:
- * H1 pivot 1 + H4 pivot 3 + D1 pivot 5 + PDH/PDL 4 + PWH/PWL 6 + EQH/EQL 3 + round $100 4 + round $50 2 + FLIP 2 + 1 per touch.
- */
 export function scoreClusteredLevel(sources: LevelSourceKind[], touches: number): number {
   let score = touches;
   const seenSingleton = new Set<LevelSourceKind>();
@@ -265,127 +462,93 @@ export function getStyleBucketByRank(rank: number): LevelImportance {
   return 'MINOR';
 }
 
-export function getZoneStrengthLabel(score: number): ZoneStrengthLabel {
-  if (score >= 12) return 'CRITICAL';
-  if (score >= 8) return 'STRONG';
-  return 'MEDIUM';
-}
-
-function buildClusterDisplayLabel(sources: LevelSourceKind[], price: number): {
-  kind: LevelKind;
-  label: string;
-} {
-  const unique = Array.from(new Set(sources));
-  if (unique.includes('FLIP')) return { kind: 'FLIP', label: 'FLIP' };
-  if (unique.includes('PWH')) return { kind: 'PWH', label: 'PWH' };
-  if (unique.includes('PWL')) return { kind: 'PWL', label: 'PWL' };
-  if (unique.includes('PDH')) return { kind: 'PDH', label: 'PDH' };
-  if (unique.includes('PDL')) return { kind: 'PDL', label: 'PDL' };
-  if (unique.includes('EQH')) return { kind: 'EQH', label: 'EQH' };
-  if (unique.includes('EQL')) return { kind: 'EQL', label: 'EQL' };
-  if (unique.includes('ROUND_100') || unique.includes('ROUND_50')) {
-    const r = Math.round(price / 50) * 50;
-    return { kind: 'ROUND_NUMBER', label: `$${r}` };
-  }
-  if (unique.includes('D1')) return { kind: 'PIVOT', label: 'D1' };
-  if (unique.includes('H4')) return { kind: 'PIVOT', label: 'H4' };
-  return { kind: 'PIVOT', label: 'H1' };
-}
-
 /**
- * Build all candidate levels from H1 (last 150), H4 (last 100), D1 (last 100),
- * PDH/PDL, PWH/PWL, EQH/EQL, and $50/$100 round numbers, cluster within $3,
- * score and rank descending by score.
+ * Build ranked levels from closed H1 candles using the new H1 pivot origin (L=5, 20, 50),
+ * departure + freshness scoring, DEAD filtering, same-side $3 clustering, and bonuses.
  */
 export function buildRankedLevels(
   h1Candles: Candle[],
-  h4Candles: Candle[],
-  d1Candles: Candle[],
-  refPrice: number,
-  extraFlippedCandidates: FlippedLevelCandidate[] = []
+  _h4Candles: Candle[] = [],
+  _d1Candles: Candle[] = [],
+  refPrice = 0,
+  _extraFlippedCandidates: FlippedLevelCandidate[] = [],
+  atrOverride?: number,
+  confirmedFlips: FlipWatch[] = [],
+  brokenIds?: ReadonlySet<string>
 ): LevelWall[] {
-  const candidates: LevelCandidate[] = [];
+  if (!h1Candles || h1Candles.length === 0) return [];
 
-  const h1Offset = Math.max(0, h1Candles.length - 150);
-  const h1Slice = h1Candles.slice(-150);
-  const h4Slice = h4Candles.slice(-100);
-  const d1Slice = d1Candles.slice(-100);
+  const atr = atrOverride && atrOverride > 0 ? atrOverride : computeAtr(h1Candles, 14);
+  const rawCandidates = extractZoneOriginCandidates(h1Candles, atr);
+  const clustered = clusterAndBonusZoneCandidates(rawCandidates, h1Candles);
 
-  const pivotsH1 = findPivots(h1Slice, 5);
-  const pivotsH4 = findPivots(h4Slice, 5);
-  const pivotsD1 = findPivots(d1Slice, 5);
+  const scored: LevelWall[] = clustered
+    .filter((cl) => !brokenIds?.has(cl.id))
+    .map((cl) => {
+      const distance = refPrice > 0 ? Number(Math.abs(cl.anchor - refPrice).toFixed(2)) : 0;
+      const sources: LevelSourceKind[] = [
+        cl.pivotLevel === 50 ? 'D1' : cl.pivotLevel === 20 ? 'H4' : 'H1',
+      ];
+      if (cl.prev24Bonus > 0) {
+        sources.push(cl.side === 'SELL' ? 'PDH' : 'PDL');
+      }
+      if (cl.roundBonus === 2) {
+        sources.push('ROUND_100');
+      } else if (cl.roundBonus === 1) {
+        sources.push('ROUND_50');
+      }
 
-  for (const p of pivotsH1) {
-    candidates.push({
-      price: Number(p.price.toFixed(2)),
-      source: 'H1',
-      label: 'H1',
-      time: p.time,
-      h1BarIndex: h1Offset + p.index,
+      const kind: LevelKind =
+        cl.prev24Bonus > 0
+          ? cl.side === 'SELL'
+            ? 'PDH'
+            : 'PDL'
+          : cl.roundBonus > 0
+          ? 'ROUND_NUMBER'
+          : 'PIVOT';
+
+      return {
+        id: cl.id,
+        price: cl.anchor,
+        kind,
+        label: `L${cl.pivotLevel}`,
+        sources,
+        touches: cl.retests,
+        score: cl.score,
+        rank: 0,
+        importance: 'MINOR',
+        distance,
+        anchorBarIndex: cl.pivotIndex,
+        anchorTime: cl.pivotTime,
+        allowedSide: cl.side,
+      };
     });
-  }
-  for (const p of pivotsH4) {
-    candidates.push({ price: Number(p.price.toFixed(2)), source: 'H4', label: 'H4', time: p.time });
-  }
-  for (const p of pivotsD1) {
-    candidates.push({ price: Number(p.price.toFixed(2)), source: 'D1', label: 'D1', time: p.time });
-  }
 
-  candidates.push(...extractCalendarCandidates(h1Candles, h4Candles, d1Candles));
+  // Include CONFIRMED flips as normal candidates with id: "F<price>" and their old score
+  for (const fw of confirmedFlips) {
+    if (!fw.confirmed) continue;
+    const flipId = fw.id || `F${Math.round(fw.anchor)}`;
+    if (brokenIds?.has(flipId)) continue;
+    if (scored.some((s) => s.id === flipId)) continue;
 
-  candidates.push(
-    ...extractEqualHighsLows(pivotsH1),
-    ...extractEqualHighsLows(pivotsH4),
-    ...extractEqualHighsLows(pivotsD1)
-  );
-
-  if (refPrice > 0) {
-    const minRound = Math.max(50, Math.floor((refPrice - 300) / 50) * 50);
-    const maxRound = Math.ceil((refPrice + 300) / 50) * 50;
-    for (let rp = minRound; rp <= maxRound; rp += 50) {
-      const is100 = rp % 100 === 0;
-      candidates.push({
-        price: rp,
-        source: is100 ? 'ROUND_100' : 'ROUND_50',
-        label: `$${rp}`,
-      });
-    }
-  }
-
-  for (const fl of extraFlippedCandidates) {
-    candidates.push({
-      price: Number(fl.anchor.toFixed(2)),
-      source: 'FLIP',
+    const anchor = Number(fw.anchor.toFixed(2));
+    const distance = refPrice > 0 ? Number(Math.abs(anchor - refPrice).toFixed(2)) : 0;
+    scored.push({
+      id: flipId,
+      price: anchor,
+      kind: 'FLIP',
       label: 'FLIP',
-      time: fl.brokenCandleTime,
-      h1BarIndex: fl.brokenBarIndex,
-    });
-  }
-
-  const clustered = clusterCandidatesWithin3(candidates);
-  const defaultAnchorBar = Math.max(0, h1Candles.length - 45);
-
-  const scored: LevelWall[] = clustered.map((cl) => {
-    const touches = countLevelTouches(h1Candles, cl.price);
-    const score = scoreClusteredLevel(cl.sources, touches);
-    const { kind, label } = buildClusterDisplayLabel(cl.sources, cl.price);
-    const distance = refPrice > 0 ? Number(Math.abs(cl.price - refPrice).toFixed(2)) : 0;
-
-    return {
-      id: `lvl-${cl.price.toFixed(2)}`,
-      price: cl.price,
-      kind,
-      label,
-      sources: cl.sources,
-      touches,
-      score,
+      sources: ['H1', 'FLIP'],
+      touches: 1,
+      score: fw.score,
       rank: 0,
       importance: 'MINOR',
       distance,
-      anchorBarIndex: cl.h1BarIndex ?? defaultAnchorBar,
-      anchorTime: cl.latestTime || (h1Candles[defaultAnchorBar]?.time ?? 0),
-    };
-  });
+      anchorBarIndex: fw.brokenBarIndex,
+      anchorTime: fw.brokenAtTime,
+      allowedSide: fw.side,
+    });
+  }
 
   scored.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
@@ -403,11 +566,18 @@ export function buildRankedLevels(
 }
 
 /**
- * Select 2 to 3 zones per side from ranked levels while enforcing the Zone Lifecycle:
- * - Evaluates each candidate level against CLOSED H1 candles (FRESH, PLAYED_HELD, BROKEN, EXPIRED).
- * - PLAYED_HELD, BROKEN, and EXPIRED zones are RETIRED: removed from chart/ladder, recorded in history,
- *   and the engine selects the next best level for that slot (NEAREST/SWING/DEEP) on the same closed candle.
- * - A BROKEN level flips: BUY -> SELL candidate (+2 score bonus) or SELL -> BUY candidate (+2 score bonus).
+ * 3) SELECTION (exactly up to 4 zones: 2 SELL + 2 BUY)
+ * - Valid at the live price:
+ *   a SELL zone is valid while price <= HI (price below or inside it);
+ *   a BUY zone is valid while price >= LO.
+ * - Per side:
+ *   - NEAR = the closest valid zone with score >= 6 within 8*ATR of price;
+ *     if none, the closest valid zone.
+ *   - DEEP = among valid zones farther than NEAR by at least $12 and within 25*ATR,
+ *     the highest score (tie -> farther). Skip if none.
+ *   - If a side has no valid zone at all, use the 150-candle extreme
+ *     (lowest low + 2 for BUY, highest high - 2 for SELL) with score 3.
+ * - Never show a SELL zone that sits below price or a BUY zone above price.
  */
 export function selectZonesFromLevels(
   allRankedLevels: LevelWall[],
@@ -418,7 +588,9 @@ export function selectZonesFromLevels(
   zoneStore?: Map<string, FireZone>,
   closedH1Candles: Candle[] = [],
   existingHistory: RetiredZoneHistoryItem[] = [],
-  livePrice?: number
+  livePrice?: number,
+  brokenIds?: ReadonlySet<string>,
+  confirmedFlips: FlipWatch[] = []
 ): {
   buyZones: FireZone[];
   sellZones: FireZone[];
@@ -426,15 +598,19 @@ export function selectZonesFromLevels(
   flippedCandidates: FlippedLevelCandidate[];
 } {
   const effectiveAtr = Math.max(1.5, atr);
-  const maxNearestDist = 8 * effectiveAtr;
-  const maxDeepDist = 20 * effectiveAtr;
+  const maxNearDist = 8 * effectiveAtr;
+  const maxDeepDist = 25 * effectiveAtr;
 
   let history = [...existingHistory];
   const flippedCandidates: FlippedLevelCandidate[] = [];
   const activePool: LevelWall[] = [];
 
-  // 1. Evaluate lifecycle of candidate levels on closed H1 candles
-  if (closedH1Candles.length > 0) {
+  // Only run legacy closed-candle lifecycle evaluation when legacy 'lvl-*' test levels are passed directly
+  const isLegacyLevelPool =
+    closedH1Candles.length > 0 &&
+    allRankedLevels.some((l) => l.id.startsWith('lvl-'));
+
+  if (isLegacyLevelPool) {
     for (const lvl of allRankedLevels) {
       const naturalSide: ZoneSide =
         lvl.allowedSide ?? (lvl.price < refPrice ? 'BUY' : 'SELL');
@@ -471,7 +647,6 @@ export function selectZonesFromLevels(
           moveAfter: outcome.moveAfter,
         });
 
-        // Flip rule: a BROKEN zone becomes a candidate on the opposite side with rank bonus +2
         if (outcome.state === 'BROKEN' && outcome.flippedCandidate) {
           flippedCandidates.push(outcome.flippedCandidate);
           const flippedSide = outcome.flippedCandidate.toSide;
@@ -500,22 +675,57 @@ export function selectZonesFromLevels(
     activePool.push(...allRankedLevels);
   }
 
-  const displayPrice = typeof livePrice === 'number' && livePrice > 0 ? livePrice : refPrice;
+  // Add any CONFIRMED FlipWatch candidates (unconfirmed flips are NEVER shown)
+  for (const fw of confirmedFlips) {
+    if (!fw.confirmed) continue;
+    const flipId = fw.id || `F${Math.round(fw.anchor)}`;
+    if (brokenIds?.has(flipId)) continue;
+    if (activePool.some((lvl) => lvl.id === flipId)) continue;
+    const anchor = Number(fw.anchor.toFixed(2));
+    activePool.push({
+      id: flipId,
+      price: anchor,
+      kind: 'FLIP',
+      label: 'FLIP',
+      sources: ['H1', 'FLIP'],
+      touches: 1,
+      score: fw.score,
+      rank: activePool.length + 1,
+      importance: 'MAJOR',
+      distance: Number(Math.abs(anchor - refPrice).toFixed(2)),
+      anchorBarIndex: fw.brokenBarIndex ?? latestIndex,
+      anchorTime: fw.brokenAtTime ?? latestTime,
+      allowedSide: fw.side,
+    });
+  }
+
+  const price = typeof livePrice === 'number' && livePrice > 0 ? livePrice : refPrice;
+
+  const resolveZoneId = (lvl: LevelWall, side: ZoneSide): string => {
+    const defaultId = `${side === 'SELL' ? 'S' : 'B'}${Math.round(lvl.price)}`;
+    return lvl.id.startsWith('S') || lvl.id.startsWith('B') || lvl.id.startsWith('F')
+      ? lvl.id
+      : defaultId;
+  };
 
   const toFireZone = (lvl: LevelWall, side: ZoneSide, zType: ZoneType): FireZone => {
-    const zoneId = `FZ-${side}-${lvl.price.toFixed(2)}`;
+    const zoneId = resolveZoneId(lvl, side);
     const existing = zoneStore?.get(zoneId);
     const anchor = existing ? existing.anchor : Number(lvl.price.toFixed(2));
     const top = existing ? existing.top : Number((anchor + ZONE_HALF).toFixed(2));
     const bottom = existing ? existing.bottom : Number((anchor - ZONE_HALF).toFixed(2));
 
     let distance = 0;
-    if (refPrice > top) distance = Number((refPrice - top).toFixed(2));
-    else if (refPrice < bottom) distance = Number((bottom - refPrice).toFixed(2));
+    if (price > top) distance = Number((price - top).toFixed(2));
+    else if (price < bottom) distance = Number((bottom - price).toFixed(2));
 
     const label = getZoneStrengthLabel(lvl.score);
-    const isHtf = lvl.sources.includes('D1') || lvl.sources.includes('H4');
-    const lifecycleState = getLiveZoneDisplayState({ bottom, top }, displayPrice);
+    const pivotLevel: PivotLevel = lvl.sources.includes('D1')
+      ? 50
+      : lvl.sources.includes('H4')
+      ? 20
+      : 5;
+    const lifecycleState = getLiveZoneDisplayState({ bottom, top }, price);
 
     const zone: FireZone = {
       id: zoneId,
@@ -528,11 +738,11 @@ export function selectZonesFromLevels(
       pivotIndex: lvl.anchorBarIndex ?? latestIndex,
       pivotTime: lvl.anchorTime ?? latestTime,
       pivotPrice: anchor,
-      pivotLevel: isHtf ? 15 : 5,
+      pivotLevel,
       isLive: true,
       isDead: false,
       lifecycleState,
-      isFlipped: lvl.sources.includes('FLIP'),
+      isFlipped: lvl.sources.includes('FLIP') || zoneId.startsWith('F'),
       touches: lvl.touches,
       score: lvl.score,
       label,
@@ -548,61 +758,108 @@ export function selectZonesFromLevels(
 
   const buildSideZones = (side: ZoneSide): FireZone[] => {
     const isBuy = side === 'BUY';
-    const sideLevels = activePool.filter((lvl) => {
-      if (lvl.allowedSide && lvl.allowedSide !== side) return false;
-      return isBuy ? lvl.price < refPrice : lvl.price > refPrice;
+
+    // Valid at live price:
+    // - Exclude any zone in brokenIds
+    // - SELL zone is valid while price <= HI (HI = anchor + 2)
+    // - BUY zone is valid while price >= LO (LO = anchor - 2)
+    // Never show a SELL zone that sits below price (HI < price) or a BUY zone above price (LO > price).
+    const validLevels = activePool.filter((lvl) => {
+      const lvlSide = lvl.allowedSide ?? (lvl.price <= price ? 'BUY' : 'SELL');
+      if (lvlSide !== side) return false;
+      const zId = resolveZoneId(lvl, side);
+      if (brokenIds && (brokenIds.has(lvl.id) || brokenIds.has(zId))) {
+        return false;
+      }
+      const hi = Number((lvl.price + ZONE_HALF).toFixed(2));
+      const lo = Number((lvl.price - ZONE_HALF).toFixed(2));
+      return isBuy
+        ? lvl.price < price && price >= lo
+        : lvl.price > price && price <= hi;
     });
 
-    const sortByScoreThenClosest = (a: LevelWall, b: LevelWall) => {
-      if (b.score !== a.score) return b.score - a.score;
-      const distA = Math.abs(a.price - refPrice);
-      const distB = Math.abs(b.price - refPrice);
-      return distA - distB;
+
+    // If a side has no valid zone at all, use the 150-candle extreme
+    // (lowest low + 2 for BUY, highest high - 2 for SELL) with score 3.
+    if (validLevels.length === 0) {
+      const sample150 = closedH1Candles.slice(-150);
+      let extremeAnchor: number;
+      if (isBuy) {
+        const rawLowest =
+          sample150.length > 0
+            ? Math.min(...sample150.map((c) => c.low))
+            : price - 12;
+        const clampedLow = Math.min(rawLowest, price - 4.0);
+        extremeAnchor = Number((clampedLow + 2.0).toFixed(2));
+      } else {
+        const rawHighest =
+          sample150.length > 0
+            ? Math.max(...sample150.map((c) => c.high))
+            : price + 12;
+        const clampedHigh = Math.max(rawHighest, price + 4.0);
+        extremeAnchor = Number((clampedHigh - 2.0).toFixed(2));
+      }
+
+      const fallbackId = `${isBuy ? 'B' : 'S'}${Math.round(extremeAnchor)}`;
+      const fallbackLevel: LevelWall = {
+        id: fallbackId,
+        price: extremeAnchor,
+        kind: 'PIVOT',
+        label: 'EXT150',
+        sources: ['H1'],
+        touches: 0,
+        score: 3,
+        rank: 99,
+        importance: 'MINOR',
+        distance: Number(Math.abs(extremeAnchor - price).toFixed(2)),
+        anchorBarIndex: Math.max(0, latestIndex - 20),
+        anchorTime: latestTime,
+        allowedSide: side,
+      };
+      return [toFireZone(fallbackLevel, side, 'NEAREST')];
+    }
+
+    const distFromPrice = (lvl: LevelWall) => Math.abs(lvl.price - price);
+
+    const sortByClosestThenScore = (a: LevelWall, b: LevelWall) => {
+      const dDiff = distFromPrice(a) - distFromPrice(b);
+      if (Math.abs(dDiff) > 1e-6) return dDiff;
+      return b.score - a.score;
     };
 
-    const chosenLevels: Array<{ level: LevelWall; type: ZoneType }> = [];
+    // NEAR = the closest valid zone with score >= 6 within 8*ATR of price; if none, the closest valid zone.
+    const nearQualified = validLevels
+      .filter((lvl) => lvl.score >= 6 && distFromPrice(lvl) <= maxNearDist)
+      .sort(sortByClosestThenScore);
 
-    // 1. NEAREST: highest scoring FRESH level within 8*ATR of price on that side, tie -> closest
-    const nearestCandidates = sideLevels
-      .filter((lvl) => Math.abs(lvl.price - refPrice) <= maxNearestDist)
-      .sort(sortByScoreThenClosest);
+    const nearLvl =
+      nearQualified.length > 0
+        ? nearQualified[0]
+        : [...validLevels].sort(sortByClosestThenScore)[0];
 
-    const nearestLvl =
-      nearestCandidates[0] ||
-      [...sideLevels].sort((a, b) => Math.abs(a.price - refPrice) - Math.abs(b.price - refPrice))[0];
+    const chosen: FireZone[] = [toFireZone(nearLvl, side, 'NEAREST')];
 
-    if (nearestLvl) {
-      chosenLevels.push({ level: nearestLvl, type: 'NEAREST' });
-    }
-
-    // 2. SWING: highest scoring D1/H4-sourced level on that side at least $12 away from NEAREST
-    const swingCandidates = sideLevels
+    // DEEP = among valid zones farther than NEAR by at least $12 and within 25*ATR,
+    // the highest score (tie -> farther). Skip if none.
+    const deepCandidates = validLevels
       .filter((lvl) => {
-        const hasD1OrH4 = lvl.sources.includes('D1') || lvl.sources.includes('H4');
-        if (!hasD1OrH4) return false;
-        if (nearestLvl && Math.abs(lvl.price - nearestLvl.price) < 12.0) return false;
-        return Math.abs(lvl.price - refPrice) <= 25 * effectiveAtr;
+        if (lvl.id === nearLvl.id) return false;
+        const fartherDelta = isBuy
+          ? nearLvl.price - lvl.price
+          : lvl.price - nearLvl.price;
+        if (fartherDelta < 12.0 - 1e-6) return false;
+        return distFromPrice(lvl) <= maxDeepDist;
       })
-      .sort(sortByScoreThenClosest);
-
-    if (swingCandidates.length > 0) {
-      chosenLevels.push({ level: swingCandidates[0], type: 'SWING' });
-    }
-
-    // 3. DEEP: highest scoring level on that side between 8*ATR and 20*ATR, at least $12 from the others
-    const deepCandidates = sideLevels
-      .filter((lvl) => {
-        const dist = Math.abs(lvl.price - refPrice);
-        if (dist <= maxNearestDist || dist > maxDeepDist) return false;
-        return chosenLevels.every((c) => Math.abs(lvl.price - c.level.price) >= 12.0);
-      })
-      .sort(sortByScoreThenClosest);
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return distFromPrice(b) - distFromPrice(a); // tie -> farther
+      });
 
     if (deepCandidates.length > 0) {
-      chosenLevels.push({ level: deepCandidates[0], type: 'DEEP' });
+      chosen.push(toFireZone(deepCandidates[0], side, 'DEEP'));
     }
 
-    return chosenLevels.map((c) => toFireZone(c.level, side, c.type));
+    return chosen;
   };
 
   const buyZones = buildSideZones('BUY');
@@ -619,7 +876,6 @@ export function selectZonesFromLevels(
     sellNearest.isStar = true;
   }
 
-  // Attach nextZoneAnchor to retired history items for the LEVEL EVENTS sentence
   history = history.map((h) => {
     if (h.nextZoneAnchor !== undefined) return h;
     const replacement =
@@ -659,6 +915,28 @@ export function filterAndRankKeptLevels(
     return refPrice <= 0 || Math.abs(lvl.price - refPrice) <= maxDist;
   });
 
+  // Ensure fallback zones (e.g. 150-candle extreme) are included in kept levels
+  for (const z of zones) {
+    const p = Number(z.anchor.toFixed(2));
+    if (!kept.some((lvl) => Math.abs(lvl.price - p) < 0.01)) {
+      kept.push({
+        id: z.id,
+        price: p,
+        kind: 'PIVOT',
+        label: `L${z.pivotLevel}`,
+        sources: z.sources || ['H1'],
+        touches: z.touches,
+        score: z.score,
+        rank: 0,
+        importance: 'MINOR',
+        distance: z.distance,
+        anchorBarIndex: z.pivotIndex,
+        anchorTime: z.pivotTime,
+        allowedSide: z.side,
+      });
+    }
+  }
+
   kept.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     if (a.distance !== b.distance) return a.distance - b.distance;
@@ -675,6 +953,14 @@ export function filterAndRankKeptLevels(
   });
 }
 
+/**
+ * 4) TRADE PLAN:
+ * - Entry price = HI for BUY, LO for SELL.
+ * - SL = zone outer edge -/+ max($12, 1.2*ATR14).
+ * - TP1/2/3 = the first three distinct levels beyond entry in the trade direction
+ *   with distance >= $9 / $13 / $18 (fallback entry +/- $9/$13/$18).
+ * - R:R(TP1) = |TP1 - anchor| / |anchor - SL|.
+ */
 export function build007TradePlan(
   zone: FireZone,
   allLevels: LevelWall[],
@@ -685,6 +971,7 @@ export function build007TradePlan(
   const isBuy = zone.side === 'BUY';
   const lo = Number(zone.bottom.toFixed(2));
   const hi = Number(zone.top.toFixed(2));
+  const anchor = Number(zone.anchor.toFixed(2));
   const entryRange: [number, number] = [lo, hi];
   const entryPrice = isBuy ? hi : lo;
 
@@ -731,8 +1018,9 @@ export function build007TradePlan(
     : Number(Math.min(entryPrice - 18.0, tp2 - 5.0).toFixed(2));
   const tp3 = pickTpLevel(18.0, tp2) ?? fallbackTp3;
 
-  const risk = Number(Math.max(0.1, Math.abs(entryPrice - sl)).toFixed(2));
-  const rrTp1 = Number((Math.abs(tp1 - entryPrice) / risk).toFixed(2));
+  // R:R(TP1) = |TP1 - anchor| / |anchor - SL|
+  const risk = Number(Math.max(0.1, Math.abs(anchor - sl)).toFixed(2));
+  const rrTp1 = Number((Math.abs(tp1 - anchor) / Math.max(0.01, Math.abs(anchor - sl))).toFixed(2));
 
   let distance = 0;
   if (currentPrice > hi) distance = Number((currentPrice - hi).toFixed(2));
@@ -745,7 +1033,7 @@ export function build007TradePlan(
     isActive,
     entryRange,
     entryPrice,
-    anchor: zone.anchor,
+    anchor,
     zoneLabel: zone.label,
     zoneScore: zone.score,
     sl,
@@ -758,3 +1046,4 @@ export function build007TradePlan(
     isStar: zone.isStar,
   };
 }
+

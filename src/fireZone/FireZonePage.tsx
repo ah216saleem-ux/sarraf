@@ -33,6 +33,8 @@ export const FireZonePage: React.FC = () => {
     candles,
     dataReloadSeq,
     currentPrice,
+    setSimulatedPrice,
+    resetLifecycleDev,
     isMarketOpen,
     connectionStatus,
     isLoading,
@@ -43,6 +45,25 @@ export const FireZonePage: React.FC = () => {
 
   const [subTab, setSubTab] = useState<FireZoneSubTab>('DESK');
   const [utcTime, setUtcTime] = useState<string>(() => formatUtcSnapshot(new Date()));
+  const [isDevMode, setIsDevMode] = useState<boolean>(() => {
+    try {
+      return typeof window !== 'undefined' && window.localStorage?.getItem('fireZoneDev') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    const checkDev = () => {
+      try {
+        setIsDevMode(window.localStorage?.getItem('fireZoneDev') === '1');
+      } catch {
+        setIsDevMode(false);
+      }
+    };
+    window.addEventListener('storage', checkDev);
+    return () => window.removeEventListener('storage', checkDev);
+  }, []);
 
   const chartModel = useMemo(() => buildChartModel(engineResult), [engineResult]);
 
@@ -309,11 +330,75 @@ export const FireZonePage: React.FC = () => {
               sellZones={engineResult.sellZones}
             />
 
-            {/* LEVEL EVENTS card (latest event sentence + collapsible history of last 10 retired zones) */}
+            {/* LEVEL EVENTS card (last 4 event sentences + collapsible history of last 10 retired zones) */}
             <FireZoneEventCard
               latestLevelEvent={engineResult.latestLevelEvent}
+              levelEvents={engineResult.levelEvents}
               retiredHistory={engineResult.retiredHistory}
             />
+
+            {/* DEV TEST BUTTONS (strictly hidden unless localStorage.fireZoneDev === "1") */}
+            {isDevMode && (
+              <div
+                className="mt-[11px] p-3 rounded-[14px] flex flex-wrap items-center gap-2"
+                style={{
+                  backgroundColor: 'var(--card)',
+                  border: '1px dashed var(--gold)',
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nearSell = engineResult.sellZones.find((z) => z.type === 'NEAREST') || engineResult.sellZones[0];
+                    if (nearSell) {
+                      const sim = Number((nearSell.top + 0.6 * engineResult.atr + 1).toFixed(2));
+                      setSimulatedPrice(sim);
+                    }
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer"
+                  style={{
+                    ...monoStyle,
+                    backgroundColor: 'rgba(255, 77, 102, 0.14)',
+                    border: '1px solid var(--dn)',
+                    color: 'var(--dn)',
+                  }}
+                >
+                  TEST: BREAK SELL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nearBuy = engineResult.buyZones.find((z) => z.type === 'NEAREST') || engineResult.buyZones[0];
+                    if (nearBuy) {
+                      const sim = Number((nearBuy.bottom - 0.6 * engineResult.atr - 1).toFixed(2));
+                      setSimulatedPrice(sim);
+                    }
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer"
+                  style={{
+                    ...monoStyle,
+                    backgroundColor: 'rgba(47, 224, 138, 0.14)',
+                    border: '1px solid var(--up)',
+                    color: 'var(--up)',
+                  }}
+                >
+                  TEST: BREAK BUY
+                </button>
+                <button
+                  type="button"
+                  onClick={() => resetLifecycleDev()}
+                  className="px-2.5 py-1.5 rounded-lg text-[11px] font-bold cursor-pointer"
+                  style={{
+                    ...monoStyle,
+                    backgroundColor: 'rgba(242, 185, 75, 0.14)',
+                    border: '1px solid var(--gold)',
+                    color: 'var(--gold)',
+                  }}
+                >
+                  RESET
+                </button>
+              </div>
+            )}
 
             {/* BACKTEST card */}
             <FireZoneBacktestCard backtest={backtestResult} />

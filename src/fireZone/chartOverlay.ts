@@ -37,112 +37,91 @@ function resolveModel(
 }
 
 /**
- * Compute out-of-range zone badges when a zone in chartModel.zones is above or below the visible price range.
- * Format: "SELL zone 4193.15 (+$105)" or "BUY zone 3950.20 (-$106)"
+ * Legacy helper kept for API compatibility (edge badges removed from 007 chart UI).
  */
 export function computeOutOfRangeZoneBadges(
-  series: ISeriesApi<'Candlestick'>,
-  modelOrEngine: FireZoneChartModel | FireZoneEngineResult,
-  plotHeight: number
+  _series: ISeriesApi<'Candlestick'>,
+  _modelOrEngine: FireZoneChartModel | FireZoneEngineResult,
+  _plotHeight: number
 ): EdgeZoneBadge[] {
-  const model = resolveModel(modelOrEngine);
-  const badges: EdgeZoneBadge[] = [];
-
-  for (const z of model.zones) {
-    const yHi = series.priceToCoordinate(z.HI);
-    const yLo = series.priceToCoordinate(z.LO);
-    if (yHi === null || yLo === null) continue;
-
-    const minY = Math.min(yHi, yLo);
-    const maxY = Math.max(yHi, yLo);
-    const diff = z.anchor - model.currentPrice;
-    const signStr = diff >= 0 ? `+$${Math.round(diff)}` : `-$${Math.round(Math.abs(diff))}`;
-    const text = `${z.side} ${z.type} ${z.anchor.toFixed(2)} (${signStr})`;
-
-    if (maxY < 0) {
-      badges.push({ id: z.id, position: 'TOP', side: z.side, text });
-    } else if (minY > plotHeight) {
-      badges.push({ id: z.id, position: 'BOTTOM', side: z.side, text });
-    }
-  }
-
-  return badges;
+  return [];
 }
 
-function drawPriceScaleTag(
+function drawLivePriceScaleTag(
   ctx: CanvasRenderingContext2D,
   text: string,
   y: number,
   plotWidth: number,
   totalWidth: number,
-  plotHeight: number,
-  borderColor: string,
-  textColor: string,
-  bgColor = 'rgba(8, 8, 11, 0.92)'
+  plotHeight: number
 ) {
-  if (y < 7 || y > plotHeight - 7) return;
-  const tagW = Math.max(46, totalWidth - plotWidth - 4);
-  const tagH = 14;
+  if (y < 6 || y > plotHeight - 6) return;
+  const tagW = Math.max(48, totalWidth - plotWidth - 4);
+  const tagH = 16;
   const tagX = totalWidth - tagW - 2;
   const tagY = Math.max(1, Math.min(plotHeight - tagH - 1, Math.round(y - tagH / 2)));
 
   ctx.save();
   ctx.setLineDash([]);
-  ctx.fillStyle = bgColor;
-  ctx.strokeStyle = borderColor;
+  ctx.fillStyle = '#f2b94b';
+  ctx.strokeStyle = '#f2b94b';
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.rect(tagX, tagY, tagW, tagH);
   ctx.fill();
   ctx.stroke();
 
-  ctx.font = `bold 9px 'JetBrains Mono', monospace`;
-  ctx.fillStyle = textColor;
+  ctx.font = `bold 9.5px 'JetBrains Mono', monospace`;
+  ctx.fillStyle = '#07090d';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
   ctx.fillText(text, totalWidth - 5, tagY + tagH / 2);
   ctx.restore();
 }
 
-function resolveZoneAnchorX(
+function resolveTimeCoordinate(
   chart: IChartApi,
-  z: ChartModelZone,
-  candles: Candle[],
-  plotWidth: number
-): number {
-  if (!candles || candles.length === 0) return 0;
-
-  // If H1 pivot time is before the first loaded candle of the active timeframe, start at left edge (0)
-  if (z.pivotTime < candles[0].time) {
-    return 0;
-  }
-
+  targetTime: number,
+  candles: Candle[]
+): number | null {
   const ts = chart.timeScale();
-  const xCoord = ts.timeToCoordinate(z.pivotTime as UTCTimestamp);
+  const direct = ts.timeToCoordinate(targetTime as UTCTimestamp);
+  if (direct !== null) return direct;
+  if (!candles || candles.length === 0) return null;
 
-  // If H1 pivot time is before the first visible candle (xCoord <= 0) or not on the time scale (xCoord === null), start at left edge (0)
-  if (xCoord === null || xCoord <= 0) {
-    return 0;
+  // Fallback for 4H/1D timeframes where H1 timestamp falls inside a larger bar
+  let bestBarTime = candles[0].time;
+  let minDiff = Math.abs(candles[0].time - targetTime);
+  for (let i = 1; i < candles.length; i++) {
+    const d = Math.abs(candles[i].time - targetTime);
+    if (d < minDiff) {
+      minDiff = d;
+      bestBarTime = candles[i].time;
+    }
   }
-
-  // Ensure the zone spans across a clear horizontal width to the right edge
-  return Math.max(0, Math.min(xCoord, Math.floor(plotWidth * 0.38)));
+  return ts.timeToCoordinate(bestBarTime as UTCTimestamp);
 }
 
+/**
+ * 5) STRUCTURE (BOS / CHoCH):
+ * Keep the pivot-to-break horizontal line and centered label,
+ * only SWING structure by default (internal toggle OFF), max last 4 breaks,
+ * 60% opacity, 9px labels, so they never hide the zones.
+ */
 function drawStructureBreakSegment(
   ctx: CanvasRenderingContext2D,
   chart: IChartApi,
   series: ISeriesApi<'Candlestick'>,
   brk: StructureBreakLine,
   plotWidth: number,
-  plotHeight: number
+  plotHeight: number,
+  candles: Candle[]
 ) {
   const y = series.priceToCoordinate(brk.pivotPrice);
   if (y === null || y < 10 || y > plotHeight - 10) return;
 
-  const ts = chart.timeScale();
-  const x1Raw = ts.timeToCoordinate(brk.pivotTime as UTCTimestamp);
-  const x2Raw = ts.timeToCoordinate(brk.breakTime as UTCTimestamp);
+  const x1Raw = resolveTimeCoordinate(chart, brk.pivotTime, candles);
+  const x2Raw = resolveTimeCoordinate(chart, brk.breakTime, candles);
   if (x1Raw === null || x2Raw === null) return;
 
   if (x2Raw < 0 || x1Raw > plotWidth) return;
@@ -151,62 +130,47 @@ function drawStructureBreakSegment(
   const x2 = Math.min(plotWidth, x2Raw);
   if (x2 - x1 < 4) return;
 
-  const isSwing = brk.layer === 'SWING';
   const isBull = brk.direction === 1;
-  const isChoch = brk.label === 'CHoCH' || brk.label === 'CHoCH+';
-
-  const color = isBull
-    ? isChoch
-      ? '#22ad78'
-      : '#2ee6a0'
-    : isChoch
-    ? '#bf4651'
-    : '#ff5d6c';
+  const color = isBull ? '#2fe08a' : '#ff4d66';
 
   ctx.save();
-  ctx.globalAlpha = isSwing ? 1.0 : 0.7;
+  ctx.globalAlpha = 0.6;
   ctx.strokeStyle = color;
-  ctx.lineWidth = isSwing ? 1.5 : 1.0;
-  ctx.setLineDash(isSwing ? [] : [4, 3]);
+  ctx.lineWidth = 1.0;
+  ctx.setLineDash([]);
 
   ctx.beginPath();
   ctx.moveTo(x1, y);
   ctx.lineTo(x2, y);
   ctx.stroke();
 
-  const midRaw = ts.timeToCoordinate(brk.midTime as UTCTimestamp);
+  const midRaw = resolveTimeCoordinate(chart, brk.midTime, candles);
   const midX =
     midRaw !== null && midRaw >= x1 && midRaw <= x2 ? midRaw : (x1 + x2) / 2;
 
-  const fontSize = isSwing ? 11 : 9;
-  ctx.font = `bold ${fontSize}px 'JetBrains Mono', monospace`;
+  ctx.font = `bold 9px 'JetBrains Mono', monospace`;
   ctx.fillStyle = color;
   ctx.textAlign = 'center';
   ctx.textBaseline = isBull ? 'bottom' : 'top';
+  ctx.shadowColor = '#08080b';
+  ctx.shadowBlur = 3;
 
-  const labelY = isBull ? y - 3 : y + 3;
+  const labelY = isBull ? y - 2 : y + 2;
   ctx.fillText(brk.label, midX, labelY);
-
-  if (isChoch) {
-    const metrics = ctx.measureText(brk.label);
-    const halfW = metrics.width / 2;
-    const underlineY = isBull ? y - 1.5 : y + fontSize + 4;
-    ctx.setLineDash([]);
-    ctx.strokeStyle = '#e0b95c';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(midX - halfW, underlineY);
-    ctx.lineTo(midX + halfW, underlineY);
-    ctx.stroke();
-  }
-
   ctx.restore();
 }
 
 /**
- * Draw all zones from buildChartModel(engineResult), level walls (KEY & MAJOR only),
- * structure breaks, active plan short lines, and the 1px gold current-price line
- * on a single Retina-scaled HTML5 Canvas overlay.
+ * Clean "007" Chart Overlay:
+ * 1) Up to 4 zones (SELL near, SELL deep, BUY near, BUY deep):
+ *    - Thin box [LO, HI] ($4 tall), full plot width (0 to plotWidth)
+ *    - Border: 1.3px solid (#ff4d66 SELL, #2fe08a BUY)
+ *    - Fill: 7% opacity
+ *    - Label above top-left of each box, 10px bold mono, same color as box:
+ *      "FIRE ZONE SELL 4115.13 - CRITICAL - near" / "... - deep"
+ *      with text shadow in chart background color (#08080b) and non-overlapping vertical shift (<14px).
+ * 2) Subtle SWING BOS/CHoCH structure (max last 4 breaks, 60% opacity, 9px labels).
+ * 3) Gold #f2b94b 1px solid horizontal line at live price with price tag on the right axis.
  */
 export function drawFireZoneCanvasOverlay(
   canvas: HTMLCanvasElement,
@@ -214,10 +178,16 @@ export function drawFireZoneCanvasOverlay(
   series: ISeriesApi<'Candlestick'>,
   modelOrEngine: FireZoneChartModel | FireZoneEngineResult,
   toggles: ChartLayerToggles,
-  pulsePhase: number,
-  candles: Candle[] = []
+  _pulsePhase: number,
+  candles: Candle[] = [],
+  livePriceOverride?: number
 ) {
   const model = resolveModel(modelOrEngine);
+  const livePrice =
+    typeof livePriceOverride === 'number' && livePriceOverride > 0
+      ? livePriceOverride
+      : model.currentPrice;
+
   const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
   const priceScaleWidth = series.priceScale().width() || 62;
   const totalWidth = canvas.clientWidth || 340;
@@ -235,17 +205,87 @@ export function drawFireZoneCanvasOverlay(
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  // Reset transform matrix to exact Retina dpr (prevents compounding scale across frames)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, totalWidth, totalHeight);
 
-  // Diagnostic log of plot area size, devicePixelRatio, and computed y coordinates for one zone
+  // Clip plot drawing to the candlestick plot area (0..plotWidth, 0..plotHeight)
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, plotWidth, plotHeight);
+  ctx.clip();
+
+  // 1. Subtle BOS / CHoCH structure (SWING only by default, max last 4 breaks, 60% opacity, 9px labels)
+  if (toggles.showInternal) {
+    const internalBreaks = model.structureBreaks.internal.slice(-4);
+    for (const brk of internalBreaks) {
+      drawStructureBreakSegment(ctx, chart, series, brk, plotWidth, plotHeight, candles);
+    }
+  }
+
+  if (toggles.showSwing) {
+    const swingBreaks = model.structureBreaks.swing.slice(-4);
+    for (const brk of swingBreaks) {
+      drawStructureBreakSegment(ctx, chart, series, brk, plotWidth, plotHeight, candles);
+    }
+  }
+
+  // 2. Collect visible zones from model.zones (sorted high price to low price -> top of screen to bottom)
+  interface VisibleZoneRenderItem {
+    zone: ChartModelZone;
+    rawTop: number;
+    rawBot: number;
+    yTop: number;
+    yBot: number;
+    boxH: number;
+    borderColor: string;
+    fillColor: string;
+    labelText: string;
+  }
+
+  const sortedZones = [...model.zones].sort((a, b) => b.anchor - a.anchor);
+  const visibleZones: VisibleZoneRenderItem[] = [];
+
+  for (const z of sortedZones) {
+    const yHi = series.priceToCoordinate(z.HI);
+    const yLo = series.priceToCoordinate(z.LO);
+    if (yHi === null || yLo === null) continue;
+
+    const rawTop = Math.min(yHi, yLo);
+    const rawBot = Math.max(yHi, yLo);
+
+    // Zones outside the visible price range are simply not drawn (they come back when the scale reaches them)
+    if (rawBot < 0 || rawTop > plotHeight) continue;
+
+    const yTop = Math.max(0, rawTop);
+    const yBot = Math.min(plotHeight, rawBot);
+    const boxH = Math.max(2, yBot - yTop);
+
+    const isSell = z.side === 'SELL';
+    const borderColor = isSell ? '#ff4d66' : '#2fe08a';
+    const fillColor = isSell ? 'rgba(255, 77, 102, 0.07)' : 'rgba(47, 224, 138, 0.07)';
+    const slotTag = z.type === 'NEAREST' ? 'near' : 'deep';
+    const labelText = `FIRE ZONE ${z.side} ${z.anchor.toFixed(2)} - ${z.strength} - ${slotTag}`;
+
+    visibleZones.push({
+      zone: z,
+      rawTop,
+      rawBot,
+      yTop,
+      yBot,
+      boxH,
+      borderColor,
+      fillColor,
+      labelText,
+    });
+  }
+
+  // Diagnostic log of plot size, devicePixelRatio, and y coordinates of one zone
   const sampleZone =
     model.zones.find((z) => z.type === 'NEAREST' && z.side === 'BUY') || model.zones[0];
   if (sampleZone) {
     const sampleYHi = series.priceToCoordinate(sampleZone.HI);
     const sampleYLo = series.priceToCoordinate(sampleZone.LO);
-    const debugKey = `${plotWidth}x${plotHeight}|dpr=${dpr}|${sampleZone.id}|${
+    const debugKey = `${plotWidth}x${plotHeight}|dpr=${dpr}|vis=${visibleZones.length}|${sampleZone.id}|${
       sampleYHi !== null ? Math.round(sampleYHi) : 'null'
     }-${sampleYLo !== null ? Math.round(sampleYLo) : 'null'}`;
     if (debugKey !== lastDebugLogKey) {
@@ -253,7 +293,7 @@ export function drawFireZoneCanvasOverlay(
       console.debug('[FireZoneOverlay]', {
         plotArea: { plotWidth, plotHeight, totalWidth, totalHeight },
         devicePixelRatio: dpr,
-        zoneCount: model.zones.length,
+        visibleZonesCount: visibleZones.length,
         sampleZone: {
           id: sampleZone.id,
           HI: sampleZone.HI,
@@ -265,249 +305,87 @@ export function drawFireZoneCanvasOverlay(
     }
   }
 
-  const priceScaleTags: Array<{
-    text: string;
-    y: number;
-    borderColor: string;
-    textColor: string;
-    bgColor?: string;
-  }> = [];
-
-  // Clip plot drawing to the candlestick plot area (0..plotWidth, 0..plotHeight)
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 0, plotWidth, plotHeight);
-  ctx.clip();
-
-  const ts = chart.timeScale();
-
-  // 1. Draw LEVEL walls as thin dashed lines (1px): KEY yellow, MAJOR purple, MINOR hidden on chart
-  for (const lvl of model.levels) {
-    if (lvl.importance === 'MINOR') continue; // MINOR hidden on chart, kept in ladder
-
-    const y = series.priceToCoordinate(lvl.price);
-    if (y === null || y < 6 || y > plotHeight - 6) continue;
-    const color = lvl.importance === 'KEY' ? '#f5b842' : '#a855f7';
-
+  // First pass: draw all visible zone boxes (full plot width 0..plotWidth, 1.3px solid border, 7% fill)
+  for (const item of visibleZones) {
     ctx.save();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 4]);
-    ctx.globalAlpha = 0.72;
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(plotWidth, y);
-    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+    ctx.setLineDash([]);
 
-    ctx.font = `bold 9px 'JetBrains Mono', monospace`;
-    ctx.fillStyle = color;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText(`LEVEL ${lvl.rank}`, plotWidth - 5, y - 2);
+    // 7% opacity fill across full plot width
+    ctx.fillStyle = item.fillColor;
+    ctx.fillRect(0, item.yTop, plotWidth, item.boxH);
+
+    // 1.3px solid outline around [LO, HI] across full plot width
+    ctx.strokeStyle = item.borderColor;
+    ctx.lineWidth = 1.3;
+    ctx.strokeRect(0.65, item.rawTop, Math.max(1, plotWidth - 1.3), Math.max(2, item.rawBot - item.rawTop));
     ctx.restore();
   }
 
-  // 2. Draw EVERY zone from model.zones (faint fill + TWO dotted horizontal border lines HI & LO)
-  for (const z of model.zones) {
-    const yHi = series.priceToCoordinate(z.HI);
-    const yLo = series.priceToCoordinate(z.LO);
-    if (yHi === null || yLo === null) continue;
-
-    const rawTop = Math.min(yHi, yLo);
-    const rawBot = Math.max(yHi, yLo);
-
-    // Zones outside the visible price range are not drawn on the canvas (shown as edge badges)
-    if (rawBot < 0 || rawTop > plotHeight) continue;
-
-    const yTop = Math.max(0, rawTop);
-    const yBot = Math.min(plotHeight, rawBot);
-    const boxH = Math.max(3, yBot - yTop);
-
-    const xStart = resolveZoneAnchorX(chart, z, candles, plotWidth);
-    const boxW = Math.max(12, plotWidth - xStart);
-
-    const isSell = z.side === 'SELL';
-    const borderColor = isSell ? '#ff5d6c' : '#2ee6a0';
-    const fillColor = isSell ? 'rgba(255,93,108,0.06)' : 'rgba(46,230,160,0.06)';
-    const zoneAlpha = z.type === 'DEEP' ? 0.55 : 1.0;
-
+  // Second pass: draw non-overlapping 10px bold mono labels above top-left of each box
+  // If two labels are closer than 14px vertically, shift the lower one down inside its own box.
+  let prevLabelY: number | null = null;
+  for (const item of visibleZones) {
     ctx.save();
-    ctx.globalAlpha = zoneAlpha;
-
-    // Very faint fill
-    ctx.fillStyle = fillColor;
-    ctx.fillRect(xStart, yTop, boxW, boxH);
-
-    // Pulsing gold outline for the ACTIVE nearest zone
-    if (z.isActive) {
-      ctx.save();
-      const glowBlur = 6 + Math.sin(pulsePhase) * 4;
-      ctx.shadowColor = 'rgba(245, 184, 66, 0.78)';
-      ctx.shadowBlur = glowBlur;
-      ctx.strokeStyle = '#f5b842';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([]);
-      ctx.strokeRect(xStart + 0.5, yTop, Math.max(2, boxW - 1), boxH);
-      ctx.restore();
-    }
-
-    // TWO dotted horizontal border lines (HI and LO), 1.5px, from anchor candle to right edge
-    ctx.strokeStyle = borderColor;
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([2, 3]);
-
-    if (rawTop >= 0 && rawTop <= plotHeight) {
-      ctx.beginPath();
-      ctx.moveTo(xStart, rawTop);
-      ctx.lineTo(plotWidth, rawTop);
-      ctx.stroke();
-    }
-
-    if (rawBot >= 0 && rawBot <= plotHeight) {
-      ctx.beginPath();
-      ctx.moveTo(xStart, rawBot);
-      ctx.lineTo(plotWidth, rawBot);
-      ctx.stroke();
-    }
-
-    // Label above the top line, bold 11px mono, left side of the visible area:
-    // "FIRE ZONE BUY 4003.91 - CRITICAL - NEAREST" (add ⭐ for the star zone)
-    const starText = z.isStar ? ' ⭐' : '';
-    const labelText = `FIRE ZONE ${z.side} ${z.anchor.toFixed(2)} - ${z.strength} - ${z.type}${starText}`;
-    ctx.font = `bold 11px 'JetBrains Mono', monospace`;
+    ctx.font = `bold 10px 'JetBrains Mono', monospace`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'bottom';
 
     const labelX = 8;
-    const labelY = Math.max(14, yTop - 3);
-    const textMetrics = ctx.measureText(labelText);
+    // Default position: just above the top edge of the box
+    let labelY = Math.max(12, item.yTop - 3);
 
-    // Subtle dark backing pill behind label so candles never obscure the zone title
-    ctx.fillStyle = 'rgba(8, 8, 11, 0.78)';
-    ctx.fillRect(labelX - 3, labelY - 12, textMetrics.width + 6, 14);
-
-    ctx.fillStyle = z.isActive ? '#f5b842' : borderColor;
-    ctx.fillText(labelText, labelX, labelY);
-    ctx.restore();
-
-    // Queue right-aligned price scale tags for HI and LO
-    priceScaleTags.push(
-      {
-        text: z.HI.toFixed(2),
-        y: rawTop,
-        borderColor,
-        textColor: borderColor,
-      },
-      {
-        text: z.LO.toFixed(2),
-        y: rawBot,
-        borderColor,
-        textColor: borderColor,
-      }
-    );
-  }
-
-  // 3. Draw MARKET STRUCTURE (last 8 internal breaks, last 6 swing breaks)
-  if (toggles.showInternal) {
-    const internalBreaks = model.structureBreaks.internal.slice(-8);
-    for (const brk of internalBreaks) {
-      drawStructureBreakSegment(ctx, chart, series, brk, plotWidth, plotHeight);
+    if (prevLabelY !== null && labelY - prevLabelY < 14) {
+      // Shift the lower label down inside its own box (at least 14px below the upper label)
+      const shiftedInsideBox = item.yTop + 11;
+      labelY = Math.min(plotHeight - 3, Math.max(prevLabelY + 14, shiftedInsideBox));
     }
-  }
+    prevLabelY = labelY;
 
-  if (toggles.showSwing) {
-    const swingBreaks = model.structureBreaks.swing.slice(-6);
-    for (const brk of swingBreaks) {
-      drawStructureBreakSegment(ctx, chart, series, brk, plotWidth, plotHeight);
-    }
-  }
+    // Text shadow + outline in chart background color (#08080b) for high readability over candles
+    ctx.shadowColor = '#08080b';
+    ctx.shadowBlur = 4;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.strokeStyle = '#08080b';
+    ctx.lineWidth = 3;
+    ctx.lineJoin = 'round';
+    ctx.strokeText(item.labelText, labelX, labelY);
 
-  // Optional HH / HL / LH / LL swing point labels (8px, muted)
-  if (toggles.showLabels) {
-    const swingPts = model.structureBreaks.confirmedSwingPivots.slice(-20);
-    ctx.save();
-    ctx.font = `bold 8px 'JetBrains Mono', monospace`;
-    ctx.fillStyle = 'rgba(214, 208, 196, 0.65)';
-    ctx.textAlign = 'center';
-
-    for (const pt of swingPts) {
-      if (!pt.swingTag) continue;
-      const x = ts.timeToCoordinate(pt.time as UTCTimestamp);
-      const y = series.priceToCoordinate(pt.price);
-      if (x === null || y === null || x < 8 || x > plotWidth - 8 || y < 10 || y > plotHeight - 10) {
-        continue;
-      }
-      ctx.textBaseline = pt.type === 'HIGH' ? 'bottom' : 'top';
-      ctx.fillText(pt.swingTag, x, pt.type === 'HIGH' ? y - 4 : y + 4);
-    }
+    ctx.fillStyle = item.borderColor;
+    ctx.fillText(item.labelText, labelX, labelY);
     ctx.restore();
   }
 
-  // 4. Draw Active Plan (ENTRY, SL, TP1-TP3) as short lines with price tags at the right edge, inside the canvas
-  for (const item of model.planLines) {
-    const y = series.priceToCoordinate(item.price);
-    if (y === null || y < 8 || y > plotHeight - 8) continue;
-
-    const lineStartX = Math.max(0, plotWidth - 96);
-    ctx.save();
-    ctx.strokeStyle = item.color;
-    ctx.lineWidth = 1.25;
-    ctx.setLineDash(item.dashed ? [3, 3] : []);
-    ctx.beginPath();
-    ctx.moveTo(lineStartX, y);
-    ctx.lineTo(plotWidth, y);
-    ctx.stroke();
-
-    ctx.font = `bold 9px 'JetBrains Mono', monospace`;
-    const tagMetrics = ctx.measureText(item.label);
-    ctx.fillStyle = 'rgba(8, 8, 11, 0.84)';
-    ctx.fillRect(plotWidth - tagMetrics.width - 10, y - 12, tagMetrics.width + 6, 11);
-
-    ctx.fillStyle = item.color;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText(item.label, plotWidth - 6, y - 2);
-    ctx.restore();
-  }
-
-  // 5. Visible dev test / live anchor: 1px solid gold line at currentPrice across plot area
-  if (model.currentPrice > 0) {
-    const yNow = series.priceToCoordinate(model.currentPrice);
-    if (yNow !== null && yNow >= 0 && yNow <= plotHeight) {
+  // 3. Gold #f2b94b 1px solid horizontal line at the live price
+  let yLive: number | null = null;
+  if (livePrice > 0) {
+    const coord = series.priceToCoordinate(livePrice);
+    if (coord !== null && coord >= 0 && coord <= plotHeight) {
+      yLive = coord;
       ctx.save();
-      ctx.strokeStyle = '#f5b842';
+      ctx.strokeStyle = '#f2b94b';
       ctx.lineWidth = 1;
       ctx.setLineDash([]);
       ctx.beginPath();
-      ctx.moveTo(0, yNow);
-      ctx.lineTo(plotWidth, yNow);
+      ctx.moveTo(0, yLive);
+      ctx.lineTo(plotWidth, yLive);
       ctx.stroke();
       ctx.restore();
-
-      priceScaleTags.push({
-        text: model.currentPrice.toFixed(2),
-        y: yNow,
-        borderColor: '#f5b842',
-        textColor: '#060608',
-        bgColor: '#f5b842',
-      });
     }
   }
 
   ctx.restore(); // End plot-area clip
 
-  // 6. Draw right-aligned HI / LO / NOW price tags on the right price scale column
-  for (const tag of priceScaleTags) {
-    drawPriceScaleTag(
+  // 4. Live price tag on the right axis
+  if (yLive !== null && livePrice > 0) {
+    drawLivePriceScaleTag(
       ctx,
-      tag.text,
-      tag.y,
+      livePrice.toFixed(2),
+      yLive,
       plotWidth,
       totalWidth,
-      plotHeight,
-      tag.borderColor,
-      tag.textColor,
-      tag.bgColor
+      plotHeight
     );
   }
 }

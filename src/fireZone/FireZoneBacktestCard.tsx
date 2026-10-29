@@ -138,7 +138,7 @@ export const FireZoneBacktestCard: React.FC<{ backtest: FireZoneBacktestSummary 
         >
           <div className="flex flex-wrap items-center justify-between gap-2" style={monoStyle}>
             <span className="text-white/75">
-              STRONG+ zones (&ge;55):{' '}
+              STRONG+ zones (&ge;8):{' '}
               <strong className="text-[#f4efe6]">{backtest.strongTrades}</strong> trades ·{' '}
               <strong className="text-[#2ee6a0]">{backtest.strongWinRate.toFixed(1)}%</strong>{' '}
               win ·{' '}

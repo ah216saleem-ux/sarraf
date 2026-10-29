@@ -5,7 +5,9 @@ import {
   FireZoneEngineResult,
   runFireZoneEngine,
   getClosedH1Signature,
+  resetFireZoneEngineStore,
 } from './engine';
+
 import { FireZoneBacktestSummary, runFireZoneBacktest } from './backtest';
 import { commandStore } from '../command/data/commandFeedStore';
 
@@ -274,10 +276,26 @@ export function useFireZoneFeed() {
     };
   }, []);
 
-  const engineResult: FireZoneEngineResult = useMemo(
-    () => runFireZoneEngine(closedSnapshot.h1, closedSnapshot.h4, closedSnapshot.d1),
-    [closedSnapshot]
-  );
+  const [simulatedPrice, setSimulatedPrice] = useState<number | null>(null);
+  const [lifecycleSeq, setLifecycleSeq] = useState<number>(0);
+
+  const effectiveCurrentPrice = simulatedPrice !== null ? simulatedPrice : currentPrice;
+
+  const resetLifecycleDev = useCallback(() => {
+    resetFireZoneEngineStore();
+    setSimulatedPrice(null);
+    setLifecycleSeq((s) => s + 1);
+  }, []);
+
+  const engineResult: FireZoneEngineResult = useMemo(() => {
+    void lifecycleSeq;
+    return runFireZoneEngine(
+      closedSnapshot.h1,
+      closedSnapshot.h4,
+      closedSnapshot.d1,
+      effectiveCurrentPrice > 0 ? effectiveCurrentPrice : undefined
+    );
+  }, [closedSnapshot, effectiveCurrentPrice, lifecycleSeq]);
 
   const backtestResult: FireZoneBacktestSummary = useMemo(
     () => runFireZoneBacktest(closedSnapshot.h1),
@@ -287,7 +305,10 @@ export function useFireZoneFeed() {
   return {
     candles,
     dataReloadSeq,
-    currentPrice,
+    currentPrice: effectiveCurrentPrice,
+    simulatedPrice,
+    setSimulatedPrice,
+    resetLifecycleDev,
     isMarketOpen,
     connectionStatus,
     isLoading,
@@ -297,3 +318,4 @@ export function useFireZoneFeed() {
     refetch: loadCandles,
   };
 }
+

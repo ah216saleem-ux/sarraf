@@ -170,31 +170,8 @@ export function computeStructureAndTrend(
 }
 
 /**
- * Strength score = min(99, 25 + touches*14 + min(25, pivotVolume/avgVolume*12) + min(20, ageBars/totalBars*20))
- */
-export function calculateStrengthScore(
-  touches: number,
-  pivotVolume: number,
-  avgVolume: number,
-  ageBars: number,
-  totalBars: number
-): { score: number; label: ZoneStrengthLabel } {
-  const volRatio = avgVolume > 0 ? pivotVolume / avgVolume : 1;
-  const volComponent = Math.min(25, volRatio * 12);
-  const ageRatio = totalBars > 0 ? ageBars / totalBars : 0;
-  const ageComponent = Math.min(20, ageRatio * 20);
-
-  const rawScore = 25 + touches * 14 + volComponent + ageComponent;
-  const score = Math.max(0, Math.min(99, Math.round(rawScore)));
-  const label: ZoneStrengthLabel =
-    score >= 75 ? 'CRITICAL' : score >= 55 ? 'STRONG' : 'MEDIUM';
-
-  return { score, label };
-}
-
-/**
- * Extract all zones from pivots, evaluate lifecycle (dead on close, wicks do not kill),
- * and compute touch count and strength score.
+ * Extract zones from pivots, evaluate lifecycle (dead on close, wicks do not kill),
+ * and compute freshness-based strength score.
  */
 export function extractZones(
   candles: Candle[],
@@ -207,9 +184,6 @@ export function extractZones(
   recentlyBroken: FireZone[];
 } {
   const totalBars = candles.length;
-  const avgVolume =
-    totalBars > 0 ? candles.reduce((acc, c) => acc + (c.volume || 0), 0) / totalBars : 1;
-
   const liveZones: FireZone[] = [];
   const deadZones: FireZone[] = [];
   const minPivotIndex = Math.max(0, totalBars - 150);
@@ -253,14 +227,11 @@ export function extractZones(
       }
     }
 
-    const ageBars = totalBars - 1 - pivot.index;
-    const { score, label } = calculateStrengthScore(
-      touches,
-      pivot.volume,
-      avgVolume,
-      ageBars,
-      totalBars
-    );
+    const freshnessPts = touches === 0 ? 4 : touches === 1 ? 2 : 0;
+    const originWeight = pivot.level === 50 ? 5 : pivot.level === 20 ? 3 : 1;
+    const score = originWeight + freshnessPts;
+    const label: ZoneStrengthLabel =
+      score >= 11 ? 'CRITICAL' : score >= 8 ? 'STRONG' : 'MODERATE';
 
     let distance = 0;
     if (currentPrice > top) {

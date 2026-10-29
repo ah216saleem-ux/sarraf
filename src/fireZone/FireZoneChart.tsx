@@ -12,11 +12,9 @@ import { Candle, FireZoneEngineResult } from './types';
 import { ChartTimeframe, fetchChartCandlesByTimeframe } from './feed';
 import { computeVisibleAutoscaleRange } from './structure';
 import {
-  EdgeZoneBadge,
   ChartLayerToggles,
   FireZoneChartModel,
   buildChartModel,
-  computeOutOfRangeZoneBadges,
   drawFireZoneCanvasOverlay,
 } from './chartOverlay';
 
@@ -194,20 +192,15 @@ export const FireZoneChart: React.FC<Props> = ({
   candlesRef.current = tfCandles;
   const modelRef = useRef<FireZoneChartModel>(resolvedModel);
   modelRef.current = resolvedModel;
+  const livePriceRef = useRef<number>(livePrice);
+  livePriceRef.current = livePrice;
 
-  const [showInternal] = useState<boolean>(true);
-  const [showSwing] = useState<boolean>(true);
-  const [showLabels] = useState<boolean>(false);
-  const [edgeBadges, setEdgeBadges] = useState<EdgeZoneBadge[]>([]);
-
+  // Only SWING structure by default (internal toggle OFF)
   const togglesRef = useRef<ChartLayerToggles>({
-    showInternal: true,
+    showInternal: false,
     showSwing: true,
     showLabels: false,
   });
-  togglesRef.current = { showInternal, showSwing, showLabels };
-
-  const pulseRef = useRef<number>(0);
 
   const redrawOverlay = useCallback(() => {
     const canvas = canvasRef.current;
@@ -215,27 +208,16 @@ export const FireZoneChart: React.FC<Props> = ({
     const series = candleSeriesRef.current;
     if (!canvas || !chart || !series) return;
 
-    pulseRef.current += 0.18;
     drawFireZoneCanvasOverlay(
       canvas,
       chart,
       series,
       modelRef.current,
       togglesRef.current,
-      pulseRef.current,
-      candlesRef.current
+      0,
+      candlesRef.current,
+      livePriceRef.current
     );
-
-    const badges = computeOutOfRangeZoneBadges(
-      series,
-      modelRef.current,
-      CHART_HEIGHT - 26
-    );
-    setEdgeBadges((prev) => {
-      const prevKey = prev.map((b) => `${b.id}:${b.position}:${b.text}`).join('|');
-      const nextKey = badges.map((b) => `${b.id}:${b.position}:${b.text}`).join('|');
-      return prevKey === nextKey ? prev : badges;
-    });
   }, []);
 
   useEffect(() => {
@@ -259,7 +241,7 @@ export const FireZoneChart: React.FC<Props> = ({
       rightPriceScale: {
         borderColor: '#1f1d18',
         autoScale: true,
-        scaleMargins: { top: 0.03, bottom: 0.14 },
+        scaleMargins: { top: 0.04, bottom: 0.12 },
       },
       timeScale: {
         borderColor: '#1f1d18',
@@ -283,12 +265,14 @@ export const FireZoneChart: React.FC<Props> = ({
         const bars = candlesRef.current;
         if (!bars || bars.length === 0) return null;
         const range = chart.timeScale().getVisibleLogicalRange();
-        const from = range ? range.from : Math.max(0, bars.length - 90);
+        const from = range ? range.from : Math.max(0, bars.length - 100);
         const to = range ? range.to : bars.length - 1;
 
         const m = modelRef.current;
         const nearestBuy = m.zones.find((z) => z.side === 'BUY' && z.type === 'NEAREST');
         const nearestSell = m.zones.find((z) => z.side === 'SELL' && z.type === 'NEAREST');
+        const currentLive =
+          livePriceRef.current > 0 ? livePriceRef.current : m.currentPrice;
 
         const vr = computeVisibleAutoscaleRange(bars, from, to, {
           nearestBuy: nearestBuy
@@ -297,7 +281,7 @@ export const FireZoneChart: React.FC<Props> = ({
           nearestSell: nearestSell
             ? { bottom: nearestSell.LO, top: nearestSell.HI, anchor: nearestSell.anchor }
             : null,
-          currentPrice: m.currentPrice,
+          currentPrice: currentLive,
           atr: m.atr,
         });
         if (!vr) return null;
@@ -318,7 +302,7 @@ export const FireZoneChart: React.FC<Props> = ({
       lastValueVisible: false,
     });
     chart.priceScale('volScale').applyOptions({
-      scaleMargins: { top: 0.86, bottom: 0 },
+      scaleMargins: { top: 0.88, bottom: 0 },
     });
 
     chartRef.current = chart;
@@ -353,7 +337,7 @@ export const FireZoneChart: React.FC<Props> = ({
     };
   }, [redrawOverlay]);
 
-  // Populate active timeframe candle dataset & set visible range to last 90 candles (rightOffset: 6) on timeframe switch or closed-candle reload
+  // Populate active timeframe candle dataset & set initial view to last 100 candles (rightOffset: 6)
   useEffect(() => {
     const chart = chartRef.current;
     const cs = candleSeriesRef.current;
@@ -387,17 +371,17 @@ export const FireZoneChart: React.FC<Props> = ({
       validBars.map((c) => ({
         time: c.time as UTCTimestamp,
         value: Number.isFinite(c.volume) ? c.volume : 0,
-        color: c.close >= c.open ? 'rgba(46, 230, 160, 0.24)' : 'rgba(255, 93, 108, 0.24)',
+        color: c.close >= c.open ? 'rgba(46, 230, 160, 0.20)' : 'rgba(255, 93, 108, 0.20)',
       }))
     );
 
     loadedBarCountRef.current = validBars.length;
 
-    // Set visible range to the last 90 candles (rightOffset: 6) on timeframe change or full reload
+    // Initial view: last 100 candles, rightOffset 6
     const len = validBars.length;
     chart.timeScale().applyOptions({ rightOffset: 6 });
     chart.timeScale().setVisibleLogicalRange({
-      from: Math.max(0, len - 90),
+      from: Math.max(0, len - 100),
       to: len - 1 + 6,
     });
 
@@ -406,7 +390,7 @@ export const FireZoneChart: React.FC<Props> = ({
     return () => clearTimeout(t);
   }, [tfDatasetVersion, activeTf, redrawOverlay]);
 
-  // Update last forming candle of the active timeframe on live ticks (keeps zoom stable) & redraw canvas
+  // Update last forming candle of the active timeframe on live ticks & redraw canvas when zones/price change
   useEffect(() => {
     const cs = candleSeriesRef.current;
     const vs = volumeSeriesRef.current;
@@ -425,20 +409,23 @@ export const FireZoneChart: React.FC<Props> = ({
       vs.update({
         time: last.time as UTCTimestamp,
         value: Number.isFinite(last.volume) ? last.volume : 0,
-        color: last.close >= last.open ? 'rgba(46, 230, 160, 0.24)' : 'rgba(255, 93, 108, 0.24)',
+        color: last.close >= last.open ? 'rgba(46, 230, 160, 0.20)' : 'rgba(255, 93, 108, 0.20)',
       });
       requestAnimationFrame(redrawOverlay);
     } catch {
       // ignore transient ordering edge case
     }
-  }, [tfCandles, resolvedModel, redrawOverlay]);
+  }, [tfCandles, resolvedModel, livePrice, redrawOverlay]);
 
-  const topBadges = edgeBadges.filter((b) => b.position === 'TOP');
-  const bottomBadges = edgeBadges.filter((b) => b.position === 'BOTTOM');
+  // Zone chips sorted strictly from high price to low price
+  const sortedZoneChips = useMemo(
+    () => [...resolvedModel.zones].sort((a, b) => b.anchor - a.anchor),
+    [resolvedModel.zones]
+  );
 
   return (
     <section className="space-y-2.5 fz-fade-up" style={cardStyle}>
-      {/* Card Header: "◆ Price action / zone map" (gold, 13px) + tiny legend "SELL / BUY / NOW" */}
+      {/* Card Header: "◆ Price action / zone map" (gold, 13px) */}
       <div className="flex items-center justify-between gap-2">
         <div
           style={{
@@ -450,36 +437,9 @@ export const FireZoneChart: React.FC<Props> = ({
         >
           ◆ Price action / zone map
         </div>
-
-        <div
-          className="flex items-center gap-2.5 text-[10px] font-bold uppercase"
-          style={{ ...monoStyle, color: 'var(--mu, #7e8794)' }}
-        >
-          <span className="inline-flex items-center gap-1">
-            <span
-              className="inline-block w-2.5 h-[3px] rounded-full"
-              style={{ backgroundColor: 'var(--dn, #ff4d66)' }}
-            />
-            <span>SELL</span>
-          </span>
-          <span className="inline-flex items-center gap-1">
-            <span
-              className="inline-block w-2.5 h-[3px] rounded-full"
-              style={{ backgroundColor: 'var(--up, #2fe08a)' }}
-            />
-            <span>BUY</span>
-          </span>
-          <span className="inline-flex items-center gap-1">
-            <span
-              className="inline-block w-2.5 h-[3px] rounded-full"
-              style={{ backgroundColor: 'var(--gold, #f2b94b)' }}
-            />
-            <span>NOW</span>
-          </span>
-        </div>
       </div>
 
-      {/* Row of 5 timeframe buttons: 15m, 30m, 1H, 4H, 1D */}
+      {/* Row of 5 timeframe buttons: 15m, 30m, 1H, 4H, 1D (active = gold pill) */}
       <div style={{ display: 'flex', gap: '6px' }}>
         {TIMEFRAME_BUTTONS.map((btn) => {
           const isActive = activeTf === btn.id;
@@ -509,7 +469,7 @@ export const FireZoneChart: React.FC<Props> = ({
         })}
       </div>
 
-      {/* Chart Container (430px height) + Single Retina Canvas Overlay (z-10) + Edge Badges */}
+      {/* Chart Container (430px height) + Single Retina Canvas Overlay (z-10) */}
       <div className="relative w-full h-[430px] rounded-xl overflow-hidden border border-[#1a212b] bg-[#08080b]">
         <div ref={containerRef} className="w-full h-full" />
 
@@ -519,52 +479,6 @@ export const FireZoneChart: React.FC<Props> = ({
           className="pointer-events-none absolute inset-0 w-full h-full z-10"
           style={{ zIndex: 10 }}
         />
-
-        {/* Top Out-of-Range Zone Edge Badges */}
-        {topBadges.length > 0 && (
-          <div
-            className="pointer-events-none absolute top-2 left-2 flex flex-wrap gap-1.5 pr-16 z-20"
-            style={{ zIndex: 20 }}
-          >
-            {topBadges.map((b) => (
-              <span
-                key={b.id}
-                className="px-2 py-0.5 rounded text-[10px] font-bold bg-black/85 border"
-                style={{
-                  borderColor:
-                    b.side === 'SELL' ? 'rgba(255, 93, 108, 0.55)' : 'rgba(46, 230, 160, 0.55)',
-                  color: b.side === 'SELL' ? '#ff5d6c' : '#2ee6a0',
-                  ...monoStyle,
-                }}
-              >
-                &uarr; {b.text}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Bottom Out-of-Range Zone Edge Badges */}
-        {bottomBadges.length > 0 && (
-          <div
-            className="pointer-events-none absolute bottom-8 left-2 flex flex-wrap gap-1.5 pr-16 z-20"
-            style={{ zIndex: 20 }}
-          >
-            {bottomBadges.map((b) => (
-              <span
-                key={b.id}
-                className="px-2 py-0.5 rounded text-[10px] font-bold bg-black/85 border"
-                style={{
-                  borderColor:
-                    b.side === 'BUY' ? 'rgba(46, 230, 160, 0.55)' : 'rgba(255, 93, 108, 0.55)',
-                  color: b.side === 'BUY' ? '#2ee6a0' : '#ff5d6c',
-                  ...monoStyle,
-                }}
-              >
-                &darr; {b.text}
-              </span>
-            ))}
-          </div>
-        )}
 
         {((isLoading && tfCandles.length === 0) || tfLoading) && (
           <div
@@ -576,14 +490,35 @@ export const FireZoneChart: React.FC<Props> = ({
         )}
       </div>
 
-      {/* Note under the chart */}
-      <div
-        className="text-[11px] leading-snug pt-0.5"
-        style={{ color: 'var(--mu, #7e8794)' }}
-      >
-        Timeframe sirf candles badalta hai. Zones aur ladder levels same rehte hain.
-      </div>
+      {/* 6) ZONE CHIPS under the chart (one per zone, sorted high to low, 10px mono, red/green outline) */}
+      {sortedZoneChips.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+          {sortedZoneChips.map((z) => {
+            const isSell = z.side === 'SELL';
+            const slotLabel = z.type === 'NEAREST' ? 'near' : 'deep';
+            const chipColor = isSell ? '#ff4d66' : '#2fe08a';
+            const chipBg = isSell
+              ? 'rgba(255, 77, 102, 0.07)'
+              : 'rgba(47, 224, 138, 0.07)';
+
+            return (
+              <span
+                key={z.id}
+                className="px-2 py-1 rounded-[7px] font-bold"
+                style={{
+                  ...monoStyle,
+                  fontSize: '10px',
+                  color: chipColor,
+                  backgroundColor: chipBg,
+                  border: `1px solid ${chipColor}`,
+                }}
+              >
+                {z.side} {slotLabel} {z.anchor.toFixed(2)} - {z.strength}
+              </span>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 };
-

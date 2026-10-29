@@ -247,10 +247,9 @@ export interface AutoscaleNearestZonesOption {
 
 /**
  * Pure helper for chart autoscaleInfoProvider:
- * Uses ONLY the min low and max high of the candles inside the visible logical range [fromLogical, toLogical],
- * plus 6% padding top and bottom.
- * Optionally extends for NEAREST BUY and NEAREST SELL on initial view if they are within 8*ATR of currentPrice
- * (capped so far zones, walls, plan lines, and structure lines never stretch the scale).
+ * Returns the min low / max high of the VISIBLE candles [fromLogical, toLogical] + 6% padding.
+ * Additionally includes a NEAR zone only if it is within 6*ATR(H1) of the live price.
+ * Deep zones never influence the scale.
  */
 export function computeVisibleAutoscaleRange(
   candles: Candle[],
@@ -280,28 +279,19 @@ export function computeVisibleAutoscaleRange(
     return null;
   }
 
-  const candleSpan = Math.max(0.5, maxHigh - minLow);
-
   if (nearestZonesOption && nearestZonesOption.currentPrice > 0) {
-    const maxNearestDist = 8 * Math.max(1.5, nearestZonesOption.atr);
-    // Cap extension beyond candle range so the price axis always stays tight around candles
-    const maxAllowedExtension = Math.min(maxNearestDist, candleSpan * 0.25);
+    const maxNearestDist = 6 * Math.max(1.5, nearestZonesOption.atr);
+    const livePrice = nearestZonesOption.currentPrice;
 
     const nb = nearestZonesOption.nearestBuy;
-    if (
-      nb &&
-      Math.abs(nearestZonesOption.currentPrice - nb.anchor) <= maxNearestDist &&
-      minLow - nb.bottom <= maxAllowedExtension
-    ) {
+    if (nb && Math.abs(livePrice - nb.anchor) <= maxNearestDist) {
       minLow = Math.min(minLow, nb.bottom);
+      maxHigh = Math.max(maxHigh, nb.top);
     }
 
     const ns = nearestZonesOption.nearestSell;
-    if (
-      ns &&
-      Math.abs(ns.anchor - nearestZonesOption.currentPrice) <= maxNearestDist &&
-      ns.top - maxHigh <= maxAllowedExtension
-    ) {
+    if (ns && Math.abs(ns.anchor - livePrice) <= maxNearestDist) {
+      minLow = Math.min(minLow, ns.bottom);
       maxHigh = Math.max(maxHigh, ns.top);
     }
   }
@@ -314,4 +304,5 @@ export function computeVisibleAutoscaleRange(
     maxValue: Number((maxHigh + pad).toFixed(4)),
   };
 }
+
 
