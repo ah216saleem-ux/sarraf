@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test:spy": "tsx server/spy/spyEngine.test.ts"
+    "test:spy": "tsx server/spy/spyEngine.test.ts",
+    "test:firezone": "tsx src/fireZone/engine.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

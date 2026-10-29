@@ -31,6 +31,7 @@ import {
   Waves,
   Lock,
   Target,
+  Flame,
 } from 'lucide-react';
 import {
   formatNewSignalMessage,
@@ -44,6 +45,7 @@ import { GoLiveChecklistTab } from './GoLiveChecklistTab';
 import { SarrafCommandView } from '../command/SarrafCommandView';
 import { SarrafAtlasView } from '../atlas/SarrafAtlasView';
 import { BlackstoneView } from '../blackstone/BlackstoneView';
+import { FireZonePage } from '../fireZone/FireZonePage';
 import { SpyOptionsView } from '../spy/SpyOptionsView';
 import { BtcTideView } from '../btcTide/BtcTideView';
 import { SarrafDojiView } from '../doji/SarrafDojiView';
@@ -150,13 +152,13 @@ const DashboardPriceHeader: React.FC<{ fallbackPrice: number | null; fallbackSta
   }
 );
 
-export type SarrafSubView = 'COMMAND' | 'DECK' | 'ATLAS' | 'blackstone';
+export type SarrafSubView = 'COMMAND' | 'DECK' | 'ATLAS' | 'blackstone' | 'fireZone';
 
 interface SarrafSubPillItem {
   id: SarrafSubView;
   label: string;
   badge?: string;
-  icon?: 'zap' | 'compass';
+  icon?: 'zap' | 'compass' | 'flame';
   adminLockIndicator?: boolean;
   roles: Array<'admin' | 'trader'>;
 }
@@ -166,6 +168,7 @@ const SARRAF_SUB_PILLS: SarrafSubPillItem[] = [
   { id: 'DECK', label: 'TRADING DECK', adminLockIndicator: true, roles: ['admin', 'trader'] },
   { id: 'ATLAS', label: 'SARRAF ATLAS', badge: 'ZONES', icon: 'compass', roles: ['admin', 'trader'] },
   { id: 'blackstone', label: 'BLACKSTONE', badge: 'PLAN', roles: ['admin', 'trader'] },
+  { id: 'fireZone', label: 'FIRE ZONE', badge: 'SWING', icon: 'flame', roles: ['admin', 'trader'] },
 ];
 
 export const DashboardView: React.FC = () => {
@@ -901,6 +904,7 @@ export const DashboardView: React.FC = () => {
                     >
                       {pill.icon === 'zap' && <Zap className="w-3.5 h-3.5 shrink-0" />}
                       {pill.icon === 'compass' && <Compass className="w-3.5 h-3.5 shrink-0" />}
+                      {pill.icon === 'flame' && <Flame className="w-3.5 h-3.5 shrink-0" />}
                       <span>{pill.label}</span>
                       {pill.badge && (
                         <span
@@ -923,7 +927,7 @@ export const DashboardView: React.FC = () => {
               </div>
 
               <span className="text-[10px] font-mono text-neutral-500 hidden md:inline shrink-0 pl-2">
-                SECTION: {sarrafSection === 'COMMAND' ? 'SARRAF COMMAND' : sarrafSection === 'DECK' ? 'TRADING DECK' : sarrafSection === 'ATLAS' ? 'SARRAF ATLAS' : 'BLACKSTONE'}
+                SECTION: {sarrafSection === 'COMMAND' ? 'SARRAF COMMAND' : sarrafSection === 'DECK' ? 'TRADING DECK' : sarrafSection === 'ATLAS' ? 'SARRAF ATLAS' : sarrafSection === 'blackstone' ? 'BLACKSTONE' : 'FIRE ZONE'}
               </span>
             </div>
 
@@ -934,6 +938,8 @@ export const DashboardView: React.FC = () => {
               <SarrafAtlasView />
             ) : sarrafSection === 'blackstone' ? (
               <BlackstoneView />
+            ) : sarrafSection === 'fireZone' ? (
+              <FireZonePage />
             ) : !isAdmin ? (
               <AdminLockScreen tabName="TRADING DECK" onSwitchAccount={openLoginModal} />
             ) : (
