@@ -49,6 +49,7 @@ import { FireZonePage } from '../fireZone/FireZonePage';
 import { SpyOptionsView } from '../spy/SpyOptionsView';
 import { BtcTideView } from '../btcTide/BtcTideView';
 import { SarrafDojiView } from '../doji/SarrafDojiView';
+import { RedSniperPage } from '../redSniper/RedSniperPage';
 import { useCommandFeed } from '../command/data/useCommandFeed';
 
 const AdminLockScreen: React.FC<{ tabName: string; onSwitchAccount: () => void; currentUserEmail?: string }> = ({
@@ -181,6 +182,7 @@ export const DashboardView: React.FC = () => {
     | 'OVERVIEW'
     | 'BTC_TIDE'
     | 'DOJI'
+    | 'RED_SNIPER'
     | 'TELEGRAM'
     | 'SPY'
     | 'NEWS'
@@ -672,6 +674,17 @@ export const DashboardView: React.FC = () => {
             >
               <Target className={`w-3.5 h-3.5 shrink-0 ${activeMainTab === 'DOJI' ? 'text-[#0a0907]' : 'text-[#d9b25a]'}`} />
               <span>DOJI</span>
+            </button>
+            <button
+              onClick={() => setActiveMainTab('RED_SNIPER')}
+              className={`flex items-center gap-1 px-2.5 py-1.5 sm:py-1 rounded-lg transition-all cursor-pointer shrink-0 whitespace-nowrap ${
+                activeMainTab === 'RED_SNIPER'
+                  ? 'bg-[#ff2d45] text-black font-bold shadow-[0_0_12px_rgba(255,45,69,0.45)]'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+            >
+              <Target className={`w-3.5 h-3.5 shrink-0 ${activeMainTab === 'RED_SNIPER' ? 'text-black' : 'text-[#ff2d45]'}`} />
+              <span>RED SNIPER</span>
             </button>
             <button
               onClick={() => setActiveMainTab('TELEGRAM')}
@@ -1472,6 +1485,9 @@ export const DashboardView: React.FC = () => {
 
         {/* TAB: DOJI ZONES */}
         {activeMainTab === 'DOJI' && <SarrafDojiView />}
+
+        {/* TAB: RED SNIPER */}
+        {activeMainTab === 'RED_SNIPER' && <RedSniperPage />}
 
         {/* TAB 2: TELEGRAM COMMAND CENTER (Phase 4 Centerpiece - Admin Only) */}
         {activeMainTab === 'TELEGRAM' && (
