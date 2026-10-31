@@ -194,11 +194,16 @@ export interface ChartModelZone {
   pivotTime: number;
   pivotIndex: number;
   distance: number;
+  power?: number;
+  statusLabel?: 'FRESH' | 'TESTED' | 'DEEP';
+  pctLeft?: number;
+  retests?: number;
+  customLabel?: string;
 }
 
 export interface ChartModelPlanLine {
   id: string;
-  kind: 'ENTRY' | 'SL' | 'TP1' | 'TP2' | 'TP3';
+  kind: 'ENTRY' | 'SL' | 'TRAIL' | 'TP1' | 'TP2' | 'TP3';
   side: ZoneSide;
   label: string;
   price: number;

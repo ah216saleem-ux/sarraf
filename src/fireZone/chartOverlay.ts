@@ -19,10 +19,20 @@ export interface EdgeZoneBadge {
   text: string;
 }
 
+export interface ChartOverlayTradeLine {
+  price: number;
+  label: string;
+  color: string;
+  dashed?: boolean;
+}
+
 export interface ChartLayerToggles {
   showInternal: boolean;
   showSwing: boolean;
   showLabels: boolean;
+  mode?: 'FIRE_ZONE' | 'RED_SNIPER';
+  showEdgeMarkers?: boolean;
+  tradeLines?: ChartOverlayTradeLine[];
 }
 
 let lastDebugLogKey = '';
@@ -82,7 +92,7 @@ function drawLivePriceScaleTag(
 function resolveTimeCoordinate(
   chart: IChartApi,
   targetTime: number,
-  candles: Candle[]
+  candles: Array<Pick<Candle, 'time'>>
 ): number | null {
   const ts = chart.timeScale();
   const direct = ts.timeToCoordinate(targetTime as UTCTimestamp);
@@ -115,7 +125,7 @@ function drawStructureBreakSegment(
   brk: StructureBreakLine,
   plotWidth: number,
   plotHeight: number,
-  candles: Candle[]
+  candles: Array<Pick<Candle, 'time'>>
 ) {
   const y = series.priceToCoordinate(brk.pivotPrice);
   if (y === null || y < 10 || y > plotHeight - 10) return;
@@ -161,16 +171,18 @@ function drawStructureBreakSegment(
 }
 
 /**
- * Clean "007" Chart Overlay:
- * 1) Up to 4 zones (SELL near, SELL deep, BUY near, BUY deep):
- *    - Thin box [LO, HI] ($4 tall), full plot width (0 to plotWidth)
+ * Clean "007" Chart Overlay shared by both Fire Zone and Red Sniper:
+ * 1) Active zones:
+ *    - Thin box [LO, HI], full plot width (0 to plotWidth)
  *    - Border: 1.3px solid (#ff4d66 SELL, #2fe08a BUY)
  *    - Fill: 7% opacity
  *    - Label above top-left of each box, 10px bold mono, same color as box:
- *      "FIRE ZONE SELL 4115.13 - CRITICAL - near" / "... - deep"
+ *      Fire Zone: "FIRE ZONE SELL 4115.13 - CRITICAL - near" / "... - deep"
+ *      Red Sniper: "SELL · FRESH · PWR 82" (with % left & Nx and right-side power bar)
  *      with text shadow in chart background color (#08080b) and non-overlapping vertical shift (<14px).
- * 2) Subtle SWING BOS/CHoCH structure (max last 4 breaks, 60% opacity, 9px labels).
- * 3) Gold #f2b94b 1px solid horizontal line at live price with price tag on the right axis.
+ * 2) Subtle BOS/CHoCH structure (max last 4 breaks, 60% opacity, 9px labels) when enabled.
+ * 3) Optional open-trade lines (ENTRY / STOP / TRAIL / T1 / T2 / T3) & off-screen edge markers.
+ * 4) Gold #f2b94b 1px solid horizontal line at live price with price tag on the right axis.
  */
 export function drawFireZoneCanvasOverlay(
   canvas: HTMLCanvasElement,
@@ -179,7 +191,7 @@ export function drawFireZoneCanvasOverlay(
   modelOrEngine: FireZoneChartModel | FireZoneEngineResult,
   toggles: ChartLayerToggles,
   _pulsePhase: number,
-  candles: Candle[] = [],
+  candles: Array<Pick<Candle, 'time'>> = [],
   livePriceOverride?: number
 ) {
   const model = resolveModel(modelOrEngine);
@@ -187,6 +199,8 @@ export function drawFireZoneCanvasOverlay(
     typeof livePriceOverride === 'number' && livePriceOverride > 0
       ? livePriceOverride
       : model.currentPrice;
+
+  const isRedSniper = toggles.mode === 'RED_SNIPER';
 
   const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
   const priceScaleWidth = series.priceScale().width() || 62;
@@ -214,7 +228,7 @@ export function drawFireZoneCanvasOverlay(
   ctx.rect(0, 0, plotWidth, plotHeight);
   ctx.clip();
 
-  // 1. Subtle BOS / CHoCH structure (SWING only by default, max last 4 breaks, 60% opacity, 9px labels)
+  // 1. Subtle BOS / CHoCH structure (max last 4 breaks, 60% opacity, 9px labels)
   if (toggles.showInternal) {
     const internalBreaks = model.structureBreaks.internal.slice(-4);
     for (const brk of internalBreaks) {
@@ -244,6 +258,8 @@ export function drawFireZoneCanvasOverlay(
 
   const sortedZones = [...model.zones].sort((a, b) => b.anchor - a.anchor);
   const visibleZones: VisibleZoneRenderItem[] = [];
+  const offscreenTop: ChartModelZone[] = [];
+  const offscreenBottom: ChartModelZone[] = [];
 
   for (const z of sortedZones) {
     const yHi = series.priceToCoordinate(z.HI);
@@ -253,8 +269,14 @@ export function drawFireZoneCanvasOverlay(
     const rawTop = Math.min(yHi, yLo);
     const rawBot = Math.max(yHi, yLo);
 
-    // Zones outside the visible price range are simply not drawn (they come back when the scale reaches them)
-    if (rawBot < 0 || rawTop > plotHeight) continue;
+    if (rawBot < 0) {
+      offscreenTop.push(z);
+      continue;
+    }
+    if (rawTop > plotHeight) {
+      offscreenBottom.push(z);
+      continue;
+    }
 
     const yTop = Math.max(0, rawTop);
     const yBot = Math.min(plotHeight, rawBot);
@@ -264,7 +286,18 @@ export function drawFireZoneCanvasOverlay(
     const borderColor = isSell ? '#ff4d66' : '#2fe08a';
     const fillColor = isSell ? 'rgba(255, 77, 102, 0.07)' : 'rgba(47, 224, 138, 0.07)';
     const slotTag = z.type === 'NEAREST' ? 'near' : 'deep';
-    const labelText = `FIRE ZONE ${z.side} ${z.anchor.toFixed(2)} - ${z.strength} - ${slotTag}`;
+
+    let labelText: string;
+    if (z.customLabel) {
+      labelText = z.customLabel;
+    } else if (isRedSniper && typeof z.power === 'number') {
+      const st = z.statusLabel || z.state;
+      const pctPart = typeof z.pctLeft === 'number' ? ` · ${z.pctLeft}% left` : '';
+      const retPart = typeof z.retests === 'number' ? ` · ${z.retests}x` : '';
+      labelText = `${z.side} · ${st} · PWR ${z.power}${pctPart}${retPart}`;
+    } else {
+      labelText = `FIRE ZONE ${z.side} ${z.anchor.toFixed(2)} - ${z.strength} - ${slotTag}`;
+    }
 
     visibleZones.push({
       zone: z,
@@ -318,7 +351,12 @@ export function drawFireZoneCanvasOverlay(
     // 1.3px solid outline around [LO, HI] across full plot width
     ctx.strokeStyle = item.borderColor;
     ctx.lineWidth = 1.3;
-    ctx.strokeRect(0.65, item.rawTop, Math.max(1, plotWidth - 1.3), Math.max(2, item.rawBot - item.rawTop));
+    ctx.strokeRect(
+      0.65,
+      item.rawTop,
+      Math.max(1, plotWidth - 1.3),
+      Math.max(2, item.rawBot - item.rawTop)
+    );
     ctx.restore();
   }
 
@@ -354,7 +392,96 @@ export function drawFireZoneCanvasOverlay(
 
     ctx.fillStyle = item.borderColor;
     ctx.fillText(item.labelText, labelX, labelY);
+
+    // In Red Sniper mode, draw a compact power bar on the right side of the zone
+    if (isRedSniper && typeof item.zone.power === 'number') {
+      const pwrBarW = 30;
+      const pwrBarX = Math.max(labelX + 120, plotWidth - pwrBarW - 6);
+      const pwrBarY = Math.max(4, labelY - 8);
+      if (pwrBarX + pwrBarW <= plotWidth - 2) {
+        ctx.fillStyle = 'rgba(8, 8, 11, 0.85)';
+        ctx.fillRect(pwrBarX - 1, pwrBarY - 1, pwrBarW + 2, 7);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.16)';
+        ctx.fillRect(pwrBarX, pwrBarY, pwrBarW, 5);
+        ctx.fillStyle = item.borderColor;
+        const fillW = Math.round((Math.max(0, Math.min(100, item.zone.power)) / 100) * pwrBarW);
+        ctx.fillRect(pwrBarX, pwrBarY, fillW, 5);
+      }
+    }
+
     ctx.restore();
+  }
+
+  // Optional off-screen zone edge markers (Red Sniper)
+  if (toggles.showEdgeMarkers) {
+    const drawEdgeMarkers = (list: ChartModelZone[], isTop: boolean) => {
+      if (list.length === 0) return;
+      const sortedByPower = [...list].sort((a, b) => (b.power ?? b.score) - (a.power ?? a.score));
+      const topTwo = sortedByPower.slice(0, 2);
+      let cursorX = 8;
+      const markerY = isTop ? 14 : plotHeight - 5;
+
+      for (const z of topTwo) {
+        const arrow = isTop ? '▲' : '▼';
+        const pwrSuffix = typeof z.power === 'number' ? ` · PWR ${z.power}` : '';
+        const text = `${arrow} ${z.side} ${Math.round(z.LO)}-${Math.round(z.HI)}${pwrSuffix}`;
+        ctx.save();
+        ctx.font = `bold 9.5px 'JetBrains Mono', monospace`;
+        const tw = ctx.measureText(text).width + 10;
+        if (cursorX + tw > plotWidth - 4) {
+          ctx.restore();
+          break;
+        }
+        const color = z.side === 'SELL' ? '#ff4d66' : '#2fe08a';
+        ctx.fillStyle = 'rgba(8, 8, 11, 0.92)';
+        ctx.fillRect(cursorX, markerY - 10, tw, 13);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(cursorX, markerY - 10, tw, 13);
+        ctx.fillStyle = color;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillText(text, cursorX + 5, markerY);
+        ctx.restore();
+        cursorX += tw + 6;
+      }
+    };
+
+    drawEdgeMarkers(offscreenTop, true);
+    drawEdgeMarkers(offscreenBottom, false);
+  }
+
+  // Optional Open-Trade lines (ENTRY / STOP / TRAIL / T1 / T2 / T3)
+  if (Array.isArray(toggles.tradeLines) && toggles.tradeLines.length > 0) {
+    for (const tl of toggles.tradeLines) {
+      const y = series.priceToCoordinate(tl.price);
+      if (y === null || y < 4 || y > plotHeight - 4) continue;
+
+      ctx.save();
+      ctx.strokeStyle = tl.color;
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash(tl.dashed ? [4, 4] : []);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(plotWidth, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.font = `bold 9.5px 'JetBrains Mono', monospace`;
+      const tag = `${tl.label} ${tl.price.toFixed(2)}`;
+      const tw = ctx.measureText(tag).width + 8;
+      const tx = Math.max(6, plotWidth - tw - 4);
+      ctx.fillStyle = 'rgba(8, 8, 11, 0.9)';
+      ctx.fillRect(tx, y - 11, tw, 12);
+      ctx.strokeStyle = tl.color;
+      ctx.lineWidth = 0.8;
+      ctx.strokeRect(tx, y - 11, tw, 12);
+      ctx.fillStyle = tl.color;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(tag, tx + 4, y - 2);
+      ctx.restore();
+    }
   }
 
   // 3. Gold #f2b94b 1px solid horizontal line at the live price

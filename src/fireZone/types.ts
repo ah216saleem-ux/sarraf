@@ -158,13 +158,18 @@ export interface LevelWall {
   anchorBarIndex?: number;
   anchorTime?: number;
   allowedSide?: ZoneSide; // set when created from a flipped broken zone
+  departureAtr?: number;
+  maxPenetration?: number;
+  originWeight?: number;
+  hi?: number;
+  lo?: number;
 }
 
 export interface FireZone {
   id: string;
   side: ZoneSide;
-  top: number; // anchor + 2
-  bottom: number; // anchor - 2
+  top: number; // anchor + halfWidth (2 on H1)
+  bottom: number; // anchor - halfWidth (2 on H1)
   anchor: number; // level price
   levelId?: string;
   sources?: LevelSourceKind[];
@@ -180,11 +185,14 @@ export interface FireZone {
   deathTime?: number;
   barsAgoBroken?: number;
   touches: number;
-  score: number; // 007 level importance score (>=12 CRITICAL, >=8 STRONG, else MEDIUM)
+  score: number; // 007 level importance score (>=11 CRITICAL, >=8 STRONG, else MODERATE)
   label: ZoneStrengthLabel;
   type?: ZoneType; // NEAREST, SWING, DEEP
   isStar?: boolean;
   distance: number; // distance from current price (0 if inside zone)
+  departureAtr?: number;
+  maxPenetration?: number;
+  originWeight?: number;
 }
 
 export interface TradePlan {

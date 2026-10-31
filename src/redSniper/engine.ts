@@ -4,16 +4,81 @@ import {
   RedSniperTimeframe,
   RED_SNIPER_TIMEFRAMES,
 } from './feed';
+import {
+  Candle as FireZoneCandle,
+  FireZone,
+  ZoneSide as FireZoneSide,
+  ZoneStrengthLabel,
+  ZoneType,
+} from '../fireZone/types';
+import { computeAtr } from '../fireZone/engineCore';
+import {
+  ZONE_HALF,
+  buildRankedLevels,
+  selectZonesFromLevels,
+  extractZoneOriginCandidates,
+  evaluateOriginCandidate,
+  clusterAndBonusZoneCandidates,
+} from '../fireZone/levels';
+import {
+  isZoneBrokenByClosedCandle,
+  isZoneBrokenByLivePrice,
+} from '../fireZone/lifecycle';
+import {
+  DualStructureResult,
+  StructureBreakLine,
+  computeDualStructure,
+} from '../fireZone/structure';
 
-export type ZoneSide = 'BULL' | 'BEAR';
+export {
+  ZONE_HALF,
+  computeAtr,
+  buildRankedLevels,
+  selectZonesFromLevels,
+  extractZoneOriginCandidates,
+  evaluateOriginCandidate,
+  clusterAndBonusZoneCandidates,
+  isZoneBrokenByClosedCandle,
+  isZoneBrokenByLivePrice,
+  computeDualStructure,
+};
+
+export type ZoneSide = FireZoneSide; // 'BUY' | 'SELL'
 export type ZoneStatus = 'FRESH' | 'TESTED' | 'DEEP';
 export type StructureKind = 'BOS' | 'CHoCH';
 export type TfBias = 'BULL' | 'BEAR' | 'NEUT';
+export type ZoneWidthMode = 'FIXED_4' | 'ATR';
+
+export interface RedSniperSettings {
+  maxZonesPerTf: number; // 3-8, default 5
+  minPowerToTrade: number; // default 50
+  zoneWidthMode: ZoneWidthMode; // 'FIXED_4' | 'ATR', default 'ATR'
+  slBuffer: number; // $1-$3, default $1.5
+  trailTrigger: number; // $1-$2, default $2.0
+  trailStep: number; // $1-$3, default $1.5
+  riskPct: number; // default 1.5
+  showBosChoch: boolean; // default false
+  showFarZones: boolean; // default false
+}
+
+export const RED_SNIPER_SETTINGS_STORAGE_KEY = 'redSniperSettings';
+
+export const DEFAULT_RED_SNIPER_SETTINGS: RedSniperSettings = {
+  maxZonesPerTf: 5,
+  minPowerToTrade: 50,
+  zoneWidthMode: 'ATR',
+  slBuffer: 1.5,
+  trailTrigger: 2.0,
+  trailStep: 1.5,
+  riskPct: 1.5,
+  showBosChoch: false,
+  showFarZones: false,
+};
 
 export interface StructureEvent {
   id: string;
   tf: RedSniperTimeframe;
-  dir: ZoneSide;
+  dir: 'BULL' | 'BEAR';
   kind: StructureKind;
   pivotIdx: number;
   pivotTime: number;
@@ -25,25 +90,27 @@ export interface StructureEvent {
 export interface RedSniperZone {
   id: string;
   tf: RedSniperTimeframe;
-  side: ZoneSide;
-  kind: StructureKind;
-  obIdx: number;
-  obTime: number;
-  breakIdx: number;
-  breakTime: number;
-  top: number;
-  bottom: number;
+  side: ZoneSide; // 'BUY' | 'SELL'
+  slotType: ZoneType; // 'NEAREST' | 'DEEP'
+  strengthLabel: ZoneStrengthLabel; // 'CRITICAL' | 'STRONG' | 'MODERATE'
+  score: number;
+  anchor: number;
+  top: number; // HI
+  bottom: number; // LO
   width: number;
+  pivotIdx: number;
+  pivotTime: number;
+  pivotLevel: 5 | 15 | 20 | 50;
+  retests: number;
   touches: number;
   maxPenetration: number;
   pctLeft: number;
   status: ZoneStatus;
   power: number;
-  dispAtr: number;
-  volMult: number;
-  bodyEff: number;
-  hasFvg: boolean;
+  departureAtr: number;
+  volMult: number | null; // null if tickVolume is missing
   htfOk: boolean;
+  htfLabel: 'HTF ok' | 'HTF 1/2' | 'HTF against';
   breakdown: string;
   atr14: number;
 }
@@ -51,10 +118,12 @@ export interface RedSniperZone {
 export interface TimeframeAnalysis {
   tf: RedSniperTimeframe;
   atr14: number;
+  halfWidth: number;
   ema20: number | null;
   ema50: number | null;
   bias: TfBias;
   structures: StructureEvent[];
+  dualStructure: DualStructureResult;
   zones: RedSniperZone[];
 }
 
@@ -94,6 +163,8 @@ export interface OpenSniperTrade {
   tp1Hit: boolean;
   tp2Hit: boolean;
   beMoved: boolean;
+  trailRef?: number;
+  isTrailing?: boolean;
   realizedPnl: number;
   realizedR: number;
 }
@@ -108,7 +179,7 @@ export interface ClosedSniperTrade {
   exit: number;
   pnl: number;
   r: number;
-  result: 'TP3' | 'TP2+BE' | 'TP1+BE' | 'SL' | 'MANUAL';
+  result: 'TP3' | 'TP2+TRAIL' | 'TP2+BE' | 'TP1+TRAIL' | 'TP1+BE' | 'SL' | 'MANUAL';
   session: string;
   power: number;
   class: 'win' | 'be' | 'loss';
@@ -156,6 +227,104 @@ export const RED_SNIPER_DEMO_STORAGE_KEY = 'redSniperDemo';
 
 export function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
+}
+
+export function sanitizeRedSniperSettings(
+  raw?: Partial<RedSniperSettings> | null
+): RedSniperSettings {
+  if (!raw || typeof raw !== 'object') {
+    return { ...DEFAULT_RED_SNIPER_SETTINGS };
+  }
+  return {
+    maxZonesPerTf:
+      typeof raw.maxZonesPerTf === 'number' && Number.isFinite(raw.maxZonesPerTf)
+        ? clamp(Math.round(raw.maxZonesPerTf), 3, 8)
+        : DEFAULT_RED_SNIPER_SETTINGS.maxZonesPerTf,
+    minPowerToTrade:
+      typeof raw.minPowerToTrade === 'number' && Number.isFinite(raw.minPowerToTrade)
+        ? clamp(Math.round(raw.minPowerToTrade), 0, 99)
+        : DEFAULT_RED_SNIPER_SETTINGS.minPowerToTrade,
+    zoneWidthMode:
+      raw.zoneWidthMode === 'FIXED_4' || raw.zoneWidthMode === 'ATR'
+        ? raw.zoneWidthMode
+        : DEFAULT_RED_SNIPER_SETTINGS.zoneWidthMode,
+    slBuffer:
+      typeof raw.slBuffer === 'number' && Number.isFinite(raw.slBuffer)
+        ? Number(clamp(raw.slBuffer, 1.0, 3.0).toFixed(2))
+        : DEFAULT_RED_SNIPER_SETTINGS.slBuffer,
+    trailTrigger:
+      typeof raw.trailTrigger === 'number' && Number.isFinite(raw.trailTrigger)
+        ? Number(clamp(raw.trailTrigger, 1.0, 2.0).toFixed(2))
+        : DEFAULT_RED_SNIPER_SETTINGS.trailTrigger,
+    trailStep:
+      typeof raw.trailStep === 'number' && Number.isFinite(raw.trailStep)
+        ? Number(clamp(raw.trailStep, 1.0, 3.0).toFixed(2))
+        : DEFAULT_RED_SNIPER_SETTINGS.trailStep,
+    riskPct:
+      typeof raw.riskPct === 'number' && Number.isFinite(raw.riskPct)
+        ? Number(clamp(raw.riskPct, 0.25, 10.0).toFixed(2))
+        : DEFAULT_RED_SNIPER_SETTINGS.riskPct,
+    showBosChoch:
+      typeof raw.showBosChoch === 'boolean'
+        ? raw.showBosChoch
+        : DEFAULT_RED_SNIPER_SETTINGS.showBosChoch,
+    showFarZones:
+      typeof raw.showFarZones === 'boolean'
+        ? raw.showFarZones
+        : DEFAULT_RED_SNIPER_SETTINGS.showFarZones,
+  };
+}
+
+export function loadRedSniperSettings(): RedSniperSettings {
+  if (typeof window === 'undefined') {
+    return { ...DEFAULT_RED_SNIPER_SETTINGS };
+  }
+  try {
+    const raw = window.localStorage.getItem(RED_SNIPER_SETTINGS_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_RED_SNIPER_SETTINGS };
+    return sanitizeRedSniperSettings(JSON.parse(raw));
+  } catch {
+    return { ...DEFAULT_RED_SNIPER_SETTINGS };
+  }
+}
+
+export function saveRedSniperSettings(settings: RedSniperSettings): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      RED_SNIPER_SETTINGS_STORAGE_KEY,
+      JSON.stringify(sanitizeRedSniperSettings(settings))
+    );
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+/**
+ * Compute halfWidth for a timeframe:
+ * - For H1 ('1h') or when zoneWidthMode === 'FIXED_4': fixed ZONE_HALF = 2.0 ($4 wide).
+ * - For other timeframes when zoneWidthMode === 'ATR': clamp(0.5 * ATR14, 1.0, 8.0).
+ */
+export function computeTimeframeZoneHalfWidth(
+  tf: RedSniperTimeframe,
+  atr14: number,
+  zoneWidthMode: ZoneWidthMode = 'ATR'
+): number {
+  if (tf === '1h' || zoneWidthMode === 'FIXED_4') {
+    return ZONE_HALF;
+  }
+  return Number(clamp(0.5 * Math.max(0.5, atr14), 1.0, 8.0).toFixed(2));
+}
+
+export function toFireZoneCandles(bars: Candle[]): FireZoneCandle[] {
+  return bars.map((b) => ({
+    time: b.time,
+    open: b.open,
+    high: b.high,
+    low: b.low,
+    close: b.close,
+    volume: Number.isFinite(b.tickVolume) ? b.tickVolume : 0,
+  }));
 }
 
 export function computeEmaSeries(closes: number[], period: number): number[] {
@@ -266,401 +435,361 @@ export function computeMultiTimeframeVerdict(barsMap: RedSniperBarsMap): Verdict
   };
 }
 
-interface PivotPoint {
-  idx: number;
-  time: number;
-  price: number;
-  broken: boolean;
-}
-
 /**
- * Check if index `p` is a 5-bar left / 5-bar right pivot high or pivot low.
+ * Compute relative tickVolume on the pivot candle and the 3 candles that follow vs the 20-bar avg.
+ * Returns null if tickVolume is missing for any bar in the pivot window or if the 20-bar avg has no valid volume.
+ * Never fakes a number.
  */
-function isPivotHigh5(bars: Candle[], p: number): boolean {
-  if (p < 5 || p + 5 >= bars.length) return false;
-  const v = bars[p].high;
-  for (let i = p - 5; i < p; i++) {
-    if (bars[i].high > v) return false;
-  }
-  for (let i = p + 1; i <= p + 5; i++) {
-    if (bars[i].high >= v) return false;
-  }
-  return true;
-}
+export function computePivotRelativeTickVolume(
+  closedBars: Array<Pick<Candle, 'tickVolume'>>,
+  pivotIndex: number
+): number | null {
+  if (!closedBars || closedBars.length === 0) return null;
+  if (pivotIndex < 0 || pivotIndex >= closedBars.length) return null;
 
-function isPivotLow5(bars: Candle[], p: number): boolean {
-  if (p < 5 || p + 5 >= bars.length) return false;
-  const v = bars[p].low;
-  for (let i = p - 5; i < p; i++) {
-    if (bars[i].low < v) return false;
+  const endPivotWindow = Math.min(closedBars.length - 1, pivotIndex + 3);
+  let pivotVolSum = 0;
+  let pivotVolCount = 0;
+
+  for (let i = pivotIndex; i <= endPivotWindow; i++) {
+    const tv = closedBars[i]?.tickVolume;
+    if (typeof tv !== 'number' || !Number.isFinite(tv) || tv <= 0) {
+      // Missing tickVolume for a bar in the pivot + 3 candles window -> return null
+      return null;
+    }
+    pivotVolSum += tv;
+    pivotVolCount++;
   }
-  for (let i = p + 1; i <= p + 5; i++) {
-    if (bars[i].low <= v) return false;
+
+  if (pivotVolCount === 0) return null;
+  const pivotAvgVol = pivotVolSum / pivotVolCount;
+
+  const baseStart = Math.max(0, pivotIndex - 20);
+  const baseEnd = pivotIndex - 1;
+  let baseSum = 0;
+  let baseCount = 0;
+
+  for (let j = baseStart; j <= baseEnd; j++) {
+    const tv = closedBars[j]?.tickVolume;
+    if (typeof tv === 'number' && Number.isFinite(tv) && tv > 0) {
+      baseSum += tv;
+      baseCount++;
+    }
   }
-  return true;
+
+  if (baseCount === 0 || baseSum <= 0) {
+    return null;
+  }
+
+  const avg20 = baseSum / baseCount;
+  return Number((pivotAvgVol / avg20).toFixed(1));
 }
 
 /**
- * Analyze a single timeframe:
- * 1) 5-bar left/right pivots + BOS / CHoCH breaks
- * 2) Order blocks from break legs (min thickness 0.3)
- * 3) Mitigation (candle closes through far edge), touches, penetration, overlap pruning (keep older), top 3 per side
- * 4) POWER 0-99 calculation from real inputs + breakdown string
+ * 2) POWER 0-99 (real & explainable):
+ * power = round(100 * (
+ *   0.45 * fireZoneScoreNormalized(score/14 capped 1) +
+ *   0.25 * relativeTickVolume(cap 2.5x of the 20-bar avg, measured on the pivot candle and the 3 candles that follow) +
+ *   0.15 * freshness +
+ *   0.15 * higherTimeframeAlignment(1H and 4H EMA20/EMA50 direction agrees with the zone side)
+ * ))
+ * If tickVolume is missing for a bar, drop that term (0.25) and re-normalize the remaining weights
+ * (0.45 + 0.15 + 0.15 = 0.75) - never fake a number; show "--" for volume in the breakdown.
+ * Breakdown format: "score 9 STRONG · retests 0 · vol 1.8x · dep 2.4 ATR · HTF ok" (or "vol --" if missing).
+ */
+export function computeZonePowerAndBreakdown(params: {
+  side: ZoneSide;
+  score: number;
+  strengthLabel: ZoneStrengthLabel;
+  retests: number;
+  departureAtr: number;
+  volMult: number | null;
+  bias1h: TfBias;
+  bias4h: TfBias;
+}): {
+  power: number;
+  htfOk: boolean;
+  htfLabel: 'HTF ok' | 'HTF 1/2' | 'HTF against';
+  breakdown: string;
+} {
+  const {
+    side,
+    score,
+    strengthLabel,
+    retests,
+    departureAtr,
+    volMult,
+    bias1h,
+    bias4h,
+  } = params;
+
+  const scoreNorm = clamp(score / 14, 0, 1);
+  const freshnessNorm = retests <= 0 ? 1.0 : retests === 1 ? 0.5 : 0.0;
+
+  const targetBias: TfBias = side === 'SELL' ? 'BEAR' : 'BULL';
+  const match1h = bias1h === targetBias;
+  const match4h = bias4h === targetBias;
+  const htfNorm = (match1h ? 0.5 : 0) + (match4h ? 0.5 : 0);
+  const htfOk = match1h && match4h;
+  const htfLabel: 'HTF ok' | 'HTF 1/2' | 'HTF against' = htfOk
+    ? 'HTF ok'
+    : match1h || match4h
+    ? 'HTF 1/2'
+    : 'HTF against';
+
+  let weighted01: number;
+  if (typeof volMult === 'number' && Number.isFinite(volMult) && volMult > 0) {
+    const volNorm = clamp(volMult / 2.5, 0, 1);
+    weighted01 =
+      0.45 * scoreNorm +
+      0.25 * volNorm +
+      0.15 * freshnessNorm +
+      0.15 * htfNorm;
+  } else {
+    // Missing tickVolume: drop 0.25 term and re-normalize remaining weights (0.45 + 0.15 + 0.15 = 0.75)
+    weighted01 =
+      (0.45 * scoreNorm + 0.15 * freshnessNorm + 0.15 * htfNorm) / 0.75;
+  }
+
+  const power = clamp(Math.round(100 * weighted01), 0, 99);
+  const volPart =
+    typeof volMult === 'number' && Number.isFinite(volMult) && volMult > 0
+      ? `vol ${volMult.toFixed(1)}x`
+      : 'vol --';
+  const depVal = Number.isFinite(departureAtr) ? departureAtr : 0;
+  const breakdown = `score ${score} ${strengthLabel} · retests ${retests} · ${volPart} · dep ${depVal.toFixed(
+    1
+  )} ATR · ${htfLabel}`;
+
+  return {
+    power,
+    htfOk,
+    htfLabel,
+    breakdown,
+  };
+}
+
+function mapStructureBreaksToEvents(
+  tf: RedSniperTimeframe,
+  breaks: StructureBreakLine[]
+): StructureEvent[] {
+  return breaks.map((b) => ({
+    id: `${tf}-${b.id}`,
+    tf,
+    dir: b.direction === 1 ? 'BULL' : 'BEAR',
+    kind: b.label === 'BOS' ? 'BOS' : 'CHoCH',
+    pivotIdx: b.pivotIndex,
+    pivotTime: b.pivotTime,
+    price: b.pivotPrice,
+    breakIdx: b.breakIndex,
+    breakTime: b.breakTime,
+  }));
+}
+
+/**
+ * Analyze a single timeframe by directly reusing src/fireZone (levels.ts, engineCore.ts, lifecycle.ts, structure.ts):
+ * - Runs on that timeframe's closed candles (bars.length >= 2 ? bars.slice(0, -1) : bars), matching runFireZoneEngine.
+ * - Uses livePrice (or last bar close) for live provisional break (> 0.5*ATR) and valid-side selection.
+ * - Keeps up to settings.maxZonesPerTf (default 5, allowed 3-8): nearest valid zones first, then highest-score deeper zones.
  */
 export function analyzeTimeframe(
   tf: RedSniperTimeframe,
   bars: Candle[],
   bias1h: TfBias,
-  bias4h: TfBias
+  bias4h: TfBias,
+  livePriceOverride?: number | null,
+  settings: RedSniperSettings = DEFAULT_RED_SNIPER_SETTINGS
 ): TimeframeAnalysis {
-  const atrSeries = computeAtr14Series(bars);
-  const latestAtr = atrSeries.length > 0 ? atrSeries[atrSeries.length - 1] : 2.5;
   const { bias, ema20, ema50 } = computeTfBias(bars);
 
-  if (!bars || bars.length < 15) {
+  if (!bars || bars.length === 0) {
+    const emptyDual = computeDualStructure([]);
     return {
       tf,
-      atr14: latestAtr,
+      atr14: 2.0,
+      halfWidth: tf === '1h' ? ZONE_HALF : 2.0,
       ema20,
       ema50,
       bias,
       structures: [],
+      dualStructure: emptyDual,
       zones: [],
     };
   }
 
-  let lastPivotHigh: PivotPoint | null = null;
-  let lastPivotLow: PivotPoint | null = null;
-  let trend: 1 | -1 | 0 = 0;
+  const closedBars = bars.length >= 2 ? bars.slice(0, -1) : bars;
+  const closedFireCandles = toFireZoneCandles(closedBars);
+  const atr14 = computeAtr(closedFireCandles, 14);
+  const halfWidth = computeTimeframeZoneHalfWidth(tf, atr14, settings.zoneWidthMode);
 
-  const structures: StructureEvent[] = [];
-  const rawCandidateZones: RedSniperZone[] = [];
+  const closedRefBar = closedBars[closedBars.length - 1];
+  const refPrice = closedRefBar.close;
+  const livePrice =
+    typeof livePriceOverride === 'number' &&
+    Number.isFinite(livePriceOverride) &&
+    livePriceOverride > 0
+      ? livePriceOverride
+      : bars[bars.length - 1].close;
 
-  for (let bIdx = 10; bIdx < bars.length; bIdx++) {
-    // At bar `bIdx`, pivot candidate at `candIdx = bIdx - 5` has 5 bars to its right confirmed
-    const candIdx = bIdx - 5;
-    if (isPivotHigh5(bars, candIdx)) {
-      lastPivotHigh = {
-        idx: candIdx,
-        time: bars[candIdx].time,
-        price: bars[candIdx].high,
-        broken: false,
-      };
+  const dualStructure = computeDualStructure(closedFireCandles);
+  const structures = mapStructureBreaksToEvents(tf, [
+    ...dualStructure.internal.breaks,
+    ...dualStructure.swing.breaks,
+  ]).slice(-12);
+
+  const brokenIds = new Set<string>();
+
+  let allRankedLevels = buildRankedLevels(
+    closedFireCandles,
+    [],
+    [],
+    refPrice,
+    [],
+    atr14,
+    [],
+    brokenIds,
+    halfWidth
+  );
+
+  let selection = selectZonesFromLevels(
+    allRankedLevels,
+    refPrice,
+    atr14,
+    closedRefBar.time,
+    closedFireCandles.length - 1,
+    undefined,
+    closedFireCandles,
+    [],
+    livePrice,
+    brokenIds,
+    [],
+    {
+      halfWidth,
+      maxZones: settings.maxZonesPerTf,
     }
-    if (isPivotLow5(bars, candIdx)) {
-      lastPivotLow = {
-        idx: candIdx,
-        time: bars[candIdx].time,
-        price: bars[candIdx].low,
-        broken: false,
-      };
-    }
+  );
 
-    const bar = bars[bIdx];
-
-    // Check Bullish break of last unbroken pivot high
-    if (lastPivotHigh && !lastPivotHigh.broken && bar.close > lastPivotHigh.price) {
-      const kind: StructureKind = trend === -1 ? 'CHoCH' : 'BOS';
-      trend = 1;
-      lastPivotHigh.broken = true;
-
-      const structEvent: StructureEvent = {
-        id: `${tf}-BULL-${lastPivotHigh.time}-${bar.time}`,
-        tf,
-        dir: 'BULL',
-        kind,
-        pivotIdx: lastPivotHigh.idx,
-        pivotTime: lastPivotHigh.time,
-        price: lastPivotHigh.price,
-        breakIdx: bIdx,
-        breakTime: bar.time,
-      };
-      structures.push(structEvent);
-
-      // Order block: lowest-low candle between pivotIdx and breakIdx
-      let obIdx = lastPivotHigh.idx;
-      for (let k = lastPivotHigh.idx; k <= bIdx; k++) {
-        if (bars[k].low < bars[obIdx].low) {
-          obIdx = k;
-        }
-      }
-      const obBar = bars[obIdx];
-      const hl2 = (obBar.high + obBar.low) / 2;
-      const bottom = Number(obBar.low.toFixed(2));
-      const top = Number(Math.max(hl2, Math.min(obBar.open, obBar.close)).toFixed(2));
-      const width = Number((top - bottom).toFixed(2));
-
-      if (width >= 0.3) {
-        const zone = evaluateCandidateZone(
-          tf,
-          'BULL',
-          kind,
-          obIdx,
-          bIdx,
-          top,
-          bottom,
-          bars,
-          atrSeries,
-          bias1h,
-          bias4h
-        );
-        if (zone) rawCandidateZones.push(zone);
-      }
-    }
-
-    // Check Bearish break of last unbroken pivot low
-    if (lastPivotLow && !lastPivotLow.broken && bar.close < lastPivotLow.price) {
-      const kind: StructureKind = trend === 1 ? 'CHoCH' : 'BOS';
-      trend = -1;
-      lastPivotLow.broken = true;
-
-      const structEvent: StructureEvent = {
-        id: `${tf}-BEAR-${lastPivotLow.time}-${bar.time}`,
-        tf,
-        dir: 'BEAR',
-        kind,
-        pivotIdx: lastPivotLow.idx,
-        pivotTime: lastPivotLow.time,
-        price: lastPivotLow.price,
-        breakIdx: bIdx,
-        breakTime: bar.time,
-      };
-      structures.push(structEvent);
-
-      // Order block: highest-high candle between pivotIdx and breakIdx
-      let obIdx = lastPivotLow.idx;
-      for (let k = lastPivotLow.idx; k <= bIdx; k++) {
-        if (bars[k].high > bars[obIdx].high) {
-          obIdx = k;
-        }
-      }
-      const obBar = bars[obIdx];
-      const hl2 = (obBar.high + obBar.low) / 2;
-      const bottom = Number(Math.min(hl2, Math.max(obBar.open, obBar.close)).toFixed(2));
-      const top = Number(obBar.high.toFixed(2));
-      const width = Number((top - bottom).toFixed(2));
-
-      if (width >= 0.3) {
-        const zone = evaluateCandidateZone(
-          tf,
-          'BEAR',
-          kind,
-          obIdx,
-          bIdx,
-          top,
-          bottom,
-          bars,
-          atrSeries,
-          bias1h,
-          bias4h
-        );
-        if (zone) rawCandidateZones.push(zone);
-      }
+  // Live provisional break check (> 0.5*ATR beyond far edge): immediately replace if broken
+  let anyLiveBreak = false;
+  for (const z of [...selection.buyZones, ...selection.sellZones]) {
+    const check = isZoneBrokenByLivePrice(z.side, z.bottom, z.top, livePrice, atr14);
+    if (check.broken && !brokenIds.has(z.id)) {
+      anyLiveBreak = true;
+      brokenIds.add(z.id);
     }
   }
 
-  // Hide overlapping same-side zones (keep the older) and keep top 3 per side per timeframe
-  const pruneSideZones = (side: ZoneSide): RedSniperZone[] => {
-    const sideZones = rawCandidateZones
-      .filter((z) => z.side === side)
-      .sort((a, b) => a.obTime - b.obTime); // oldest first
-
-    const nonOverlapping: RedSniperZone[] = [];
-    for (const candidate of sideZones) {
-      const overlapsOlder = nonOverlapping.some(
-        (older) => Math.max(older.bottom, candidate.bottom) <= Math.min(older.top, candidate.top)
-      );
-      if (!overlapsOlder) {
-        nonOverlapping.push(candidate);
+  if (anyLiveBreak) {
+    allRankedLevels = buildRankedLevels(
+      closedFireCandles,
+      [],
+      [],
+      livePrice,
+      [],
+      atr14,
+      [],
+      brokenIds,
+      halfWidth
+    );
+    selection = selectZonesFromLevels(
+      allRankedLevels,
+      livePrice,
+      atr14,
+      closedRefBar.time,
+      closedFireCandles.length - 1,
+      undefined,
+      closedFireCandles,
+      [],
+      livePrice,
+      brokenIds,
+      [],
+      {
+        halfWidth,
+        maxZones: settings.maxZonesPerTf,
       }
-    }
+    );
+  }
 
-    // Keep top 3 by power (then recency)
-    return nonOverlapping
-      .sort((a, b) => b.power - a.power || b.obTime - a.obTime)
-      .slice(0, 3);
+  const mapFireZoneToRedSniperZone = (fz: FireZone): RedSniperZone => {
+    const retests = fz.touches;
+    const maxPenetration = clamp(fz.maxPenetration ?? 0, 0, 1);
+    const pctLeft =
+      retests === 0 ? 100 : Math.round(clamp(100 * (1 - maxPenetration), 0, 100));
+    const status: ZoneStatus =
+      retests === 0
+        ? 'FRESH'
+        : retests > 2 || maxPenetration > 0.5
+        ? 'DEEP'
+        : 'TESTED';
+
+    // Only compute volume on real pivot bars (not fallback EXT150)
+    const isFallbackExtreme = fz.score === 3 && fz.touches === 0 && fz.departureAtr === 0;
+    const volMult = isFallbackExtreme
+      ? null
+      : computePivotRelativeTickVolume(closedBars, fz.pivotIndex);
+
+    const { power, htfOk, htfLabel, breakdown } = computeZonePowerAndBreakdown({
+      side: fz.side,
+      score: fz.score,
+      strengthLabel: fz.label,
+      retests,
+      departureAtr: fz.departureAtr ?? 0,
+      volMult,
+      bias1h,
+      bias4h,
+    });
+
+    return {
+      id: `${tf}-${fz.id}`,
+      tf,
+      side: fz.side,
+      slotType: fz.type || 'NEAREST',
+      strengthLabel: fz.label,
+      score: fz.score,
+      anchor: fz.anchor,
+      top: fz.top,
+      bottom: fz.bottom,
+      width: Number((fz.top - fz.bottom).toFixed(2)),
+      pivotIdx: fz.pivotIndex,
+      pivotTime: fz.pivotTime,
+      pivotLevel: fz.pivotLevel,
+      retests,
+      touches: retests,
+      maxPenetration,
+      pctLeft,
+      status,
+      power,
+      departureAtr: fz.departureAtr ?? 0,
+      volMult,
+      htfOk,
+      htfLabel,
+      breakdown,
+      atr14,
+    };
   };
 
-  const finalBull = pruneSideZones('BULL');
-  const finalBear = pruneSideZones('BEAR');
+  const combined = [...selection.sellZones, ...selection.buyZones]
+    .map(mapFireZoneToRedSniperZone)
+    .sort((a, b) => b.anchor - a.anchor);
 
   return {
     tf,
-    atr14: latestAtr,
+    atr14,
+    halfWidth,
     ema20,
     ema50,
     bias,
-    structures: structures.slice(-18),
-    zones: [...finalBear, ...finalBull].sort((a, b) => b.top - a.top),
+    structures,
+    dualStructure,
+    zones: combined,
   };
 }
 
-function evaluateCandidateZone(
-  tf: RedSniperTimeframe,
-  side: ZoneSide,
-  kind: StructureKind,
-  obIdx: number,
-  breakIdx: number,
-  top: number,
-  bottom: number,
-  bars: Candle[],
-  atrSeries: number[],
-  bias1h: TfBias,
-  bias4h: TfBias
-): RedSniperZone | null {
-  const width = top - bottom;
-  if (width < 0.3) return null;
-
-  // Check mitigation & touches after breakIdx
-  let touches = 0;
-  let maxPenetration = 0;
-  let inTouchExcursion = false;
-
-  for (let m = breakIdx + 1; m < bars.length; m++) {
-    const c = bars[m];
-    if (side === 'BULL') {
-      // Bull zone dies when a candle CLOSES below bottom
-      if (c.close < bottom) {
-        return null;
-      }
-      if (c.low <= top) {
-        if (!inTouchExcursion) {
-          touches += 1;
-          inTouchExcursion = true;
-        }
-        const pen = clamp((top - c.low) / width, 0, 1);
-        if (pen > maxPenetration) maxPenetration = pen;
-      } else {
-        inTouchExcursion = false;
-      }
-    } else {
-      // Bear zone dies when a candle CLOSES above top
-      if (c.close > top) {
-        return null;
-      }
-      if (c.high >= bottom) {
-        if (!inTouchExcursion) {
-          touches += 1;
-          inTouchExcursion = true;
-        }
-        const pen = clamp((c.high - bottom) / width, 0, 1);
-        if (pen > maxPenetration) maxPenetration = pen;
-      } else {
-        inTouchExcursion = false;
-      }
-    }
-  }
-
-  const pctLeft = touches === 0 ? 100 : Math.round(clamp(100 * (1 - maxPenetration), 0, 100));
-  const status: ZoneStatus =
-    touches === 0 ? 'FRESH' : pctLeft >= 60 ? 'TESTED' : 'DEEP';
-
-  // POWER 0-99 from real inputs:
-  // 1) Displacement 30% (extreme of the leg minus zone edge, divided by ATR14, capped at 3 ATR)
-  const atrAtBreak = Math.max(0.2, atrSeries[breakIdx] || atrSeries[atrSeries.length - 1] || 2.0);
-  const legEnd = Math.min(bars.length - 1, breakIdx + 8);
-  let legExtreme = side === 'BULL' ? top : bottom;
-  for (let j = obIdx; j <= legEnd; j++) {
-    if (side === 'BULL' && bars[j].high > legExtreme) legExtreme = bars[j].high;
-    if (side === 'BEAR' && bars[j].low < legExtreme) legExtreme = bars[j].low;
-  }
-  const dispPoints = side === 'BULL' ? Math.max(0, legExtreme - top) : Math.max(0, bottom - legExtreme);
-  const dispAtr = Number((dispPoints / atrAtBreak).toFixed(1));
-  const dispScore = clamp(dispAtr / 3.0, 0, 1) * 30;
-
-  // 2) Relative tick volume 25% (zone candle tickVolume / avg of previous 20 candles, capped 2.5x)
-  const volStart = Math.max(0, obIdx - 20);
-  let volSum = 0;
-  let volCount = 0;
-  for (let j = volStart; j < obIdx; j++) {
-    if (bars[j].tickVolume > 0) {
-      volSum += bars[j].tickVolume;
-      volCount += 1;
-    }
-  }
-  const avgVol20 = volCount > 0 ? volSum / volCount : bars[obIdx].tickVolume || 1;
-  const zoneCandleVol = Math.max(bars[obIdx].tickVolume, bars[breakIdx].tickVolume);
-  const volMult = avgVol20 > 0 ? Number((zoneCandleVol / avgVol20).toFixed(1)) : 1.0;
-  const volScore = clamp(volMult / 2.5, 0, 1) * 25;
-
-  // 3) Freshness 15% (pctLeft)
-  const freshScore = (pctLeft / 100) * 15;
-
-  // 4) Body efficiency 10% (break candle body/range)
-  const breakBar = bars[breakIdx];
-  const breakRange = Math.max(0.01, breakBar.high - breakBar.low);
-  const bodyEff = clamp(Math.abs(breakBar.close - breakBar.open) / breakRange, 0, 1);
-  const bodyScore = bodyEff * 10;
-
-  // 5) FVG 10% (gap present around break)
-  let hasFvg = false;
-  const fvgStart = Math.max(1, obIdx);
-  const fvgEnd = Math.min(bars.length - 2, breakIdx + 1);
-  for (let j = fvgStart; j <= fvgEnd; j++) {
-    if (side === 'BULL' && bars[j + 1].low > bars[j - 1].high) {
-      hasFvg = true;
-      break;
-    }
-    if (side === 'BEAR' && bars[j + 1].high < bars[j - 1].low) {
-      hasFvg = true;
-      break;
-    }
-  }
-  const fvgScore = hasFvg ? 10 : 0;
-
-  // 6) HTF alignment 10% (EMA20 vs EMA50 and price vs EMA50 on 1H and 4H agree with zone direction)
-  const targetBias: TfBias = side === 'BULL' ? 'BULL' : 'BEAR';
-  const match1h = bias1h === targetBias;
-  const match4h = bias4h === targetBias;
-  const htfScore = (match1h ? 5 : 0) + (match4h ? 5 : 0);
-  const htfOk = match1h && match4h;
-
-  let rawPower = dispScore + volScore + freshScore + bodyScore + fvgScore + htfScore;
-  if (kind === 'CHoCH') {
-    rawPower *= 1.06;
-  }
-  const power = clamp(Math.round(rawPower), 0, 99);
-
-  const parts: string[] = [
-    kind,
-    `vol ${volMult.toFixed(1)}x`,
-    `disp ${dispAtr.toFixed(1)} ATR`,
-  ];
-  if (hasFvg) parts.push('FVG');
-  if (htfOk) parts.push('HTF ok');
-  else if (match1h || match4h) parts.push('HTF partial');
-
-  const latestTfAtr =
-    atrSeries.length > 0 ? atrSeries[atrSeries.length - 1] : atrAtBreak;
-
-  return {
-    id: `${tf}-${side}-${bars[obIdx].time}`,
-    tf,
-    side,
-    kind,
-    obIdx,
-    obTime: bars[obIdx].time,
-    breakIdx,
-    breakTime: bars[breakIdx].time,
-    top,
-    bottom,
-    width: Number(width.toFixed(2)),
-    touches,
-    maxPenetration,
-    pctLeft,
-    status,
-    power,
-    dispAtr,
-    volMult,
-    bodyEff: Number(bodyEff.toFixed(2)),
-    hasFvg,
-    htfOk,
-    breakdown: parts.join(' · '),
-    atr14: latestTfAtr,
-  };
-}
-
-export function analyzeAllTimeframes(barsMap: RedSniperBarsMap): {
+export function analyzeAllTimeframes(
+  barsMap: RedSniperBarsMap,
+  livePriceOverride?: number | null,
+  settings: RedSniperSettings = DEFAULT_RED_SNIPER_SETTINGS
+): {
   byTf: Record<RedSniperTimeframe, TimeframeAnalysis>;
   allZones: RedSniperZone[];
   verdict: VerdictResult;
@@ -674,7 +803,9 @@ export function analyzeAllTimeframes(barsMap: RedSniperBarsMap): {
       tf,
       barsMap[tf] || [],
       verdict.bias1h,
-      verdict.bias4h
+      verdict.bias4h,
+      livePriceOverride,
+      settings
     );
     byTf[tf] = analysis;
     allZones.push(...analysis.zones);
@@ -684,7 +815,7 @@ export function analyzeAllTimeframes(barsMap: RedSniperBarsMap): {
 }
 
 /**
- * Find the nearest opposite-side zone edge if it lies between 2.5R and 6R from entry; otherwise return 3R.
+ * Find the nearest opposite-side Fire Zone edge if it lies between 2.5R and 6R from entry; otherwise return 3R.
  */
 export function computeTp3Target(
   side: 'BUY' | 'SELL',
@@ -696,13 +827,12 @@ export function computeTp3Target(
   const minTargetDist = 2.5 * riskPoints;
   const maxTargetDist = 6.0 * riskPoints;
 
-  const oppSide: ZoneSide = side === 'BUY' ? 'BEAR' : 'BULL';
+  const oppSide: ZoneSide = side === 'BUY' ? 'SELL' : 'BUY';
   const candidates = allZones.filter((z) => z.side === oppSide);
 
   let bestEdge: number | null = null;
   let bestDist = Infinity;
 
-  // Prefer same timeframe or higher timeframe opposite zones first
   for (const z of candidates) {
     const edge = side === 'BUY' ? z.bottom : z.top;
     const dist = side === 'BUY' ? edge - entry : entry - edge;
@@ -727,7 +857,11 @@ export function computeTp3Target(
 }
 
 /**
- * Build trade parameters for a zone at a given entry price and balance.
+ * 5) TRADE MANAGEMENT:
+ * - SL = far edge of zone -/+ slBuffer (minimum total risk $2). Do NOT use the Fire Zone $12 stop.
+ * - TP1 = 1R (close 50%, move SL to entry = break-even, hide the SL line)
+ * - TP2 = 2R (close 30%)
+ * - TP3 = nearest opposite Fire Zone edge between 2.5R and 6R, else 3R (close 20%).
  */
 export function buildZoneTradeParameters(
   zone: RedSniperZone,
@@ -735,15 +869,17 @@ export function buildZoneTradeParameters(
   balance: number,
   allZones: RedSniperZone[],
   bias1h: TfBias,
-  bias4h: TfBias
+  bias4h: TfBias,
+  settings: RedSniperSettings = DEFAULT_RED_SNIPER_SETTINGS
 ): PendingTradePlan {
-  const side: 'BUY' | 'SELL' = zone.side === 'BULL' ? 'BUY' : 'SELL';
-  const buffer = clamp(0.3 * zone.atr14, 1.0, 2.0);
+  const side: 'BUY' | 'SELL' = zone.side;
+  const slBuffer = clamp(settings.slBuffer ?? 1.5, 1.0, 3.0);
+  const riskPct = clamp(settings.riskPct ?? 1.5, 0.25, 10.0);
 
   let sl =
     side === 'BUY'
-      ? Number((zone.bottom - buffer).toFixed(2))
-      : Number((zone.top + buffer).toFixed(2));
+      ? Number((zone.bottom - slBuffer).toFixed(2))
+      : Number((zone.top + slBuffer).toFixed(2));
 
   let riskPoints = side === 'BUY' ? entryPrice - sl : sl - entryPrice;
   if (riskPoints < 2.0) {
@@ -756,8 +892,7 @@ export function buildZoneTradeParameters(
     riskPoints = Number(riskPoints.toFixed(2));
   }
 
-  // Risk 1.5% of balance per trade, 1 lot = 100 oz -> lots = balance*0.015/(riskPoints*100), min 0.01
-  const rawLots = (balance * 0.015) / (riskPoints * 100);
+  const rawLots = (balance * (riskPct / 100)) / (riskPoints * 100);
   const lots = Math.max(0.01, Number(rawLots.toFixed(2)));
 
   const tp1 =
@@ -801,6 +936,70 @@ export function buildZoneTradeParameters(
     distance,
     insideZone,
     htfBlocked,
+  };
+}
+
+/**
+ * Pure helper to step a trade's trailing stop after TP1:
+ * Every time price moves another trailTrigger ($2 by default) beyond the last trail reference
+ * (starting from TP1 price once TP1 is hit), move SL forward by trailStep ($1.5 by default)
+ * in the profit direction. SL only moves forward, never backward, and never closer than $1 to live price.
+ */
+export function advanceTrailingStopAfterTp1(
+  trade: OpenSniperTrade,
+  livePrice: number,
+  trailTrigger: number = 2.0,
+  trailStep: number = 1.5
+): { updatedTrade: OpenSniperTrade; moved: boolean } {
+  if (!trade.tp1Hit || !Number.isFinite(livePrice) || livePrice <= 0) {
+    return { updatedTrade: trade, moved: false };
+  }
+
+  const trigger = Math.max(0.5, trailTrigger);
+  const step = Math.max(0.25, trailStep);
+  const isBuy = trade.side === 'BUY';
+
+  let sl = trade.sl;
+  let ref = typeof trade.trailRef === 'number' ? trade.trailRef : trade.tp1;
+  let moved = false;
+
+  if (isBuy) {
+    while (livePrice - ref >= trigger - 1e-9) {
+      ref = Number((ref + trigger).toFixed(2));
+      const candidateSl = Number((sl + step).toFixed(2));
+      const maxAllowedSl = Number((livePrice - 1.0).toFixed(2));
+      const nextSl = Math.min(candidateSl, maxAllowedSl);
+      if (nextSl > sl + 1e-6) {
+        sl = nextSl;
+        moved = true;
+      }
+    }
+  } else {
+    while (ref - livePrice >= trigger - 1e-9) {
+      ref = Number((ref - trigger).toFixed(2));
+      const candidateSl = Number((sl - step).toFixed(2));
+      const minAllowedSl = Number((livePrice + 1.0).toFixed(2));
+      const nextSl = Math.max(candidateSl, minAllowedSl);
+      if (nextSl < sl - 1e-6) {
+        sl = nextSl;
+        moved = true;
+      }
+    }
+  }
+
+  const isTrailing = isBuy ? sl > trade.entry + 1e-6 : sl < trade.entry - 1e-6;
+  if (!moved && ref === trade.trailRef && isTrailing === Boolean(trade.isTrailing)) {
+    return { updatedTrade: trade, moved: false };
+  }
+
+  return {
+    updatedTrade: {
+      ...trade,
+      sl,
+      trailRef: ref,
+      isTrailing,
+    },
+    moved,
   };
 }
 
@@ -910,7 +1109,8 @@ export function computeBotStatusLine(
   allZones: RedSniperZone[],
   bias1h: TfBias,
   bias4h: TfBias,
-  lastEnteredText?: string | null
+  lastEnteredText?: string | null,
+  settings: RedSniperSettings = DEFAULT_RED_SNIPER_SETTINGS
 ): string {
   if (livePrice === null || !Number.isFinite(livePrice) || livePrice <= 0) {
     return 'Waiting for live feed...';
@@ -925,15 +1125,19 @@ export function computeBotStatusLine(
     return 'Max 3 trades open';
   }
 
+  const minPwr = settings.minPowerToTrade ?? 50;
   const nearQualifying = allZones
-    .filter((z) => z.power >= 50 && isZoneNear(z, livePrice))
-    .sort((a, b) => getZoneDistancePts(a, livePrice) - getZoneDistancePts(b, livePrice) || b.power - a.power);
+    .filter((z) => z.power >= minPwr && isZoneNear(z, livePrice))
+    .sort(
+      (a, b) =>
+        getZoneDistancePts(a, livePrice) - getZoneDistancePts(b, livePrice) ||
+        b.power - a.power
+    );
 
   if (nearQualifying.length === 0) {
-    return 'Waiting: no near zone with PWR ≥ 50';
+    return `Waiting: no near zone with PWR ≥ ${minPwr}`;
   }
 
-  // Check if price is currently inside any qualifying near zone
   const insideZones = nearQualifying.filter(
     (z) => livePrice >= z.bottom && livePrice <= z.top
   );
@@ -941,9 +1145,12 @@ export function computeBotStatusLine(
   for (const z of insideZones) {
     const activeOnTf = state.openTrades.find((o) => o.tf === z.tf);
     if (activeOnTf) {
+      if (activeOnTf.isTrailing) {
+        return `TRAIL ${activeOnTf.side} ${formatTfShort(activeOnTf.tf)}: SL @${activeOnTf.sl.toFixed(2)}`;
+      }
       return `Entered ${activeOnTf.side} ${formatTfShort(activeOnTf.tf)} @${activeOnTf.entry.toFixed(1)}`;
     }
-    const side: 'BUY' | 'SELL' = z.side === 'BULL' ? 'BUY' : 'SELL';
+    const side: 'BUY' | 'SELL' = z.side;
     const blocked =
       (side === 'BUY' && bias1h === 'BEAR' && bias4h === 'BEAR') ||
       (side === 'SELL' && bias1h === 'BULL' && bias4h === 'BULL');
@@ -955,11 +1162,10 @@ export function computeBotStatusLine(
     }
   }
 
-  // Find nearest unused qualifying near zone
   const unusedNear = nearQualifying.filter((z) => !state.usedZoneIds.includes(z.id));
   const target = unusedNear[0] || nearQualifying[0];
   const dist = getZoneDistancePts(target, livePrice);
-  const side: 'BUY' | 'SELL' = target.side === 'BULL' ? 'BUY' : 'SELL';
+  const side: 'BUY' | 'SELL' = target.side;
   const blocked =
     (side === 'BUY' && bias1h === 'BEAR' && bias4h === 'BEAR') ||
     (side === 'SELL' && bias1h === 'BULL' && bias4h === 'BULL');
@@ -972,7 +1178,7 @@ export function computeBotStatusLine(
 }
 
 /**
- * Evaluate SL/TP on every live tick, and open new trades if autoEnabled and price is inside a qualifying near zone.
+ * Evaluate SL/TP/Trailing Stop on every live tick, and open new trades if autoEnabled and price is inside a qualifying near zone.
  */
 export function stepAutoTraderOnTick(
   state: RedSniperDemoState,
@@ -981,7 +1187,8 @@ export function stepAutoTraderOnTick(
   bias1h: TfBias,
   bias4h: TfBias,
   sessionName: string,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  settings: RedSniperSettings = DEFAULT_RED_SNIPER_SETTINGS
 ): { nextState: RedSniperDemoState; changed: boolean; enteredText: string | null } {
   if (!Number.isFinite(livePrice) || livePrice <= 0) {
     return { nextState: state, changed: false, enteredText: null };
@@ -994,12 +1201,12 @@ export function stepAutoTraderOnTick(
   let changed = false;
   let enteredText: string | null = null;
 
-  // 1) Evaluate SL / TP on existing open trades
+  // 1) Evaluate TP1 / TP2 / TP3 / Trailing Stop / SL on existing open trades
   for (const rawTrade of state.openTrades) {
-    const t: OpenSniperTrade = { ...rawTrade };
+    let t: OpenSniperTrade = { ...rawTrade };
     const isBuy = t.side === 'BUY';
 
-    // Check TP1 (1R -> close 50%, move SL to entry = break-even and HIDE SL line)
+    // Check TP1 (1R -> close 50%, move SL to entry = break-even and HIDE SL line, initialize trailRef = tp1)
     if (!t.tp1Hit) {
       const hitTp1 = isBuy ? livePrice >= t.tp1 : livePrice <= t.tp1;
       if (hitTp1) {
@@ -1010,6 +1217,8 @@ export function stepAutoTraderOnTick(
         t.sl = t.entry;
         t.beMoved = true;
         t.tp1Hit = true;
+        t.trailRef = t.tp1;
+        t.isTrailing = false;
         changed = true;
       }
     }
@@ -1058,7 +1267,22 @@ export function stepAutoTraderOnTick(
       }
     }
 
-    // Check SL (or Break-Even stop if TP1 was already hit)
+    // Step TRAILING STOP after TP1 (if price moved >= trailTrigger beyond trailRef)
+    if (t.tp1Hit) {
+      const trailRes = advanceTrailingStopAfterTp1(
+        t,
+        livePrice,
+        settings.trailTrigger,
+        settings.trailStep
+      );
+      if (trailRes.moved) {
+        t = trailRes.updatedTrade;
+        enteredText = `TRAIL ${t.side} ${formatTfShort(t.tf)}: SL → $${t.sl.toFixed(2)}`;
+        changed = true;
+      }
+    }
+
+    // Check SL (or Break-Even / Trailed stop if TP1 was already hit)
     const hitSl = isBuy ? livePrice <= t.sl : livePrice >= t.sl;
     if (hitSl) {
       if (!t.tp1Hit) {
@@ -1080,31 +1304,26 @@ export function stepAutoTraderOnTick(
           power: t.power,
           class: 'loss',
         });
-      } else if (t.tp1Hit && !t.tp2Hit) {
-        // TP1 hit (+50%), remaining 50% closed at BE (entry)
-        const finalPnl = Number(t.realizedPnl.toFixed(2));
-        const finalR = Number(t.realizedR.toFixed(2));
-        balance = Number((balance + finalPnl).toFixed(2));
-        closedTrades.unshift({
-          id: t.id,
-          zoneId: t.zoneId,
-          time: nowMs,
-          tf: t.tf,
-          side: t.side,
-          entry: t.entry,
-          exit: t.entry,
-          pnl: finalPnl,
-          r: finalR,
-          result: 'TP1+BE',
-          session: t.session,
-          power: t.power,
-          class: 'be',
-        });
       } else {
-        // TP2 hit (+50% at 1R, +30% at 2R), remaining 20% closed at BE (entry) -> win=TP2+ reached
-        const finalPnl = Number(t.realizedPnl.toFixed(2));
-        const finalR = Number(t.realizedR.toFixed(2));
+        // Closed on BE or Trailed SL after TP1 (and possibly TP2)
+        const trailDiff = isBuy
+          ? Math.max(0, t.sl - t.entry)
+          : Math.max(0, t.entry - t.sl);
+        const remLegPnl = t.remPct * t.initialLots * 100 * trailDiff;
+        const remLegR = t.remPct * (trailDiff / t.riskPoints);
+        const finalPnl = Number((t.realizedPnl + remLegPnl).toFixed(2));
+        const finalR = Number((t.realizedR + remLegR).toFixed(2));
         balance = Number((balance + finalPnl).toFixed(2));
+
+        const wasTrailed = Boolean(t.isTrailing && trailDiff > 1e-6);
+        const resultLabel: ClosedSniperTrade['result'] = t.tp2Hit
+          ? wasTrailed
+            ? 'TP2+TRAIL'
+            : 'TP2+BE'
+          : wasTrailed
+          ? 'TP1+TRAIL'
+          : 'TP1+BE';
+
         closedTrades.unshift({
           id: t.id,
           zoneId: t.zoneId,
@@ -1112,13 +1331,13 @@ export function stepAutoTraderOnTick(
           tf: t.tf,
           side: t.side,
           entry: t.entry,
-          exit: t.entry,
+          exit: t.sl,
           pnl: finalPnl,
           r: finalR,
-          result: 'TP2+BE',
+          result: resultLabel,
           session: t.session,
           power: t.power,
-          class: 'win',
+          class: t.tp2Hit || wasTrailed ? 'win' : 'be',
         });
       }
       changed = true;
@@ -1128,13 +1347,13 @@ export function stepAutoTraderOnTick(
     openTrades.push(t);
   }
 
-  // 2) Open new trades if autoEnabled and price is inside a qualifying near zone (power >= 50)
+  // 2) Open new trades if autoEnabled and price is inside a qualifying near zone (power >= settings.minPowerToTrade)
+  const minPwr = settings.minPowerToTrade ?? 50;
   if (state.autoEnabled && openTrades.length < 3) {
-    // Only include zones within max(6*ATR14, 1.5% of price) and rank by power x proximity
     const qualifying = allZones
       .filter(
         (z) =>
-          z.power >= 50 &&
+          z.power >= minPwr &&
           isZoneNear(z, livePrice) &&
           livePrice >= z.bottom &&
           livePrice <= z.top &&
@@ -1148,7 +1367,6 @@ export function stepAutoTraderOnTick(
 
     for (const zone of qualifying) {
       if (openTrades.length >= 3) break;
-      // Max 1 open trade per timeframe
       if (openTrades.some((o) => o.tf === zone.tf)) continue;
 
       const plan = buildZoneTradeParameters(
@@ -1157,10 +1375,10 @@ export function stepAutoTraderOnTick(
         balance,
         allZones,
         bias1h,
-        bias4h
+        bias4h,
+        settings
       );
 
-      // Skip if BOTH 1H and 4H bias oppose the trade
       if (plan.htfBlocked) continue;
 
       const newTrade: OpenSniperTrade = {
@@ -1184,6 +1402,8 @@ export function stepAutoTraderOnTick(
         tp1Hit: false,
         tp2Hit: false,
         beMoved: false,
+        trailRef: plan.tp1,
+        isTrailing: false,
         realizedPnl: 0,
         realizedR: 0,
       };
@@ -1245,7 +1465,6 @@ export function computePerformanceMetrics(
       sessionR['LDN+NY'] = Number((sessionR['LDN+NY'] + t.r).toFixed(2));
   }
 
-  // Confidence bar: <10 trades LOW SAMPLE, <0 NEGATIVE, <0.15R NEUTRAL, <0.3 GOOD, <0.5 STRONG, else ELITE
   let confidenceLabel: PerformanceMetrics['confidenceLabel'] = 'LOW SAMPLE';
   let confidencePct = 15;
 

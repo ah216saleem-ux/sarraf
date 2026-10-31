@@ -243,16 +243,19 @@ export interface AutoscaleNearestZonesOption {
   nearestSell?: { bottom: number; top: number; anchor: number } | null;
   currentPrice: number;
   atr: number;
+  includeNearestZones?: boolean;
+  extraPricesToInclude?: number[];
 }
 
 /**
  * Pure helper for chart autoscaleInfoProvider:
  * Returns the min low / max high of the VISIBLE candles [fromLogical, toLogical] + 6% padding.
- * Additionally includes a NEAR zone only if it is within 6*ATR(H1) of the live price.
- * Deep zones never influence the scale.
+ * Additionally includes a NEAR zone only if it is within 6*ATR(H1) of the live price (when includeNearestZones !== false),
+ * plus any explicit extraPricesToInclude (such as open-trade levels or a near pending entry).
+ * Deep/far zones never influence the scale.
  */
 export function computeVisibleAutoscaleRange(
-  candles: Candle[],
+  candles: Array<Pick<Candle, 'low' | 'high'>>,
   fromLogical: number,
   toLogical: number,
   nearestZonesOption?: AutoscaleNearestZonesOption
@@ -279,20 +282,31 @@ export function computeVisibleAutoscaleRange(
     return null;
   }
 
-  if (nearestZonesOption && nearestZonesOption.currentPrice > 0) {
-    const maxNearestDist = 6 * Math.max(1.5, nearestZonesOption.atr);
-    const livePrice = nearestZonesOption.currentPrice;
+  if (nearestZonesOption) {
+    if (nearestZonesOption.includeNearestZones !== false && nearestZonesOption.currentPrice > 0) {
+      const maxNearestDist = 6 * Math.max(1.5, nearestZonesOption.atr);
+      const livePrice = nearestZonesOption.currentPrice;
 
-    const nb = nearestZonesOption.nearestBuy;
-    if (nb && Math.abs(livePrice - nb.anchor) <= maxNearestDist) {
-      minLow = Math.min(minLow, nb.bottom);
-      maxHigh = Math.max(maxHigh, nb.top);
+      const nb = nearestZonesOption.nearestBuy;
+      if (nb && Math.abs(livePrice - nb.anchor) <= maxNearestDist) {
+        minLow = Math.min(minLow, nb.bottom);
+        maxHigh = Math.max(maxHigh, nb.top);
+      }
+
+      const ns = nearestZonesOption.nearestSell;
+      if (ns && Math.abs(ns.anchor - livePrice) <= maxNearestDist) {
+        minLow = Math.min(minLow, ns.bottom);
+        maxHigh = Math.max(maxHigh, ns.top);
+      }
     }
 
-    const ns = nearestZonesOption.nearestSell;
-    if (ns && Math.abs(ns.anchor - livePrice) <= maxNearestDist) {
-      minLow = Math.min(minLow, ns.bottom);
-      maxHigh = Math.max(maxHigh, ns.top);
+    if (Array.isArray(nearestZonesOption.extraPricesToInclude)) {
+      for (const lv of nearestZonesOption.extraPricesToInclude) {
+        if (Number.isFinite(lv) && lv > 0) {
+          if (lv < minLow) minLow = lv;
+          if (lv > maxHigh) maxHigh = lv;
+        }
+      }
     }
   }
 
