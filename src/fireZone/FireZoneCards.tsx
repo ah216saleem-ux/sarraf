@@ -370,7 +370,7 @@ export const FireZoneOtherZonesList: React.FC<{
 
 /**
  * LEVEL EVENTS Card on DESK:
- * - Shows latest lifecycle event as a sentence (HELD / BROKEN / EXPIRED)
+ * - Shows latest lifecycle event as a sentence (HELD / BROKEN / FLIP)
  * - Plus a collapsible list of the last 10 retired zones history
  */
 export const FireZoneEventCard: React.FC<{
@@ -395,7 +395,7 @@ export const FireZoneEventCard: React.FC<{
           <span style={sectionLabelStyle}>LEVEL EVENTS</span>
         </div>
         <p className="text-xs italic" style={{ color: 'var(--mu, #7e8794)' }}>
-          All active levels are FRESH. No zones have held, broken, or expired in the current window yet.
+          All active levels are FRESH. No zones have held or broken in the current window yet.
         </p>
       </section>
     );

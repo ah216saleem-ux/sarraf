@@ -2,10 +2,8 @@
 import {
   Candle,
   FireZone,
-  FireZonePersistedState,
   FireZonePersistedStateV2,
   FlipWatch,
-  FlippedLevelCandidate,
   RetiredZoneHistoryItem,
   ZoneLifecycleState,
   ZoneSide,
@@ -16,7 +14,6 @@ import { computeFreshnessPoints } from './levels';
 export const FIRE_ZONE_STORAGE_KEY = 'fireZone.v2';
 export const MAX_RETIRED_HISTORY = 10;
 export const MAX_LEVEL_EVENTS = 4;
-export const MAX_ZONE_AGE_BARS = 150;
 export const ZONE_HALF_WIDTH = 2.0; // $4 wide = anchor +/- $2
 
 export interface StorageLike {
@@ -467,155 +464,6 @@ export function appendLifecycleEvent(
   return [newEvent, ...deduped].slice(0, MAX_LEVEL_EVENTS);
 }
 
-export interface ZoneEvaluationOutcome {
-  state: 'FRESH' | 'PLAYED_HELD' | 'BROKEN' | 'EXPIRED';
-  eventBarIndex?: number;
-  eventCandleTime?: number;
-  moveAfter: number;
-  retests?: number;
-  flippedCandidate?: FlippedLevelCandidate;
-}
-
-/**
- * Evaluate the closed-candle lifecycle state of a single zone over CLOSED H1 candles.
- * Supports both Phase 2 (0.25*ATR close break, HELD retest counting) and legacy callers.
- */
-export function evaluateZoneClosedLifecycle(
-  side: ZoneSide,
-  anchor: number,
-  anchorBarIndex: number,
-  closedCandles: Candle[],
-  atr: number,
-  useQuarterAtrBreak = false
-): ZoneEvaluationOutcome {
-  const n = closedCandles.length;
-  if (n === 0) {
-    return { state: 'FRESH', moveAfter: 0, retests: 0 };
-  }
-
-  const lo = Number((anchor - ZONE_HALF_WIDTH).toFixed(2));
-  const hi = Number((anchor + ZONE_HALF_WIDTH).toFixed(2));
-  const effectiveAtr = Math.max(1.5, atr);
-  const breakMargin = useQuarterAtrBreak ? 0.25 * effectiveAtr : 1.0;
-
-  let hasTouched = false;
-  let consecutiveRightSideCloses = 0;
-  let peakMove = 0;
-
-  const startIdx = Math.max(0, anchorBarIndex + 1);
-  for (let i = startIdx; i < n; i++) {
-    const c = closedCandles[i];
-
-    // 1. Check BROKEN on candle CLOSE beyond far edge (wicks never break)
-    if (side === 'BUY') {
-      if (c.close < lo - breakMargin) {
-        const moveAfter = Number(Math.abs(anchor - c.close).toFixed(2));
-        return {
-          state: 'BROKEN',
-          eventBarIndex: i,
-          eventCandleTime: c.time,
-          moveAfter,
-          flippedCandidate: {
-            anchor,
-            fromSide: 'BUY',
-            toSide: 'SELL',
-            brokenCandleTime: c.time,
-            brokenBarIndex: i,
-            bonusScore: 2,
-          },
-        };
-      }
-    } else {
-      if (c.close > hi + breakMargin) {
-        const moveAfter = Number(Math.abs(c.close - anchor).toFixed(2));
-        return {
-          state: 'BROKEN',
-          eventBarIndex: i,
-          eventCandleTime: c.time,
-          moveAfter,
-          flippedCandidate: {
-            anchor,
-            fromSide: 'SELL',
-            toSide: 'BUY',
-            brokenCandleTime: c.time,
-            brokenBarIndex: i,
-            bonusScore: 2,
-          },
-        };
-      }
-    }
-
-    // 2. Check touch (wick into zone: BUY low <= HI, SELL high >= LO)
-    const wickedIntoZone = side === 'BUY' ? c.low <= hi : c.high >= lo;
-    if (wickedIntoZone) {
-      hasTouched = true;
-    }
-
-    // 3. Once touched, check PLAYED_HELD conditions on this or subsequent closed candles
-    if (hasTouched) {
-      if (side === 'BUY') {
-        const moveFromAnchor = Math.max(0, c.high - anchor, c.close - lo);
-        if (moveFromAnchor > peakMove) peakMove = moveFromAnchor;
-
-        if (c.close > hi) {
-          consecutiveRightSideCloses++;
-        } else {
-          consecutiveRightSideCloses = 0;
-        }
-
-        const closed1AtrAway = c.close >= hi + effectiveAtr;
-        const closed3Consecutive = consecutiveRightSideCloses >= 3;
-
-        if (closed1AtrAway || closed3Consecutive) {
-          return {
-            state: 'PLAYED_HELD',
-            eventBarIndex: i,
-            eventCandleTime: c.time,
-            moveAfter: Number(Math.max(peakMove, c.close - anchor).toFixed(2)),
-            retests: 1,
-          };
-        }
-      } else {
-        const moveFromAnchor = Math.max(0, anchor - c.low, hi - c.close);
-        if (moveFromAnchor > peakMove) peakMove = moveFromAnchor;
-
-        if (c.close < lo) {
-          consecutiveRightSideCloses++;
-        } else {
-          consecutiveRightSideCloses = 0;
-        }
-
-        const closed1AtrAway = c.close <= lo - effectiveAtr;
-        const closed3Consecutive = consecutiveRightSideCloses >= 3;
-
-        if (closed1AtrAway || closed3Consecutive) {
-          return {
-            state: 'PLAYED_HELD',
-            eventBarIndex: i,
-            eventCandleTime: c.time,
-            moveAfter: Number(Math.max(peakMove, anchor - c.close).toFixed(2)),
-            retests: 1,
-          };
-        }
-      }
-    }
-  }
-
-  // 4. Check EXPIRED (> 150 H1 candles old)
-  const ageBars = n - 1 - anchorBarIndex;
-  if (ageBars > MAX_ZONE_AGE_BARS) {
-    const lastBar = closedCandles[n - 1];
-    return {
-      state: 'EXPIRED',
-      eventBarIndex: n - 1,
-      eventCandleTime: lastBar.time,
-      moveAfter: Number(Math.abs(lastBar.close - anchor).toFixed(2)),
-    };
-  }
-
-  return { state: 'FRESH', moveAfter: 0, retests: 0 };
-}
-
 /**
  * Compute live display state for an active (non-retired) zone.
  * TESTING is shown live only when currentPrice is inside [LO, HI] and is never persisted.
@@ -647,16 +495,8 @@ export function formatLevelEventSentence(item: RetiredZoneHistoryItem | undefine
     return `${item.side} zone ${anchorStr} held: price ${dirVerb}.${nextPart}`;
   }
 
-  if (item.result === 'BROKEN') {
-    const flippedSide: ZoneSide = item.side === 'BUY' ? 'SELL' : 'BUY';
-    return `${item.side} zone ${anchorStr} broke on candle close. It now acts as a ${flippedSide} candidate`;
-  }
-
-  const nextPart =
-    typeof item.nextZoneAnchor === 'number'
-      ? ` Next ${item.side} zone is ${item.nextZoneAnchor.toFixed(2)}`
-      : '';
-  return `${item.side} zone ${anchorStr} expired (>150 H1 candles).${nextPart}`;
+  const flippedSide: ZoneSide = item.side === 'BUY' ? 'SELL' : 'BUY';
+  return `${item.side} zone ${anchorStr} broke on candle close. It now acts as a ${flippedSide} candidate`;
 }
 
 export function appendRetiredHistory(
@@ -718,12 +558,10 @@ export function loadFireZoneV2State(
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<Omit<FireZonePersistedStateV2, 'version'>> & {
       version?: number;
-      flippedLevels?: FlippedLevelCandidate[];
     };
     if (!parsed || !Array.isArray(parsed.activeZones)) {
       return null;
     }
-
 
     if (parsed.version === 2) {
       return {
@@ -738,22 +576,6 @@ export function loadFireZoneV2State(
         brokenIds: Array.isArray(parsed.brokenIds) ? parsed.brokenIds : [],
         flipWatches: Array.isArray(parsed.flipWatches) ? parsed.flipWatches : [],
         events: Array.isArray(parsed.events) ? parsed.events.slice(0, MAX_LEVEL_EVENTS) : [],
-        history: Array.isArray(parsed.history) ? parsed.history.slice(0, MAX_RETIRED_HISTORY) : [],
-      };
-    }
-
-    // Upgrade v1 payload if encountered
-    if (parsed.version === 1) {
-      return {
-        version: 2,
-        activeZoneIds: parsed.activeZones.map((z) => z.id),
-        activeZones: parsed.activeZones.map((z) => ({
-          ...z,
-          state: 'FRESH' as const,
-        })),
-        brokenIds: [],
-        flipWatches: [],
-        events: [],
         history: Array.isArray(parsed.history) ? parsed.history.slice(0, MAX_RETIRED_HISTORY) : [],
       };
     }
@@ -932,94 +754,5 @@ export function restoreAndRevalidateV2State(
     flipWatches: updatedWatches,
     events: events.slice(0, MAX_LEVEL_EVENTS),
     history,
-  };
-}
-
-/**
- * Backwards-compatible wrappers for existing tests calling save/load/restoreFireZoneLifecycleState.
- */
-export function saveFireZoneLifecycleState(
-  activeZones: FireZone[],
-  history: RetiredZoneHistoryItem[],
-  flippedLevels: FlippedLevelCandidate[],
-  storage: StorageLike = getDefaultStorage(),
-  brokenIds: Iterable<string> = [],
-  flipWatches: FlipWatch[] = [],
-  events: string[] = []
-): void {
-  const watches: FlipWatch[] = [...flipWatches];
-  for (const fl of flippedLevels) {
-    if (!watches.some((w) => Math.abs(w.anchor - fl.anchor) < 0.5 && w.side === fl.toSide)) {
-      watches.push({
-        id: `F${Math.round(fl.anchor)}`,
-        side: fl.toSide,
-        anchor: fl.anchor,
-        score: 8 + fl.bonusScore,
-        armed: false,
-        confirmed: false,
-        brokenAtTime: fl.brokenCandleTime,
-        brokenBarIndex: fl.brokenBarIndex,
-      });
-    }
-  }
-  saveFireZoneV2State(
-    {
-      activeZones,
-      brokenIds,
-      flipWatches: watches,
-      events,
-      history,
-    },
-    storage
-  );
-}
-
-export function loadFireZoneLifecycleState(
-  storage: StorageLike = getDefaultStorage()
-): FireZonePersistedState | null {
-  const v2 = loadFireZoneV2State(storage);
-  if (!v2) return null;
-  return {
-    version: 1,
-    activeZones: v2.activeZones,
-    history: v2.history || [],
-    flippedLevels: v2.flipWatches.map((w) => ({
-      anchor: w.anchor,
-      fromSide: w.side === 'BUY' ? 'SELL' : 'BUY',
-      toSide: w.side,
-      brokenCandleTime: w.brokenAtTime ?? 0,
-      brokenBarIndex: w.brokenBarIndex ?? 0,
-      bonusScore: 2,
-    })),
-  };
-}
-
-export function restoreAndRevalidateLifecycleState(
-  closedCandles: Candle[],
-  atr: number,
-  storage: StorageLike = getDefaultStorage()
-): {
-  validSavedZones: FireZonePersistedState['activeZones'];
-  history: RetiredZoneHistoryItem[];
-  flippedLevels: FlippedLevelCandidate[];
-  brokenIds: Set<string>;
-  flipWatches: FlipWatch[];
-  events: string[];
-} {
-  const res = restoreAndRevalidateV2State(closedCandles, atr, storage);
-  return {
-    validSavedZones: res.validSavedZones,
-    history: res.history,
-    flippedLevels: res.flipWatches.map((w) => ({
-      anchor: w.anchor,
-      fromSide: w.side === 'BUY' ? 'SELL' : 'BUY',
-      toSide: w.side,
-      brokenCandleTime: w.brokenAtTime ?? 0,
-      brokenBarIndex: w.brokenBarIndex ?? 0,
-      bonusScore: 2,
-    })),
-    brokenIds: res.brokenIds,
-    flipWatches: res.flipWatches,
-    events: res.events,
   };
 }

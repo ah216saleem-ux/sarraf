@@ -19,10 +19,11 @@ import {
 import {
   ZONE_HALF,
   ZONE_WIDTH,
+  SL_ATR_MULT,
   buildRankedLevels,
   selectZonesFromLevels,
   filterAndRankKeptLevels,
-  build007TradePlan,
+  buildFireZoneTradePlan,
 } from './levels';
 import {
   evaluateGates,
@@ -43,13 +44,9 @@ import {
 import {
   FIRE_ZONE_STORAGE_KEY,
   MAX_LEVEL_EVENTS,
-  evaluateZoneClosedLifecycle,
   getLiveZoneDisplayState,
   formatLevelEventSentence,
   appendRetiredHistory,
-  saveFireZoneLifecycleState,
-  loadFireZoneLifecycleState,
-  restoreAndRevalidateLifecycleState,
   saveFireZoneV2State,
   loadFireZoneV2State,
   restoreAndRevalidateV2State,
@@ -93,19 +90,16 @@ export {
   computeVisibleAutoscaleRange,
   ZONE_HALF,
   ZONE_WIDTH,
+  SL_ATR_MULT,
   buildRankedLevels,
   selectZonesFromLevels,
   filterAndRankKeptLevels,
-  build007TradePlan,
+  buildFireZoneTradePlan,
   FIRE_ZONE_STORAGE_KEY,
   MAX_LEVEL_EVENTS,
-  evaluateZoneClosedLifecycle,
   getLiveZoneDisplayState,
   formatLevelEventSentence,
   appendRetiredHistory,
-  saveFireZoneLifecycleState,
-  loadFireZoneLifecycleState,
-  restoreAndRevalidateLifecycleState,
   saveFireZoneV2State,
   loadFireZoneV2State,
   restoreAndRevalidateV2State,
@@ -299,7 +293,7 @@ function buildEngineResultFromSelection(params: {
     retiredHistory
   );
 
-  // Build 007 Trade Plans
+  // Build Fire Zone Trade Plans
   const nearestAnchors = chosenZones
     .filter((z) => z.type === 'NEAREST')
     .map((z) => z.anchor);
@@ -311,7 +305,7 @@ function buildEngineResultFromSelection(params: {
   const planRefPrice = currentPrice > 0 ? currentPrice : refPrice;
   const plans: TradePlan[] = chosenZones.map((z) => {
     const isPlanActive = z.side === activeSide && z.type === 'NEAREST';
-    return build007TradePlan(z, tpTargetLevels, atr, planRefPrice, isPlanActive);
+    return buildFireZoneTradePlan(z, tpTargetLevels, atr, planRefPrice, isPlanActive);
   });
 
   const buyNearestPlan =
@@ -383,7 +377,7 @@ function buildEngineResultFromSelection(params: {
 }
 
 /**
- * Main Pure 007 Fire Zone Engine Pipeline (Fixed H1 basis + Phase 1 Selection + Phase 2 Lifecycle).
+ * Main Pure Fire Zone Engine Pipeline (Fixed H1 basis + Phase 1 Selection + Phase 2 Lifecycle).
  * - Recomputes on a new closed H1 candle OR immediately when a live break (> 0.5*ATR beyond far edge)
  *   or flip confirmation occurs.
  * - Normal ticks within range never recompute or drift zone prices.
@@ -504,7 +498,6 @@ export function runFireZoneEngine(
         cachedSnapshot.h4Candles,
         cachedSnapshot.d1Candles,
         livePrice,
-        [],
         prev.atr,
         moduleFlipWatches,
         moduleBrokenIds
@@ -696,7 +689,6 @@ export function runFireZoneEngine(
     h4Candles,
     d1Candles,
     refPrice,
-    [],
     atr,
     moduleFlipWatches,
     moduleBrokenIds
@@ -744,7 +736,6 @@ export function runFireZoneEngine(
       h4Candles,
       d1Candles,
       currentPrice,
-      [],
       atr,
       moduleFlipWatches,
       moduleBrokenIds

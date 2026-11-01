@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Settings } from 'lucide-react';
 import {
   RED_SNIPER_TIMEFRAMES,
@@ -7,23 +7,38 @@ import {
 } from './feed';
 import {
   analyzeAllTimeframes,
+  BotLogEntry,
   buildZoneTradeParameters,
   ClosedSniperTrade,
   computeBotStatusLine,
+  computeDeadAtrComparison,
   computeOpenTradeFloatingPnl,
   computePerformanceMetrics,
+  computePowerCalibration,
   computeZoneProximityScore,
+  createInitialReplaySession,
   DEFAULT_RED_SNIPER_SETTINGS,
+  detectNewZoneBotLogs,
+  formatBotLogForClipboard,
+  formatReplayWindowLabel,
   getZoneDistancePts,
   isZoneNear,
+  loadBotLogFromLocalStorage,
   loadDemoState,
   loadRedSniperSettings,
+  mergeBotLogEntries,
   OpenSniperTrade,
+  RED_SNIPER_ZONE_ENGINE_VERSION,
   RedSniperDemoState,
   RedSniperSettings,
+  ReplaySessionState,
+  resolveDefaultRetestModeForTf,
+  RetestMode,
+  saveBotLogToLocalStorage,
   saveDemoState,
   saveRedSniperSettings,
   stepAutoTraderOnTick,
+  stepReplayM1Bar,
   TfBias,
 } from './engine';
 import { RedSniperChart } from './RedSniperChart';
@@ -88,6 +103,7 @@ function biasBadgeColor(bias: TfBias): { text: string; border: string; bg: strin
 export const RedSniperPage: React.FC = () => {
   const {
     bars,
+    historyDiagnostics,
     livePrice,
     bid,
     ask,
@@ -105,8 +121,88 @@ export const RedSniperPage: React.FC = () => {
     loadRedSniperSettings()
   );
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+  const [copiedDebug, setCopiedDebug] = useState<boolean>(false);
+  const [copiedBotLog, setCopiedBotLog] = useState<boolean>(false);
+  const [botLog, setBotLog] = useState<BotLogEntry[]>(() =>
+    loadBotLogFromLocalStorage()
+  );
+  const seenZoneIdsRef = useRef<Set<string>>(new Set());
   const [lastEnteredDecision, setLastEnteredDecision] = useState<string | null>(null);
   const [nowDate, setNowDate] = useState<Date>(() => new Date());
+  const [highlightedZoneId, setHighlightedZoneId] = useState<string | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [replaySession, setReplaySession] = useState<ReplaySessionState | null>(null);
+
+  // Sync persistent BOT LOG with server file on mount
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/redsniper/bot-log')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data || !Array.isArray(data.entries)) return;
+        setBotLog((prev) => {
+          const merged = mergeBotLogEntries(prev, data.entries as BotLogEntry[]);
+          saveBotLogToLocalStorage(merged);
+          return merged;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const appendBotLogs = useCallback((entries: BotLogEntry[]) => {
+    if (!entries || entries.length === 0) return;
+    setBotLog((prev) => {
+      const merged = mergeBotLogEntries(prev, entries);
+      saveBotLogToLocalStorage(merged);
+      return merged;
+    });
+    fetch('/api/redsniper/bot-log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entries }),
+    }).catch(() => {});
+  }, []);
+
+  const handleCopyBotLog = useCallback(() => {
+    const text = formatBotLogForClipboard(botLog);
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).catch(() => {});
+    }
+    setCopiedBotLog(true);
+    setTimeout(() => setCopiedBotLog(false), 1800);
+  }, [botLog]);
+
+  const handleClearBotLog = useCallback(() => {
+    setBotLog([]);
+    saveBotLogToLocalStorage([]);
+    fetch('/api/redsniper/bot-log', { method: 'DELETE' }).catch(() => {});
+  }, []);
+
+  const handleHighlightZone = useCallback((zoneId: string) => {
+    setHighlightedZoneId(zoneId);
+    if (highlightTimerRef.current) {
+      clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = setTimeout(() => {
+      setHighlightedZoneId(null);
+    }, 3000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Clear highlight when switching timeframe
+  useEffect(() => {
+    setHighlightedZoneId(null);
+  }, [selectedTf]);
 
   const updateSettings = useCallback((patch: Partial<RedSniperSettings>) => {
     setSettings((prev) => {
@@ -131,17 +227,33 @@ export const RedSniperPage: React.FC = () => {
     livePrice !== null && Number.isFinite(livePrice) && livePrice > 0;
   const isFeedReady = connectionStatus === 'CONNECTED' || hasLiveFeed;
 
-  // Run Fire Zone pipeline across all 8 timeframes on closed candles + livePrice
-  const { byTf, allZones, verdict } = useMemo(
+  // Run Red Sniper base zone pipeline across all 8 timeframes on closed candles + livePrice
+  const { byTf, allZones, mergedZones, verdict } = useMemo(
     () => analyzeAllTimeframes(bars, livePrice, settings),
     [bars, livePrice, settings]
   );
 
-  // Step auto-trader on every live tick
+  // Log newly detected zones to persistent BOT LOG
+  useEffect(() => {
+    if (!hasLiveFeed || allZones.length === 0) return;
+    const newLogs = detectNewZoneBotLogs(
+      allZones,
+      seenZoneIdsRef.current,
+      Date.now(),
+      settings.showConsumedZones
+    );
+    if (newLogs.length > 0) {
+      appendBotLogs(newLogs);
+    }
+  }, [hasLiveFeed, allZones, settings.showConsumedZones, appendBotLogs]);
+
+  // Step auto-trader on every live tick (blocks new entries when isMarketClosed is true; resumes automatically on first fresh tick)
   useEffect(() => {
     if (!hasLiveFeed || livePrice === null) return;
+    if (replaySession?.isRunning) return; // Never mix live demo execution while replay is running
+    let emittedLogs: BotLogEntry[] = [];
     setDemoState((prev) => {
-      const { nextState, changed, enteredText } = stepAutoTraderOnTick(
+      const { nextState, changed, enteredText, botLogs } = stepAutoTraderOnTick(
         prev,
         livePrice,
         allZones,
@@ -149,10 +261,14 @@ export const RedSniperPage: React.FC = () => {
         verdict.bias4h,
         session.name,
         Date.now(),
-        settings
+        settings,
+        isMarketClosed
       );
       if (enteredText) {
         setLastEnteredDecision(enteredText);
+      }
+      if (botLogs.length > 0) {
+        emittedLogs = botLogs;
       }
       if (changed) {
         saveDemoState(nextState);
@@ -160,6 +276,9 @@ export const RedSniperPage: React.FC = () => {
       }
       return prev;
     });
+    if (emittedLogs.length > 0) {
+      appendBotLogs(emittedLogs);
+    }
   }, [
     livePrice,
     hasLiveFeed,
@@ -168,7 +287,59 @@ export const RedSniperPage: React.FC = () => {
     verdict.bias4h,
     session.name,
     settings,
+    isMarketClosed,
+    replaySession?.isRunning,
+    appendBotLogs,
   ]);
+
+  // Replay 24h M1 candles at 20x speed using isolated demo account & history
+  useEffect(() => {
+    if (!replaySession || !replaySession.isRunning) return;
+    const m1Bars = bars['1m'] || [];
+    if (m1Bars.length < 30) {
+      setReplaySession((prev) => (prev ? { ...prev, isRunning: false, isFinished: true } : null));
+      return;
+    }
+    const timer = setInterval(() => {
+      setReplaySession((prev) => {
+        if (!prev || !prev.isRunning) return prev;
+        // Advance 4 M1 bars per 200ms tick (~20 bars/sec fast 20x replay)
+        let cur = prev;
+        for (let step = 0; step < 4; step++) {
+          cur = stepReplayM1Bar(cur, bars, settings);
+          if (!cur.isRunning || cur.isFinished) break;
+        }
+        return cur;
+      });
+    }, 200);
+    return () => clearInterval(timer);
+  }, [replaySession?.isRunning, bars, settings]);
+
+  const handleStartReplay = useCallback(() => {
+    const m1Bars = bars['1m'] || [];
+    if (m1Bars.length < 30) return;
+    setReplaySession(createInitialReplaySession(m1Bars));
+  }, [bars]);
+
+  const handleStopReplay = useCallback(() => {
+    setReplaySession((prev) =>
+      prev ? { ...prev, isRunning: false, isFinished: true } : null
+    );
+  }, []);
+
+  const handleClearReplay = useCallback(() => {
+    setReplaySession(null);
+  }, []);
+
+  // Active state shown in account/trades/history cards (isolated replay state when replay is active, else live demoState)
+  const activeDisplayState =
+    replaySession && (replaySession.isRunning || replaySession.isFinished)
+      ? replaySession.demoState
+      : demoState;
+  const activeDisplayPrice =
+    replaySession && replaySession.isRunning && replaySession.currentPrice !== null
+      ? replaySession.currentPrice
+      : livePrice;
 
   // Bot status decision line updated on every tick
   const botStatusLine = useMemo(
@@ -180,7 +351,8 @@ export const RedSniperPage: React.FC = () => {
         verdict.bias1h,
         verdict.bias4h,
         lastEnteredDecision,
-        settings
+        settings,
+        isMarketClosed
       ),
     [
       demoState,
@@ -190,6 +362,7 @@ export const RedSniperPage: React.FC = () => {
       verdict.bias4h,
       lastEnteredDecision,
       settings,
+      isMarketClosed,
     ]
   );
 
@@ -207,14 +380,16 @@ export const RedSniperPage: React.FC = () => {
   const handleManualCloseTrade = useCallback(
     (tradeId: string) => {
       if (livePrice === null || !Number.isFinite(livePrice)) return;
+      let manualExitLog: BotLogEntry | null = null;
       setDemoState((prev) => {
         const target = prev.openTrades.find((t) => t.id === tradeId);
         if (!target) return prev;
         const { totalPnl, currentR } = computeOpenTradeFloatingPnl(target, livePrice);
+        const nowMs = Date.now();
         const closedItem: ClosedSniperTrade = {
           id: target.id,
           zoneId: target.zoneId,
-          time: Date.now(),
+          time: nowMs,
           tf: target.tf,
           side: target.side,
           entry: target.entry,
@@ -226,6 +401,17 @@ export const RedSniperPage: React.FC = () => {
           power: target.power,
           class: target.tp2Hit ? 'win' : currentR >= 0 ? 'be' : 'loss',
         };
+        manualExitLog = {
+          id: `exit-manual-${target.id}-${nowMs}`,
+          ts: nowMs,
+          isoTime: new Date(nowMs).toISOString(),
+          type: 'EXIT',
+          tf: target.tf,
+          side: target.side,
+          zoneId: target.zoneId,
+          tradeId: target.id,
+          message: `Exit [MANUAL]: ${target.side} ${target.tf.toUpperCase()} @ $${livePrice.toFixed(2)} (PnL ${totalPnl >= 0 ? '+' : '-'}$${Math.abs(totalPnl).toFixed(2)}, ${currentR >= 0 ? '+' : ''}${currentR.toFixed(2)}R)`,
+        };
         const next: RedSniperDemoState = {
           ...prev,
           balance: Number((prev.balance + totalPnl).toFixed(2)),
@@ -235,8 +421,11 @@ export const RedSniperPage: React.FC = () => {
         saveDemoState(next);
         return next;
       });
+      if (manualExitLog) {
+        appendBotLogs([manualExitLog]);
+      }
     },
-    [livePrice]
+    [livePrice, appendBotLogs]
   );
 
   const handleResetDemo = useCallback(() => {
@@ -254,15 +443,18 @@ export const RedSniperPage: React.FC = () => {
 
   // Compute Open P&L and Equity
   const openPnl = useMemo(() => {
-    if (!hasLiveFeed || livePrice === null) return 0;
+    if (activeDisplayPrice === null || !Number.isFinite(activeDisplayPrice)) return 0;
     return Number(
-      demoState.openTrades
-        .reduce((acc, t) => acc + computeOpenTradeFloatingPnl(t, livePrice).totalPnl, 0)
+      activeDisplayState.openTrades
+        .reduce(
+          (acc, t) => acc + computeOpenTradeFloatingPnl(t, activeDisplayPrice).totalPnl,
+          0
+        )
         .toFixed(2)
     );
-  }, [demoState.openTrades, hasLiveFeed, livePrice]);
+  }, [activeDisplayState.openTrades, activeDisplayPrice]);
 
-  const equity = Number((demoState.balance + openPnl).toFixed(2));
+  const equity = Number((activeDisplayState.balance + openPnl).toFixed(2));
 
   // Compute LIVE TICK VOLUME metrics
   const m1VolumeStats = useMemo(() => {
@@ -299,14 +491,25 @@ export const RedSniperPage: React.FC = () => {
     };
   }, [bars, livePrice, nowDate]);
 
-  // Filter zones within max(6*ATR14, 1.5% of price) by default and rank by power x proximity
+  // Filter zones within farAtr * ATR14 (non-FAR) and non-consumed (unless showConsumedZones is enabled) by default
   const nearZones = useMemo(() => {
-    if (!hasLiveFeed || livePrice === null) return allZones;
-    return allZones.filter((z) => isZoneNear(z, livePrice));
-  }, [allZones, hasLiveFeed, livePrice]);
+    const base = allZones.filter(
+      (z) => !z.isFar && (settings.showConsumedZones || !z.consumed)
+    );
+    if (!hasLiveFeed || livePrice === null) return base;
+    return base.filter((z) => isZoneNear(z, livePrice, settings.farAtr));
+  }, [
+    allZones,
+    hasLiveFeed,
+    livePrice,
+    settings.farAtr,
+    settings.showConsumedZones,
+  ]);
 
   const sortedStrongZones = useMemo(() => {
-    const source = settings.showFarZones ? allZones : nearZones;
+    const source = settings.showFarZones
+      ? mergedZones
+      : mergedZones.filter((z) => !z.isFar);
     if (!hasLiveFeed || livePrice === null) {
       return [...source].sort((a, b) => b.power - a.power);
     }
@@ -315,13 +518,21 @@ export const RedSniperPage: React.FC = () => {
         computeZoneProximityScore(b, livePrice) -
         computeZoneProximityScore(a, livePrice)
     );
-  }, [allZones, nearZones, settings.showFarZones, hasLiveFeed, livePrice]);
+  }, [mergedZones, settings.showFarZones, hasLiveFeed, livePrice]);
 
-  // Nearest pending trade plan (using near qualifying zones ranked by proximity/power)
+  // Nearest pending trade plan (using near qualifying FRESH/TESTED zones ranked by proximity/power)
   const pendingPlan = useMemo(() => {
     if (!hasLiveFeed || livePrice === null || nearZones.length === 0) return null;
-    const qualifying = nearZones.filter((z) => z.power >= settings.minPowerToTrade);
-    const pool = qualifying.length > 0 ? qualifying : nearZones;
+    const qualifying = nearZones.filter(
+      (z) =>
+        (z.status === 'FRESH' || z.status === 'TESTED') &&
+        z.power >= settings.minPowerToTrade
+    );
+    const pool =
+      qualifying.length > 0
+        ? qualifying
+        : nearZones.filter((z) => z.status === 'FRESH' || z.status === 'TESTED');
+    if (pool.length === 0) return null;
 
     const sortedByDist = [...pool].sort(
       (a, b) =>
@@ -367,10 +578,26 @@ export const RedSniperPage: React.FC = () => {
     settings,
   ]);
 
-  // Historical performance metrics
+  // Real M1 history window info ("Replay window: 4h58m of real M1, 301 candles")
+  const m1WindowInfo = useMemo(
+    () => formatReplayWindowLabel(bars['1m'] || []),
+    [bars]
+  );
+
+  // Historical performance metrics (requires n >= 10 and >= 12h M1 window for confident summary)
   const perf = useMemo(
-    () => computePerformanceMetrics(demoState.closedTrades),
-    [demoState.closedTrades]
+    () =>
+      computePerformanceMetrics(
+        activeDisplayState.closedTrades,
+        m1WindowInfo.windowSeconds
+      ),
+    [activeDisplayState.closedTrades, m1WindowInfo.windowSeconds]
+  );
+
+  // Power Calibration across real loaded candles (D.1)
+  const powerCalibration = useMemo(
+    () => computePowerCalibration(bars, settings),
+    [bars, settings]
   );
 
   const currentTfAnalysis = byTf[selectedTf];
@@ -378,6 +605,139 @@ export const RedSniperPage: React.FC = () => {
   const currentTfZones = currentTfAnalysis?.zones || [];
   const currentTfBuyCount = currentTfZones.filter((z) => z.side === 'BUY').length;
   const currentTfSellCount = currentTfZones.filter((z) => z.side === 'SELL').length;
+
+  const activeRetestModeForTf: RetestMode = settings.retestModeOverride
+    ? settings.retestMode
+    : resolveDefaultRetestModeForTf(selectedTf);
+
+  const handleCopyZoneDebug = useCallback(() => {
+    const barsLoadedByTf: Record<
+      RedSniperTimeframe,
+      {
+        barsLoaded: number;
+        oldestCandleTime: number | null;
+        oldestCandleIso: string | null;
+        source: 'store' | 'broker';
+        builtFromM1: boolean;
+      }
+    > = {
+      '1m': {
+        barsLoaded: bars['1m']?.length ?? 0,
+        oldestCandleTime: bars['1m']?.[0]?.time ?? null,
+        oldestCandleIso: bars['1m']?.[0]
+          ? new Date(bars['1m'][0].time * 1000).toISOString()
+          : null,
+        source: historyDiagnostics['1m']?.source ?? 'broker',
+        builtFromM1: historyDiagnostics['1m']?.builtFromM1 ?? false,
+      },
+      '3m': {
+        barsLoaded: bars['3m']?.length ?? 0,
+        oldestCandleTime: bars['3m']?.[0]?.time ?? null,
+        oldestCandleIso: bars['3m']?.[0]
+          ? new Date(bars['3m'][0].time * 1000).toISOString()
+          : null,
+        source: historyDiagnostics['3m']?.source ?? 'broker',
+        builtFromM1: historyDiagnostics['3m']?.builtFromM1 ?? false,
+      },
+      '5m': {
+        barsLoaded: bars['5m']?.length ?? 0,
+        oldestCandleTime: bars['5m']?.[0]?.time ?? null,
+        oldestCandleIso: bars['5m']?.[0]
+          ? new Date(bars['5m'][0].time * 1000).toISOString()
+          : null,
+        source: historyDiagnostics['5m']?.source ?? 'broker',
+        builtFromM1: historyDiagnostics['5m']?.builtFromM1 ?? false,
+      },
+      '15m': {
+        barsLoaded: bars['15m']?.length ?? 0,
+        oldestCandleTime: bars['15m']?.[0]?.time ?? null,
+        oldestCandleIso: bars['15m']?.[0]
+          ? new Date(bars['15m'][0].time * 1000).toISOString()
+          : null,
+        source: historyDiagnostics['15m']?.source ?? 'broker',
+        builtFromM1: historyDiagnostics['15m']?.builtFromM1 ?? false,
+      },
+      '30m': {
+        barsLoaded: bars['30m']?.length ?? 0,
+        oldestCandleTime: bars['30m']?.[0]?.time ?? null,
+        oldestCandleIso: bars['30m']?.[0]
+          ? new Date(bars['30m'][0].time * 1000).toISOString()
+          : null,
+        source: historyDiagnostics['30m']?.source ?? 'broker',
+        builtFromM1: historyDiagnostics['30m']?.builtFromM1 ?? false,
+      },
+      '1h': {
+        barsLoaded: bars['1h']?.length ?? 0,
+        oldestCandleTime: bars['1h']?.[0]?.time ?? null,
+        oldestCandleIso: bars['1h']?.[0]
+          ? new Date(bars['1h'][0].time * 1000).toISOString()
+          : null,
+        source: historyDiagnostics['1h']?.source ?? 'broker',
+        builtFromM1: historyDiagnostics['1h']?.builtFromM1 ?? false,
+      },
+      '4h': {
+        barsLoaded: bars['4h']?.length ?? 0,
+        oldestCandleTime: bars['4h']?.[0]?.time ?? null,
+        oldestCandleIso: bars['4h']?.[0]
+          ? new Date(bars['4h'][0].time * 1000).toISOString()
+          : null,
+        source: historyDiagnostics['4h']?.source ?? 'broker',
+        builtFromM1: historyDiagnostics['4h']?.builtFromM1 ?? false,
+      },
+      '1d': {
+        barsLoaded: bars['1d']?.length ?? 0,
+        oldestCandleTime: bars['1d']?.[0]?.time ?? null,
+        oldestCandleIso: bars['1d']?.[0]
+          ? new Date(bars['1d'][0].time * 1000).toISOString()
+          : null,
+        source: historyDiagnostics['1d']?.source ?? 'broker',
+        builtFromM1: historyDiagnostics['1d']?.builtFromM1 ?? false,
+      },
+    };
+    const deadAtrComparison = computeDeadAtrComparison(
+      currentTfCandles,
+      selectedTf,
+      livePrice,
+      settings
+    );
+    const payload = {
+      zoneEngineVersion: RED_SNIPER_ZONE_ENGINE_VERSION,
+      tf: selectedTf,
+      barsLoaded: currentTfCandles.length,
+      oldestCandleTime: currentTfCandles[0]?.time ?? null,
+      oldestCandleIso: currentTfCandles[0]
+        ? new Date(currentTfCandles[0].time * 1000).toISOString()
+        : null,
+      source: historyDiagnostics[selectedTf]?.source ?? 'broker',
+      barsLoadedByTf,
+      historyDiagnosticsForTf: historyDiagnostics[selectedTf] ?? null,
+      historyDiagnosticsByTf: historyDiagnostics,
+      atr14: currentTfAnalysis ? Number(currentTfAnalysis.atr14.toFixed(4)) : null,
+      livePrice,
+      retestModeUsed: currentTfAnalysis?.retestModeUsed ?? activeRetestModeForTf,
+      deadAtr: settings.deadAtr,
+      farAtr: settings.farAtr,
+      heightCapAtr: settings.heightCapAtr,
+      showConsumedZones: settings.showConsumedZones,
+      deadAtrComparison,
+      zonesBeforeSelection: currentTfAnalysis?.debugAliveZones ?? [],
+    };
+    const jsonText = JSON.stringify(payload, null, 2);
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(jsonText).catch(() => {});
+    }
+    setCopiedDebug(true);
+    setTimeout(() => setCopiedDebug(false), 1800);
+  }, [
+    selectedTf,
+    bars,
+    historyDiagnostics,
+    currentTfCandles,
+    currentTfAnalysis,
+    livePrice,
+    activeRetestModeForTf,
+    settings,
+  ]);
 
   // SVG Donut math for TP2 Win Rate
   const donutRadius = 32;
@@ -389,6 +749,147 @@ export const RedSniperPage: React.FC = () => {
       className="mx-auto w-full max-w-[540px] bg-black px-2.5 pb-12 pt-2 text-[#f2f4f8] select-none"
       style={{ fontFamily: "'Rajdhani', sans-serif" }}
     >
+      {/* D.2) Red REPLAY Banner while running or finished */}
+      {replaySession && (
+        <div
+          className="mb-2.5 border border-[#ff2d45] bg-[#1e0408] p-3 text-xs shadow-[0_0_20px_rgba(255,45,69,0.28)]"
+          style={{ fontFamily: "'JetBrains Mono', monospace", clipPath: HUD_CLIP_SM }}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="inline-block h-2 w-2 animate-pulse bg-[#ff2d45]" />
+              <span
+                className="text-xs font-extrabold tracking-[0.2em] text-[#ff2d45]"
+                style={{ fontFamily: "'Orbitron', sans-serif" }}
+              >
+                {replaySession.isRunning
+                  ? 'REPLAY — NOT LIVE (20x)'
+                  : 'REPLAY SUMMARY — NOT LIVE'}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {replaySession.isRunning ? (
+                <button
+                  type="button"
+                  onClick={handleStopReplay}
+                  className="cursor-pointer border border-[#ff2d45] bg-[#ff2d45] px-2.5 py-0.5 text-[10px] font-extrabold text-black"
+                  style={{ fontFamily: "'Orbitron', sans-serif" }}
+                >
+                  STOP
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleClearReplay}
+                  className="cursor-pointer border border-white/30 bg-black px-2.5 py-0.5 text-[10px] font-bold text-white hover:border-[#ff2d45] hover:text-[#ff2d45]"
+                  style={{ fontFamily: "'Orbitron', sans-serif" }}
+                >
+                  EXIT REPLAY
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-neutral-300">
+            <span>
+              Bar {replaySession.currentIndex} / {replaySession.totalBars}
+              {replaySession.currentPrice
+                ? ` · $${replaySession.currentPrice.toFixed(2)}`
+                : ''}
+            </span>
+            <span>
+              Isolated Bal: ${replaySession.demoState.balance.toFixed(2)} · Max DD: $
+              {replaySession.maxDrawdownDollars.toFixed(2)} (
+              {replaySession.maxDrawdownPct.toFixed(2)}%)
+            </span>
+          </div>
+
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[10px] text-amber-300">
+            <span>{replaySession.windowLabel}</span>
+            {!replaySession.isReliableSample && (
+              <span className="border border-amber-400/60 bg-amber-400/15 px-1.5 py-0.5 text-[9px] font-extrabold text-amber-300">
+                SMALL SAMPLE - NOT RELIABLE
+              </span>
+            )}
+          </div>
+
+          {replaySession.isFinished && (
+            <div className="mt-2.5 border-t border-[#ff2d45]/30 pt-2">
+              {(() => {
+                const rPerf = computePerformanceMetrics(
+                  replaySession.demoState.closedTrades,
+                  replaySession.windowSeconds
+                );
+                return (
+                  <div className="space-y-1.5">
+                    {!rPerf.isReliableSample && (
+                      <div className="border border-amber-400/60 bg-amber-500/15 px-2 py-1 text-center text-[10px] font-extrabold text-amber-300">
+                        SMALL SAMPLE - NOT RELIABLE (requires n ≥ 10 trades &amp; ≥ 12h M1 history)
+                      </div>
+                    )}
+                    <div className="grid grid-cols-4 gap-1.5 text-center text-[10px]">
+                      <div className="border border-white/10 bg-black/70 p-1.5">
+                        <div className="text-neutral-400">TRADES</div>
+                        <div className="font-bold text-white">{rPerf.totalTrades}</div>
+                      </div>
+                      <div className="border border-white/10 bg-black/70 p-1.5">
+                        <div className="text-neutral-400">W / BE / L</div>
+                        <div className="font-bold text-white">
+                          <span className="text-[#00e676]">{rPerf.wins}</span>/
+                          <span className="text-amber-400">{rPerf.beCount}</span>/
+                          <span className="text-[#ff2d45]">{rPerf.losses}</span>
+                        </div>
+                      </div>
+                      <div className="border border-white/10 bg-black/70 p-1.5">
+                        <div className="text-neutral-400">EXPECTANCY</div>
+                        <div
+                          className="font-bold"
+                          style={{
+                            color: rPerf.expectancyR >= 0 ? '#00e676' : '#ff2d45',
+                          }}
+                        >
+                          {rPerf.expectancyR >= 0
+                            ? `+${rPerf.expectancyR.toFixed(2)}R`
+                            : `${rPerf.expectancyR.toFixed(2)}R`}
+                        </div>
+                      </div>
+                      <div className="border border-white/10 bg-black/70 p-1.5">
+                        <div className="text-neutral-400">MAX DD</div>
+                        <div className="font-bold text-[#ff2d45]">
+                          ${replaySession.maxDrawdownDollars.toFixed(2)} (
+                          {replaySession.maxDrawdownPct.toFixed(1)}%)
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="border border-white/10 bg-black/70 p-2 text-[10px]">
+                      <div className="font-bold text-[#ff2d45]">
+                        TRAILING-STOP MOVES ({replaySession.trailingMoves.length})
+                      </div>
+                      {replaySession.trailingMoves.length === 0 ? (
+                        <div className="mt-0.5 text-neutral-500">
+                          No trailing-stop moves triggered during this 24h window.
+                        </div>
+                      ) : (
+                        <div className="mt-1 max-h-24 space-y-0.5 overflow-y-auto text-neutral-300">
+                          {replaySession.trailingMoves.map((tm, idx) => (
+                            <div key={`${tm.tradeId}-${idx}`}>
+                              [{new Date(tm.time).toISOString().slice(11, 19)}] {tm.side}{' '}
+                              {formatTfLabel(tm.tf)}: SL {tm.fromSl.toFixed(2)} →{' '}
+                              {tm.toSl.toFixed(2)} @ ${tm.price.toFixed(2)}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Top Feed Status Banner if not connected */}
       {!isFeedReady && (
         <div
@@ -541,13 +1042,13 @@ export const RedSniperPage: React.FC = () => {
             className="text-[9px] font-bold tracking-[0.18em] text-neutral-400"
             style={{ fontFamily: "'Orbitron', sans-serif" }}
           >
-            BALANCE
+            {replaySession ? 'REPLAY BAL' : 'BALANCE'}
           </div>
           <div
             className="mt-1 text-sm font-bold text-white"
             style={{ fontFamily: "'JetBrains Mono', monospace" }}
           >
-            ${demoState.balance.toFixed(2)}
+            ${activeDisplayState.balance.toFixed(2)}
           </div>
         </div>
 
@@ -609,24 +1110,42 @@ export const RedSniperPage: React.FC = () => {
         </div>
       </section>
 
-      {/* 3) LIVE TICK VOLUME TILES */}
+      {/* 3) LIVE TICK VOLUME TILES (C: MARKET CLOSED - LAST SESSION + greyed values) */}
       <section
         className="mt-2.5 border border-[#ff2d45]/30 bg-[#07070b] p-3"
         style={{ clipPath: HUD_CLIP }}
       >
-        <div
-          className="mb-2 text-[10px] font-bold tracking-[0.22em] text-[#ff2d45]"
-          style={{ fontFamily: "'Orbitron', sans-serif" }}
-        >
-          LIVE TICK VOLUME
+        <div className="mb-2 flex items-center justify-between">
+          <div
+            className="text-[10px] font-bold tracking-[0.22em] text-[#ff2d45]"
+            style={{ fontFamily: "'Orbitron', sans-serif" }}
+          >
+            LIVE TICK VOLUME
+          </div>
+          {isMarketClosed && (
+            <span
+              className="border border-neutral-600 bg-neutral-900/80 px-2 py-0.5 text-[9px] font-bold tracking-[0.14em] text-neutral-400"
+              style={{ fontFamily: "'Orbitron', sans-serif" }}
+            >
+              MARKET CLOSED - LAST SESSION
+            </span>
+          )}
         </div>
         <div
-          className="grid grid-cols-2 gap-2 sm:grid-cols-4"
+          className={`grid grid-cols-2 gap-2 sm:grid-cols-4 ${
+            isMarketClosed ? 'opacity-55' : ''
+          }`}
           style={{ fontFamily: "'JetBrains Mono', monospace" }}
         >
           <div className="border border-white/10 bg-black/70 p-2">
-            <div className="text-[9px] text-neutral-400">M1 TICK VOL</div>
-            <div className="mt-0.5 text-sm font-bold text-white">
+            <div className="text-[9px] text-neutral-400">
+              {isMarketClosed ? 'M1 TICK VOL (LAST SESSION)' : 'M1 TICK VOL'}
+            </div>
+            <div
+              className={`mt-0.5 text-sm font-bold ${
+                isMarketClosed ? 'text-neutral-500' : 'text-white'
+              }`}
+            >
               {!isFeedReady
                 ? 'WAITING'
                 : m1VolumeStats.currentVol !== null
@@ -634,8 +1153,11 @@ export const RedSniperPage: React.FC = () => {
                 : 'NO DATA'}
             </div>
             <div className="mt-0.5 text-[9px] text-neutral-500">
-              last closed M1:{' '}
-              {m1VolumeStats.lastClosedVol !== null ? m1VolumeStats.lastClosedVol : '--'}
+              {isMarketClosed
+                ? 'MARKET CLOSED - LAST SESSION'
+                : `last closed M1: ${
+                    m1VolumeStats.lastClosedVol !== null ? m1VolumeStats.lastClosedVol : '--'
+                  }`}
             </div>
           </div>
 
@@ -644,10 +1166,11 @@ export const RedSniperPage: React.FC = () => {
             <div
               className="mt-0.5 text-sm font-bold"
               style={{
-                color:
-                  m1VolumeStats.projMult !== null && m1VolumeStats.projMult >= 1.5
-                    ? '#00e676'
-                    : '#f2f4f8',
+                color: isMarketClosed
+                  ? '#737373'
+                  : m1VolumeStats.projMult !== null && m1VolumeStats.projMult >= 1.5
+                  ? '#00e676'
+                  : '#f2f4f8',
               }}
             >
               {!isFeedReady
@@ -657,7 +1180,11 @@ export const RedSniperPage: React.FC = () => {
                 : 'NO DATA'}
             </div>
             <div className="mt-0.5 text-[9px] text-neutral-500">
-              proj: {m1VolumeStats.projectedVol !== null ? m1VolumeStats.projectedVol : '--'}
+              {isMarketClosed
+                ? 'MARKET CLOSED - LAST SESSION'
+                : `proj: ${
+                    m1VolumeStats.projectedVol !== null ? m1VolumeStats.projectedVol : '--'
+                  }`}
             </div>
           </div>
 
@@ -666,6 +1193,12 @@ export const RedSniperPage: React.FC = () => {
             <div className="mt-0.5 text-xs font-bold">
               {!isFeedReady ? (
                 <span className="text-neutral-400">WAITING</span>
+              ) : isMarketClosed ? (
+                <span className="text-neutral-500">
+                  {rolling60sFlow.buyPct !== null && rolling60sFlow.sellPct !== null
+                    ? `${rolling60sFlow.buyPct}%/${rolling60sFlow.sellPct}%`
+                    : '--'}
+                </span>
               ) : rolling60sFlow.buyPct !== null && rolling60sFlow.sellPct !== null ? (
                 <span>
                   <span className="text-[#00e676]">{rolling60sFlow.buyPct}%</span>
@@ -677,13 +1210,19 @@ export const RedSniperPage: React.FC = () => {
               )}
             </div>
             <div className="mt-0.5 text-[9px] text-neutral-500">
-              {rolling60sFlow.tickCount}/20 ticks
+              {isMarketClosed
+                ? 'MARKET CLOSED - LAST SESSION'
+                : `${rolling60sFlow.tickCount}/20 ticks`}
             </div>
           </div>
 
           <div className="border border-white/10 bg-black/70 p-2">
             <div className="text-[9px] text-neutral-400">ZONES COUNT</div>
-            <div className="mt-0.5 text-sm font-bold text-[#ff2d45]">
+            <div
+              className={`mt-0.5 text-sm font-bold ${
+                isMarketClosed ? 'text-neutral-500' : 'text-[#ff2d45]'
+              }`}
+            >
               {isFeedReady ? nearZones.length : 'WAITING'}
             </div>
             <div className="mt-0.5 text-[9px] text-neutral-500">
@@ -737,7 +1276,7 @@ export const RedSniperPage: React.FC = () => {
           </div>
 
           <div
-            className="flex items-center gap-2 text-[10px] font-bold"
+            className="flex items-center gap-1.5 text-[10px] font-bold"
             style={{ fontFamily: "'JetBrains Mono', monospace" }}
           >
             <span className="text-[#2ee6a0]">BUY {currentTfBuyCount}</span>
@@ -749,10 +1288,18 @@ export const RedSniperPage: React.FC = () => {
             </span>
             <button
               type="button"
+              onClick={handleCopyZoneDebug}
+              title="Copy JSON with all alive and dead:closeBeyond zones before selection for current timeframe"
+              className="ml-1 cursor-pointer border border-white/20 bg-black px-1.5 py-0.5 text-[9px] font-bold text-neutral-300 transition-colors hover:border-[#ff2d45] hover:text-[#ff2d45]"
+            >
+              {copiedDebug ? 'COPIED JSON' : 'Copy zone debug'}
+            </button>
+            <button
+              type="button"
               onClick={() => setSettingsOpen((v) => !v)}
               aria-label="Open Red Sniper Settings"
               title="Red Sniper Settings"
-              className={`ml-1 flex h-6 w-6 cursor-pointer items-center justify-center border transition-colors ${
+              className={`flex h-6 w-6 cursor-pointer items-center justify-center border transition-colors ${
                 settingsOpen
                   ? 'border-[#ff2d45] bg-[#ff2d45] text-black'
                   : 'border-white/20 bg-black text-neutral-300 hover:border-[#ff2d45] hover:text-[#ff2d45]'
@@ -763,7 +1310,7 @@ export const RedSniperPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Compact Settings Sheet (persisted in localStorage 'redSniperSettings') */}
+        {/* Compact Settings Sheet (persisted in localStorage 'redSniperSettings.v3') */}
         {settingsOpen && (
           <div
             className="border-b border-[#ff2d45]/30 bg-[#0b0b12] p-3 text-xs"
@@ -786,7 +1333,7 @@ export const RedSniperPage: React.FC = () => {
             </div>
 
             <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-              {/* Zones per timeframe (3-8, default 5) */}
+              {/* Zones per timeframe (3-8, default 6) */}
               <label className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
                 <span className="text-[9px] text-neutral-400">
                   ZONES / TF ({settings.maxZonesPerTf})
@@ -799,6 +1346,133 @@ export const RedSniperPage: React.FC = () => {
                   value={settings.maxZonesPerTf}
                   onChange={(e) =>
                     updateSettings({ maxZonesPerTf: Number(e.target.value) })
+                  }
+                  className="accent-[#ff2d45]"
+                />
+              </label>
+
+              {/* Zone mode (WICK | BODY) */}
+              <div className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
+                <span className="text-[9px] text-neutral-400">ZONE MODE</span>
+                <div className="grid grid-cols-2 gap-1">
+                  {(['WICK', 'BODY'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => updateSettings({ zoneMode: m })}
+                      className={`cursor-pointer py-1 text-[9.5px] font-bold ${
+                        settings.zoneMode === m
+                          ? 'bg-[#ff2d45] text-black'
+                          : 'border border-white/15 bg-black text-neutral-400'
+                      }`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* A.4 & 5) Retest mode (CANDLE | ATR | TOUCH_CANDLES) */}
+              <div className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
+                <div className="flex items-center justify-between text-[9px] text-neutral-400">
+                  <span>RETEST MODE</span>
+                  {settings.retestModeOverride && (
+                    <button
+                      type="button"
+                      onClick={() => updateSettings({ retestModeOverride: false })}
+                      className="cursor-pointer text-[8px] text-[#ff2d45] underline"
+                    >
+                      AUTO
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  {(['CANDLE', 'ATR', 'TOUCH_CANDLES'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() =>
+                        updateSettings({ retestMode: m, retestModeOverride: true })
+                      }
+                      className={`cursor-pointer py-1 text-[8.5px] font-bold ${
+                        activeRetestModeForTf === m
+                          ? 'bg-[#ff2d45] text-black'
+                          : 'border border-white/15 bg-black text-neutral-400'
+                      }`}
+                    >
+                      {m === 'TOUCH_CANDLES' ? 'TOUCHES' : m}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* A.1) Height cap ATR (1.0 - 3.0, default 2.0) */}
+              <label className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
+                <span className="text-[9px] text-neutral-400">
+                  HEIGHT CAP ({settings.heightCapAtr.toFixed(1)}×ATR)
+                </span>
+                <input
+                  type="range"
+                  min={1.0}
+                  max={3.0}
+                  step={0.1}
+                  value={settings.heightCapAtr}
+                  onChange={(e) =>
+                    updateSettings({ heightCapAtr: Number(e.target.value) })
+                  }
+                  className="accent-[#ff2d45]"
+                />
+              </label>
+
+              {/* A.3) Dead rule setting deadAtr (default 0.25, range 0 - 1.0) */}
+              <label className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
+                <span className="text-[9px] text-neutral-400">
+                  DEAD ATR ({settings.deadAtr.toFixed(2)}×ATR)
+                </span>
+                <input
+                  type="range"
+                  min={0.0}
+                  max={1.0}
+                  step={0.05}
+                  value={settings.deadAtr}
+                  onChange={(e) =>
+                    updateSettings({ deadAtr: Number(e.target.value) })
+                  }
+                  className="accent-[#ff2d45]"
+                />
+              </label>
+
+              {/* 2) FAR rule setting farAtr (default 25, range 10 - 60) */}
+              <label className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
+                <span className="text-[9px] text-neutral-400">
+                  FAR ATR ({settings.farAtr}×ATR)
+                </span>
+                <input
+                  type="range"
+                  min={10}
+                  max={60}
+                  step={1}
+                  value={settings.farAtr}
+                  onChange={(e) =>
+                    updateSettings({ farAtr: Number(e.target.value) })
+                  }
+                  className="accent-[#ff2d45]"
+                />
+              </label>
+
+              {/* Retest gap ATR (0.1 - 0.75, default 0.25) */}
+              <label className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
+                <span className="text-[9px] text-neutral-400">
+                  RETEST GAP ({settings.retestGapAtr.toFixed(2)}×ATR)
+                </span>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={0.75}
+                  step={0.05}
+                  value={settings.retestGapAtr}
+                  onChange={(e) =>
+                    updateSettings({ retestGapAtr: Number(e.target.value) })
                   }
                   className="accent-[#ff2d45]"
                 />
@@ -822,27 +1496,6 @@ export const RedSniperPage: React.FC = () => {
                 />
               </label>
 
-              {/* Zone width mode (FIXED_4 | ATR) */}
-              <div className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
-                <span className="text-[9px] text-neutral-400">ZONE WIDTH MODE</span>
-                <div className="grid grid-cols-2 gap-1">
-                  {(['ATR', 'FIXED_4'] as const).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => updateSettings({ zoneWidthMode: m })}
-                      className={`cursor-pointer py-1 text-[9.5px] font-bold ${
-                        settings.zoneWidthMode === m
-                          ? 'bg-[#ff2d45] text-black'
-                          : 'border border-white/15 bg-black text-neutral-400'
-                      }`}
-                    >
-                      {m === 'FIXED_4' ? '$4 FIXED' : '0.5×ATR'}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
               {/* SL buffer ($1-$3, default $1.5) */}
               <label className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
                 <span className="text-[9px] text-neutral-400">
@@ -856,6 +1509,46 @@ export const RedSniperPage: React.FC = () => {
                   value={settings.slBuffer}
                   onChange={(e) =>
                     updateSettings({ slBuffer: Number(e.target.value) })
+                  }
+                  className="accent-[#ff2d45]"
+                />
+              </label>
+
+              {/* Max risk points (default $15, 0 = off) */}
+              <label className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
+                <span className="text-[9px] text-neutral-400">
+                  MAX RISK (
+                  {settings.maxRiskPoints > 0
+                    ? `$${settings.maxRiskPoints.toFixed(0)}`
+                    : 'OFF'}
+                  )
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={40}
+                  step={1}
+                  value={settings.maxRiskPoints}
+                  onChange={(e) =>
+                    updateSettings({ maxRiskPoints: Number(e.target.value) })
+                  }
+                  className="accent-[#ff2d45]"
+                />
+              </label>
+
+              {/* Risk % per trade (default 1.5%) */}
+              <label className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
+                <span className="text-[9px] text-neutral-400">
+                  RISK / TRADE ({settings.riskPct.toFixed(2)}%)
+                </span>
+                <input
+                  type="range"
+                  min={0.5}
+                  max={5.0}
+                  step={0.25}
+                  value={settings.riskPct}
+                  onChange={(e) =>
+                    updateSettings({ riskPct: Number(e.target.value) })
                   }
                   className="accent-[#ff2d45]"
                 />
@@ -897,24 +1590,6 @@ export const RedSniperPage: React.FC = () => {
                 />
               </label>
 
-              {/* Risk % per trade (default 1.5%) */}
-              <label className="flex flex-col gap-1 border border-white/10 bg-black/70 p-2">
-                <span className="text-[9px] text-neutral-400">
-                  RISK / TRADE ({settings.riskPct.toFixed(2)}%)
-                </span>
-                <input
-                  type="range"
-                  min={0.5}
-                  max={5.0}
-                  step={0.25}
-                  value={settings.riskPct}
-                  onChange={(e) =>
-                    updateSettings({ riskPct: Number(e.target.value) })
-                  }
-                  className="accent-[#ff2d45]"
-                />
-              </label>
-
               {/* Show BOS/CHoCH (default OFF) */}
               <div className="flex items-center justify-between border border-white/10 bg-black/70 p-2">
                 <span className="text-[9px] text-neutral-400">BOS / CHoCH</span>
@@ -933,23 +1608,139 @@ export const RedSniperPage: React.FC = () => {
                 </button>
               </div>
 
-              {/* Show far zones (default OFF) */}
+              {/* 3) Show consumed zones (pctLeft = 0) default OFF */}
               <div className="flex items-center justify-between border border-white/10 bg-black/70 p-2">
-                <span className="text-[9px] text-neutral-400">FAR ZONES</span>
+                <span className="text-[9px] text-neutral-400">SHOW CONSUMED</span>
                 <button
                   type="button"
                   onClick={() =>
-                    updateSettings({ showFarZones: !settings.showFarZones })
+                    updateSettings({
+                      showConsumedZones: !settings.showConsumedZones,
+                    })
                   }
                   className={`cursor-pointer px-2 py-0.5 text-[10px] font-bold ${
-                    settings.showFarZones
+                    settings.showConsumedZones
                       ? 'bg-[#ff2d45] text-black'
                       : 'border border-white/20 bg-black text-neutral-400'
                   }`}
                 >
-                  {settings.showFarZones ? 'ON' : 'OFF'}
+                  {settings.showConsumedZones ? 'ON' : 'OFF'}
                 </button>
               </div>
+            </div>
+
+            {/* D.1) Advanced Editable Power Weights (default 0.40 score / 0.25 volume / 0.20 freshness / 0.15 HTF, always re-normalized) */}
+            <div className="mt-2.5 border border-white/10 bg-black/70 p-2">
+              <div className="mb-1.5 flex items-center justify-between text-[9px] text-neutral-400">
+                <span>POWER WEIGHTS (AUTO RE-NORMALIZED)</span>
+                <span>
+                  {(settings.weightScore * 100).toFixed(0)} /{' '}
+                  {(settings.weightVolume * 100).toFixed(0)} /{' '}
+                  {(settings.weightFreshness * 100).toFixed(0)} /{' '}
+                  {(settings.weightHtf * 100).toFixed(0)}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <label className="flex flex-col gap-0.5">
+                  <span className="text-[8.5px] text-neutral-400">
+                    SCORE ({settings.weightScore.toFixed(2)})
+                  </span>
+                  <input
+                    type="range"
+                    min={0.05}
+                    max={0.8}
+                    step={0.05}
+                    value={settings.weightScore}
+                    onChange={(e) =>
+                      updateSettings({ weightScore: Number(e.target.value) })
+                    }
+                    className="accent-[#ff2d45]"
+                  />
+                </label>
+                <label className="flex flex-col gap-0.5">
+                  <span className="text-[8.5px] text-neutral-400">
+                    VOLUME ({settings.weightVolume.toFixed(2)})
+                  </span>
+                  <input
+                    type="range"
+                    min={0.05}
+                    max={0.8}
+                    step={0.05}
+                    value={settings.weightVolume}
+                    onChange={(e) =>
+                      updateSettings({ weightVolume: Number(e.target.value) })
+                    }
+                    className="accent-[#ff2d45]"
+                  />
+                </label>
+                <label className="flex flex-col gap-0.5">
+                  <span className="text-[8.5px] text-neutral-400">
+                    FRESH ({settings.weightFreshness.toFixed(2)})
+                  </span>
+                  <input
+                    type="range"
+                    min={0.05}
+                    max={0.8}
+                    step={0.05}
+                    value={settings.weightFreshness}
+                    onChange={(e) =>
+                      updateSettings({ weightFreshness: Number(e.target.value) })
+                    }
+                    className="accent-[#ff2d45]"
+                  />
+                </label>
+                <label className="flex flex-col gap-0.5">
+                  <span className="text-[8.5px] text-neutral-400">
+                    HTF ({settings.weightHtf.toFixed(2)})
+                  </span>
+                  <input
+                    type="range"
+                    min={0.05}
+                    max={0.8}
+                    step={0.05}
+                    value={settings.weightHtf}
+                    onChange={(e) =>
+                      updateSettings({ weightHtf: Number(e.target.value) })
+                    }
+                    className="accent-[#ff2d45]"
+                  />
+                </label>
+              </div>
+            </div>
+
+            {/* D.2) REPLAY MODE (settings, label "REPLAY - NOT LIVE") */}
+            <div className="mt-2.5 flex items-center justify-between border border-[#ff2d45]/40 bg-[#170408] p-2">
+              <div>
+                <div
+                  className="text-[10px] font-extrabold tracking-[0.14em] text-[#ff2d45]"
+                  style={{ fontFamily: "'Orbitron', sans-serif" }}
+                >
+                  REPLAY - NOT LIVE
+                </div>
+                <div className="text-[9px] text-neutral-400">
+                  {m1WindowInfo.windowLabel} @ 20x (isolated demo account &amp; history)
+                </div>
+              </div>
+              {replaySession?.isRunning ? (
+                <button
+                  type="button"
+                  onClick={handleStopReplay}
+                  className="cursor-pointer border border-[#ff2d45] bg-[#ff2d45] px-3 py-1 text-[10px] font-extrabold text-black"
+                  style={{ fontFamily: "'Orbitron', sans-serif" }}
+                >
+                  STOP
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleStartReplay}
+                  disabled={(bars['1m']?.length ?? 0) < 30}
+                  className="cursor-pointer border border-[#ff2d45] bg-[#ff2d45]/20 px-3 py-1 text-[10px] font-extrabold text-[#ff2d45] hover:bg-[#ff2d45] hover:text-black disabled:opacity-40"
+                  style={{ fontFamily: "'Orbitron', sans-serif" }}
+                >
+                  START REPLAY
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -960,37 +1751,59 @@ export const RedSniperPage: React.FC = () => {
           atr14={currentTfAnalysis?.atr14 ?? 2.5}
           zones={currentTfZones}
           structures={currentTfAnalysis?.structures || []}
-          dualStructure={currentTfAnalysis?.dualStructure}
           showBosChoch={settings.showBosChoch}
-          openTrades={demoState.openTrades}
+          showFarZones={settings.showFarZones}
+          showConsumedZones={settings.showConsumedZones}
+          maxZones={settings.maxZonesPerTf}
+          highlightedZoneId={highlightedZoneId}
+          openTrades={activeDisplayState.openTrades}
           pendingPlan={pendingPlan}
-          livePrice={livePrice}
+          livePrice={activeDisplayPrice}
           isConnected={isFeedReady}
         />
 
-        {/* Zone Chips under the chart (sorted high to low, matching Fire Zone chips) */}
+        {/* Zone Chips under the chart (B.1: tap a chip to highlight that zone on the chart for 3s with a full label) */}
         {currentTfZones.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5 border-t border-white/10 px-3 py-2">
             {currentTfZones.map((z) => {
               const isSell = z.side === 'SELL';
-              const slotLabel = z.slotType === 'NEAREST' ? 'near' : 'deep';
+              const isHigh = highlightedZoneId === z.id;
               const chipColor = isSell ? '#ff4d66' : '#2fe08a';
-              const chipBg = isSell
+              const chipBg = isHigh
+                ? isSell
+                  ? 'rgba(255, 77, 102, 0.28)'
+                  : 'rgba(47, 224, 138, 0.28)'
+                : isSell
                 ? 'rgba(255, 77, 102, 0.08)'
                 : 'rgba(47, 224, 138, 0.08)';
+              const statusText =
+                z.status === 'FRESH'
+                  ? 'FRESH'
+                  : `${z.status} ${z.retests}x (${z.pctLeft}%)`;
               return (
-                <span
+                <button
                   key={z.id}
-                  className="rounded-[7px] px-2 py-1 text-[10px] font-bold"
+                  type="button"
+                  onClick={() => handleHighlightZone(z.id)}
+                  title="Tap to highlight zone on chart for 3 seconds"
+                  className={`cursor-pointer rounded-[7px] px-2 py-1 text-[10px] font-bold transition-all ${
+                    z.consumed && !settings.showConsumedZones ? 'opacity-55' : ''
+                  }`}
                   style={{
                     fontFamily: "'JetBrains Mono', monospace",
-                    color: chipColor,
+                    color: isHigh ? '#ffffff' : chipColor,
                     backgroundColor: chipBg,
-                    border: `1px solid ${chipColor}`,
+                    border: `1px solid ${isHigh ? '#ffffff' : chipColor}`,
                   }}
                 >
-                  {z.side} {slotLabel} {z.anchor.toFixed(2)} - {z.strengthLabel} · PWR {z.power}
-                </span>
+                  {z.side} {z.bottom.toFixed(2)}–{z.top.toFixed(2)} · {statusText} · PWR{' '}
+                  {z.power}
+                  {z.consumed ? ' · consumed' : ''}
+                  {z.trimmed ? ' · trim' : ''}
+                  {z.weak ? ' · weak' : ''}
+                  {z.sweep ? ' · sweep' : ''}
+                  {z.isFar ? ' · FAR' : ''}
+                </button>
               );
             })}
           </div>
@@ -1015,7 +1828,7 @@ export const RedSniperPage: React.FC = () => {
               style={{ fontFamily: "'JetBrains Mono', monospace" }}
             >
               PWR ≥ {settings.minPowerToTrade} · {settings.riskPct}% RISK · MAX 3 OPEN (
-              {demoState.openTrades.length}/3)
+              {activeDisplayState.openTrades.length}/3)
             </div>
           </div>
 
@@ -1053,7 +1866,11 @@ export const RedSniperPage: React.FC = () => {
           style={{ fontFamily: "'JetBrains Mono', monospace" }}
         >
           <span className="text-[#ff2d45]">BOT: </span>
-          <span>{botStatusLine}</span>
+          <span>
+            {replaySession?.isRunning
+              ? `REPLAY @ $${(replaySession.currentPrice ?? 0).toFixed(2)} (Bar ${replaySession.currentIndex}/${replaySession.totalBars})`
+              : botStatusLine}
+          </span>
         </div>
       </section>
 
@@ -1073,8 +1890,8 @@ export const RedSniperPage: React.FC = () => {
             className="text-[11px] font-bold text-neutral-300"
             style={{ fontFamily: "'JetBrains Mono', monospace" }}
           >
-            {demoState.openTrades.length > 0
-              ? `ACTIVE POSITIONS (${demoState.openTrades.length})`
+            {activeDisplayState.openTrades.length > 0
+              ? `ACTIVE POSITIONS (${activeDisplayState.openTrades.length})`
               : 'PENDING NEAREST ZONE'}
           </span>
         </div>
@@ -1086,10 +1903,13 @@ export const RedSniperPage: React.FC = () => {
           >
             WAITING FOR LIVE FEED
           </div>
-        ) : demoState.openTrades.length > 0 ? (
+        ) : activeDisplayState.openTrades.length > 0 ? (
           <div className="space-y-2.5">
-            {demoState.openTrades.map((tr: OpenSniperTrade) => {
-              const { totalPnl, currentR } = computeOpenTradeFloatingPnl(tr, livePrice);
+            {activeDisplayState.openTrades.map((tr: OpenSniperTrade) => {
+              const { totalPnl, currentR } = computeOpenTradeFloatingPnl(
+                tr,
+                activeDisplayPrice
+              );
               const isBuy = tr.side === 'BUY';
               return (
                 <div
@@ -1114,13 +1934,15 @@ export const RedSniperPage: React.FC = () => {
                       <span className="text-[11px] text-[#ff2d45]">PWR {tr.power}</span>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => handleManualCloseTrade(tr.id)}
-                      className="cursor-pointer border border-[#ff2d45]/50 bg-[#ff2d45]/10 px-2 py-0.5 text-[10px] font-bold text-[#ff2d45] hover:bg-[#ff2d45] hover:text-black"
-                    >
-                      CLOSE
-                    </button>
+                    {!replaySession && (
+                      <button
+                        type="button"
+                        onClick={() => handleManualCloseTrade(tr.id)}
+                        className="cursor-pointer border border-[#ff2d45]/50 bg-[#ff2d45]/10 px-2 py-0.5 text-[10px] font-bold text-[#ff2d45] hover:bg-[#ff2d45] hover:text-black"
+                      >
+                        CLOSE
+                      </button>
+                    )}
                   </div>
 
                   <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
@@ -1217,6 +2039,9 @@ export const RedSniperPage: React.FC = () => {
                 </span>
               )}
               {pendingPlan.htfBlocked ? ' · HTF BLOCKED (1H+4H OPPOSE)' : ''}
+              {pendingPlan.maxRiskSkipped
+                ? ` · SKIPPED (RISK ${pendingPlan.riskPoints.toFixed(1)} > MAX $${settings.maxRiskPoints})`
+                : ''}
             </div>
 
             <div className="mt-2.5 grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
@@ -1259,25 +2084,43 @@ export const RedSniperPage: React.FC = () => {
         className="mt-2.5 border border-[#ff2d45]/35 bg-[#07070b] p-3.5"
         style={{ clipPath: HUD_CLIP }}
       >
-        <div className="mb-2.5 flex items-center justify-between border-b border-[#ff2d45]/20 pb-2">
+        <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 border-b border-[#ff2d45]/20 pb-2">
           <span
             className="text-xs font-extrabold tracking-[0.2em] text-[#ff2d45]"
             style={{ fontFamily: "'Orbitron', sans-serif" }}
           >
             STRONG ZONES // ALL TIMEFRAMES
           </span>
-          <button
-            type="button"
-            onClick={() => updateSettings({ showFarZones: !settings.showFarZones })}
-            className={`cursor-pointer border px-2 py-0.5 text-[10px] font-bold tracking-wider transition-colors ${
-              settings.showFarZones
-                ? 'border-[#ff2d45] bg-[#ff2d45]/20 text-[#ff2d45]'
-                : 'border-white/15 bg-black text-neutral-400 hover:border-white/35 hover:text-white'
-            }`}
-            style={{ fontFamily: "'JetBrains Mono', monospace" }}
-          >
-            SHOW FAR ZONES: {settings.showFarZones ? 'ON' : 'OFF'}
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() =>
+                updateSettings({
+                  showConsumedZones: !settings.showConsumedZones,
+                })
+              }
+              className={`cursor-pointer border px-2 py-0.5 text-[10px] font-bold tracking-wider transition-colors ${
+                settings.showConsumedZones
+                  ? 'border-[#ff2d45] bg-[#ff2d45]/20 text-[#ff2d45]'
+                  : 'border-white/15 bg-black text-neutral-400 hover:border-white/35 hover:text-white'
+              }`}
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              CONSUMED: {settings.showConsumedZones ? 'SHOWN' : 'HIDDEN'}
+            </button>
+            <button
+              type="button"
+              onClick={() => updateSettings({ showFarZones: !settings.showFarZones })}
+              className={`cursor-pointer border px-2 py-0.5 text-[10px] font-bold tracking-wider transition-colors ${
+                settings.showFarZones
+                  ? 'border-[#ff2d45] bg-[#ff2d45]/20 text-[#ff2d45]'
+                  : 'border-white/15 bg-black text-neutral-400 hover:border-white/35 hover:text-white'
+              }`}
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              SHOW FAR ZONES: {settings.showFarZones ? 'ON' : 'OFF'}
+            </button>
+          </div>
         </div>
 
         {!isFeedReady ? (
@@ -1292,21 +2135,22 @@ export const RedSniperPage: React.FC = () => {
             className="py-4 text-center text-xs text-neutral-400"
             style={{ fontFamily: "'JetBrains Mono', monospace" }}
           >
-            NO NEAR ZONES WITHIN 6×ATR / 1.5%
+            NO NEAR ZONES WITHIN {settings.farAtr}×ATR
           </div>
         ) : (
           <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
             {sortedStrongZones.map((z) => {
               const isBuy = z.side === 'BUY';
-              const isSelectedTf = z.tf === selectedTf;
+              const isSelectedTf = z.mergedTfs.includes(selectedTf);
               const distPts =
-                livePrice !== null ? getZoneDistancePts(z, livePrice) : null;
+                livePrice !== null ? getZoneDistancePts(z, livePrice) : z.distancePts;
               const distLabel =
-                distPts === null
-                  ? '--'
-                  : distPts === 0
-                  ? 'INSIDE'
-                  : `${distPts.toFixed(1)} pts away`;
+                distPts === 0 ? '0.0 pts (INSIDE)' : `${distPts.toFixed(1)} pts`;
+              const tfBadgesLabel = z.mergedTfs.map(formatTfLabel).join(' ');
+              const stateLabel =
+                z.status === 'FRESH'
+                  ? 'FRESH · 100% left'
+                  : `${z.status} ${z.retests}x · ${z.pctLeft}% left`;
 
               return (
                 <button
@@ -1317,7 +2161,7 @@ export const RedSniperPage: React.FC = () => {
                     isSelectedTf
                       ? 'border-[#ff2d45] bg-[#14060a]'
                       : 'border-white/10 bg-black/80 hover:border-[#ff2d45]/50'
-                  }`}
+                  } ${z.consumed && !settings.showConsumedZones ? 'opacity-60' : ''}`}
                   style={{
                     clipPath: HUD_CLIP_SM,
                     fontFamily: "'JetBrains Mono', monospace",
@@ -1329,7 +2173,7 @@ export const RedSniperPage: React.FC = () => {
                         className="px-1.5 py-0.5 text-[10px] font-extrabold text-black"
                         style={{ background: isBuy ? '#2fe08a' : '#ff4d66' }}
                       >
-                        {formatTfLabel(z.tf)} {z.side}
+                        {tfBadgesLabel} {z.side}
                       </span>
                       <span className="text-xs font-bold text-white">
                         {z.bottom.toFixed(2)} – {z.top.toFixed(2)}
@@ -1342,8 +2186,33 @@ export const RedSniperPage: React.FC = () => {
                         {distLabel}
                       </span>
                       <span className="text-[10px] text-neutral-400">
-                        · {z.status} · {z.pctLeft}% left · {z.retests}x
+                        · {stateLabel}
                       </span>
+                      {z.consumed && (
+                        <span className="border border-rose-500/60 bg-rose-500/15 px-1 py-0.2 text-[9px] font-bold text-rose-300">
+                          consumed
+                        </span>
+                      )}
+                      {z.trimmed && (
+                        <span className="border border-amber-400/50 bg-amber-400/10 px-1 py-0.2 text-[9px] font-bold text-amber-300">
+                          trim
+                        </span>
+                      )}
+                      {z.weak && (
+                        <span className="border border-purple-400/50 bg-purple-400/10 px-1 py-0.2 text-[9px] font-bold text-purple-300">
+                          weak
+                        </span>
+                      )}
+                      {z.sweep && (
+                        <span className="border border-cyan-400/50 bg-cyan-400/10 px-1 py-0.2 text-[9px] font-bold text-cyan-300">
+                          sweep
+                        </span>
+                      )}
+                      {z.isFar && (
+                        <span className="border border-[#ff2d45]/60 bg-[#ff2d45]/15 px-1 py-0.2 text-[9px] font-bold text-[#ff2d45]">
+                          FAR
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex shrink-0 items-center gap-2">
@@ -1365,7 +2234,7 @@ export const RedSniperPage: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Real inputs breakdown line: "score 9 STRONG · retests 0 · vol 1.8x · dep 2.4 ATR · HTF ok" */}
+                  {/* Real inputs breakdown line: "score 9 · retests 0 · vol 1.8x · dep 2.4 ATR · HTF ok" */}
                   <div className="mt-1 text-[10px] text-neutral-400">{z.breakdown}</div>
                 </button>
               );
@@ -1374,18 +2243,26 @@ export const RedSniperPage: React.FC = () => {
         )}
       </section>
 
-      {/* 9) HISTORICAL PERFORMANCE */}
+      {/* 9) HISTORICAL PERFORMANCE + D.1 POWER CALIBRATION */}
       <section
         className="mt-2.5 border border-[#ff2d45]/35 bg-[#07070b] p-3.5"
         style={{ clipPath: HUD_CLIP }}
       >
-        <div className="mb-3 flex items-center justify-between border-b border-[#ff2d45]/20 pb-2">
-          <span
-            className="text-xs font-extrabold tracking-[0.2em] text-[#ff2d45]"
-            style={{ fontFamily: "'Orbitron', sans-serif" }}
-          >
-            HISTORICAL PERFORMANCE
-          </span>
+        <div className="mb-2 flex items-center justify-between border-b border-[#ff2d45]/20 pb-2">
+          <div>
+            <span
+              className="text-xs font-extrabold tracking-[0.2em] text-[#ff2d45]"
+              style={{ fontFamily: "'Orbitron', sans-serif" }}
+            >
+              HISTORICAL PERFORMANCE
+            </span>
+            <div
+              className="mt-0.5 text-[10px] text-neutral-400"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              {replaySession ? replaySession.windowLabel : m1WindowInfo.windowLabel}
+            </div>
+          </div>
           <span
             className="text-[11px] font-bold text-neutral-300"
             style={{ fontFamily: "'JetBrains Mono', monospace" }}
@@ -1393,6 +2270,16 @@ export const RedSniperPage: React.FC = () => {
             TP2+ WIN RATE
           </span>
         </div>
+
+        {!perf.isReliableSample && (
+          <div
+            className="mb-2.5 border border-amber-400/50 bg-amber-500/10 px-2.5 py-1 text-center text-[10px] font-extrabold tracking-wider text-amber-300"
+            style={{ fontFamily: "'JetBrains Mono', monospace" }}
+          >
+            SMALL SAMPLE - NOT RELIABLE (n={perf.totalTrades} trades ·{' '}
+            {replaySession ? replaySession.windowLabel : m1WindowInfo.windowLabel})
+          </div>
+        )}
 
         <div className="flex items-center gap-4">
           {/* Donut Chart */}
@@ -1520,6 +2407,88 @@ export const RedSniperPage: React.FC = () => {
             />
           </div>
         </div>
+
+        {/* D.1) POWER CALIBRATION SECTION */}
+        <div
+          className="mt-3.5 border-t border-[#ff2d45]/25 pt-3"
+          style={{ fontFamily: "'JetBrains Mono', monospace" }}
+        >
+          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1">
+            <span
+              className="text-[10px] font-extrabold tracking-[0.18em] text-[#ff2d45]"
+              style={{ fontFamily: "'Orbitron', sans-serif" }}
+            >
+              POWER CALIBRATION (HISTORICAL ZONES)
+            </span>
+            <span className="text-[9px] text-neutral-400">
+              BOUNCE = +1R vs BREAK ({powerCalibration.totalResolved} resolved)
+            </span>
+          </div>
+
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-1.5 text-[9.5px] text-neutral-400">
+            <span>{powerCalibration.windowLabel}</span>
+            {!powerCalibration.isReliableWindow && (
+              <span className="border border-amber-400/50 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-extrabold text-amber-300">
+                {powerCalibration.summaryLabel}
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {powerCalibration.buckets.map((b) => (
+              <div
+                key={b.bucket}
+                className="border border-white/10 bg-black/70 p-2 text-[10px]"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-extrabold text-white">PWR {b.bucket}</span>
+                  <span className="text-[9px] text-neutral-400">n={b.n}</span>
+                </div>
+                <div className="mt-1 flex items-center justify-between">
+                  <span className="text-neutral-400">Bounce:</span>
+                  <span
+                    className="font-bold"
+                    style={{
+                      color:
+                        b.n === 0
+                          ? '#94a3b8'
+                          : b.bouncePct >= 55
+                          ? '#00e676'
+                          : b.bouncePct >= 45
+                          ? '#ffab00'
+                          : '#ff2d45',
+                    }}
+                  >
+                    {b.n > 0 ? `${b.bouncePct}%` : '--'}
+                  </span>
+                </div>
+                <div className="mt-0.5 flex items-center justify-between">
+                  <span className="text-neutral-400">Avg R:</span>
+                  <span
+                    className="font-bold"
+                    style={{
+                      color:
+                        b.n === 0
+                          ? '#94a3b8'
+                          : b.avgR > 0
+                          ? '#00e676'
+                          : b.avgR < 0
+                          ? '#ff2d45'
+                          : '#94a3b8',
+                    }}
+                  >
+                    {b.n > 0 ? `${b.avgR >= 0 ? '+' : ''}${b.avgR.toFixed(2)}R` : '--'}
+                  </span>
+                </div>
+                {!b.reliable && (
+                  <div className="mt-1 text-[8px] font-semibold text-amber-400">
+                    SMALL SAMPLE - NOT RELIABLE
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
       </section>
 
       {/* 10) SESSIONS CARD (Tokyo/London/New York OPEN/CLOSED + window label) */}
@@ -1592,17 +2561,17 @@ export const RedSniperPage: React.FC = () => {
             className="text-xs font-extrabold tracking-[0.2em] text-[#ff2d45]"
             style={{ fontFamily: "'Orbitron', sans-serif" }}
           >
-            TRADE HISTORY
+            {replaySession ? 'REPLAY TRADE HISTORY (ISOLATED)' : 'TRADE HISTORY'}
           </span>
           <span
             className="text-[11px] text-neutral-400"
             style={{ fontFamily: "'JetBrains Mono', monospace" }}
           >
-            {demoState.closedTrades.length} LOGGED
+            {activeDisplayState.closedTrades.length} LOGGED
           </span>
         </div>
 
-        {demoState.closedTrades.length === 0 ? (
+        {activeDisplayState.closedTrades.length === 0 ? (
           <div
             className="py-4 text-center text-xs text-neutral-400"
             style={{ fontFamily: "'JetBrains Mono', monospace" }}
@@ -1614,7 +2583,7 @@ export const RedSniperPage: React.FC = () => {
             className="max-h-72 space-y-2 overflow-y-auto pr-1 text-xs"
             style={{ fontFamily: "'JetBrains Mono', monospace" }}
           >
-            {demoState.closedTrades.map((t) => {
+            {activeDisplayState.closedTrades.map((t) => {
               const timeStr = new Date(t.time).toLocaleTimeString([], {
                 hour: '2-digit',
                 minute: '2-digit',
@@ -1658,6 +2627,99 @@ export const RedSniperPage: React.FC = () => {
                       {t.pnl >= 0 ? `+$${t.pnl.toFixed(2)}` : `-$${Math.abs(t.pnl).toFixed(2)}`}{' '}
                       ({t.r >= 0 ? `+${t.r.toFixed(2)}R` : `${t.r.toFixed(2)}R`})
                     </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* 12) LIVE TRADE LOG ("BOT LOG", last 200 entries, localStorage + server file) */}
+      <section
+        className="mt-2.5 border border-[#ff2d45]/35 bg-[#07070b] p-3.5"
+        style={{ clipPath: HUD_CLIP }}
+      >
+        <div className="mb-2.5 flex items-center justify-between border-b border-[#ff2d45]/20 pb-2">
+          <div>
+            <span
+              className="text-xs font-extrabold tracking-[0.2em] text-[#ff2d45]"
+              style={{ fontFamily: "'Orbitron', sans-serif" }}
+            >
+              BOT LOG
+            </span>
+            <span
+              className="ml-2 text-[10px] text-neutral-400"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              ({botLog.length}/200 PERSISTED)
+            </span>
+          </div>
+          <div
+            className="flex items-center gap-1.5"
+            style={{ fontFamily: "'JetBrains Mono', monospace" }}
+          >
+            {botLog.length > 0 && (
+              <button
+                type="button"
+                onClick={handleClearBotLog}
+                className="cursor-pointer border border-white/15 bg-black px-2 py-0.5 text-[9.5px] font-bold text-neutral-400 hover:border-white/40 hover:text-white"
+              >
+                CLEAR
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleCopyBotLog}
+              className="cursor-pointer border border-[#ff2d45] bg-[#ff2d45]/15 px-2.5 py-0.5 text-[10px] font-bold text-[#ff2d45] transition-colors hover:bg-[#ff2d45] hover:text-black"
+            >
+              {copiedBotLog ? 'COPIED BOT LOG' : 'Copy bot log'}
+            </button>
+          </div>
+        </div>
+
+        {botLog.length === 0 ? (
+          <div
+            className="py-4 text-center text-xs text-neutral-400"
+            style={{ fontFamily: "'JetBrains Mono', monospace" }}
+          >
+            NO BOT EVENTS LOGGED YET
+          </div>
+        ) : (
+          <div
+            className="max-h-72 space-y-1.5 overflow-y-auto pr-1 text-[11px]"
+            style={{ fontFamily: "'JetBrains Mono', monospace" }}
+          >
+            {botLog.map((entry) => {
+              const badgeColor =
+                entry.type === 'ENTRY'
+                  ? '#00e676'
+                  : entry.type === 'TP1_BE'
+                  ? '#00e5ff'
+                  : entry.type === 'TRAIL_MOVE'
+                  ? '#ffab00'
+                  : entry.type === 'EXIT'
+                  ? '#ff2d45'
+                  : '#94a3b8';
+              return (
+                <div
+                  key={entry.id}
+                  className="border border-white/10 bg-black/80 px-2.5 py-1.5"
+                  style={{ clipPath: HUD_CLIP_SM }}
+                >
+                  <div className="flex items-center justify-between gap-2 text-[9.5px]">
+                    <span
+                      className="px-1.5 py-0.2 font-extrabold text-black"
+                      style={{ background: badgeColor }}
+                    >
+                      {entry.type}
+                    </span>
+                    <span className="text-neutral-500">
+                      {entry.isoTime.replace('T', ' ').slice(0, 19)} UTC
+                    </span>
+                  </div>
+                  <div className="mt-1 text-[10.5px] text-neutral-200">
+                    {entry.message}
                   </div>
                 </div>
               );

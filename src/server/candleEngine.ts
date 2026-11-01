@@ -236,7 +236,7 @@ export function buildD1FromH1(h1Candles: Candle[]): Candle[] {
 }
 
 // Merge candle series keeping history and sorted ascending
-export function mergeCandleSeries(existing: Candle[], incoming: Candle[], maxLimit: number = 1200): Candle[] {
+export function mergeCandleSeries(existing: Candle[], incoming: Candle[], maxLimit: number = 5000): Candle[] {
   const byTime = new Map<number, Candle>();
   for (const c of existing) {
     const t = new Date(c.openTime).getTime();
@@ -259,9 +259,333 @@ export function mergeCandleSeries(existing: Candle[], incoming: Candle[], maxLim
   return sorted;
 }
 
+// ============================================================================
+// RED SNIPER LONG-TERM JSONL CANDLE STORE & BOT LOG PERSISTENCE
+// ============================================================================
+
+export type RedSniperStoreTf = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d';
+export type RedSniperDirectStoreTf = Exclude<RedSniperStoreTf, '3m'>;
+
+export interface RedSniperStoredCandle {
+  time: number; // UTC unix timestamp in seconds (bucket-aligned)
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  tickVolume: number;
+  buyVol: number;
+  sellVol: number;
+  isClosed?: boolean;
+}
+
+const RED_SNIPER_DIRECT_TFS: RedSniperDirectStoreTf[] = [
+  '1m',
+  '5m',
+  '15m',
+  '30m',
+  '1h',
+  '4h',
+  '1d',
+];
+
+const redSniperStore: Record<RedSniperDirectStoreTf, RedSniperStoredCandle[]> = {
+  '1m': [],
+  '5m': [],
+  '15m': [],
+  '30m': [],
+  '1h': [],
+  '4h': [],
+  '1d': [],
+};
+
+let lastRedSniperJsonlSaveMs = 0;
+let redSniperWorkerStarted = false;
+
+export function getRedSniperTfPeriodSeconds(tf: RedSniperStoreTf): number {
+  switch (tf) {
+    case '1m':
+      return 60;
+    case '3m':
+      return 180;
+    case '5m':
+      return 300;
+    case '15m':
+      return 900;
+    case '30m':
+      return 1800;
+    case '1h':
+      return 3600;
+    case '4h':
+      return 14400;
+    case '1d':
+      return 86400;
+  }
+}
+
+export function alignTimeSecToTf(timeSec: number, tf: RedSniperStoreTf): number {
+  const p = getRedSniperTfPeriodSeconds(tf);
+  return Math.floor(timeSec / p) * p;
+}
+
+function getRedSniperJsonlFilePath(tf: RedSniperDirectStoreTf): string {
+  return path.resolve(DATA_DIR, `redsniper_candles_${tf}.jsonl`);
+}
+
+function candleToRedSniperStored(c: Candle, tf: RedSniperDirectStoreTf): RedSniperStoredCandle | null {
+  const ms = Date.parse(c.openTime);
+  if (Number.isNaN(ms) || ms <= 0) return null;
+  const time = alignTimeSecToTf(Math.floor(ms / 1000), tf);
+  if (!Number.isFinite(c.open) || !Number.isFinite(c.high) || !Number.isFinite(c.low) || !Number.isFinite(c.close)) {
+    return null;
+  }
+  const tickVolume = Math.max(0, Number(c.volume || 0));
+  return {
+    time,
+    open: Number(c.open),
+    high: Number(c.high),
+    low: Number(c.low),
+    close: Number(c.close),
+    tickVolume,
+    buyVol: 0,
+    sellVol: 0,
+    isClosed: Boolean(c.isClosed),
+  };
+}
+
+/**
+ * Pure deduplication and merge by candle `time` (unix seconds), sorted ascending.
+ * Preserves local buyVol/sellVol ratio when incoming official OHLC has 0 buyVol/sellVol.
+ */
+export function dedupeAndMergeRedSniperCandles(
+  existing: RedSniperStoredCandle[],
+  incoming: RedSniperStoredCandle[],
+  maxLimit: number = 10000
+): RedSniperStoredCandle[] {
+  const byTime = new Map<number, RedSniperStoredCandle>();
+
+  for (const c of existing) {
+    if (!c || !Number.isFinite(c.time) || c.time <= 0) continue;
+    byTime.set(c.time, { ...c });
+  }
+
+  for (const c of incoming) {
+    if (!c || !Number.isFinite(c.time) || c.time <= 0) continue;
+    const prev = byTime.get(c.time);
+    if (!prev) {
+      byTime.set(c.time, { ...c });
+    } else {
+      const tickVolume = c.tickVolume > 0 ? c.tickVolume : prev.tickVolume;
+      const inFlow = (c.buyVol || 0) + (c.sellVol || 0);
+      const prevFlow = (prev.buyVol || 0) + (prev.sellVol || 0);
+      let buyVol = c.buyVol || 0;
+      let sellVol = c.sellVol || 0;
+
+      if (inFlow === 0 && prevFlow > 0 && tickVolume > 0) {
+        const ratio = prev.buyVol / prevFlow;
+        buyVol = Math.round(tickVolume * ratio);
+        sellVol = Math.max(0, tickVolume - buyVol);
+      }
+
+      byTime.set(c.time, {
+        time: c.time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        tickVolume,
+        buyVol,
+        sellVol,
+        isClosed: c.isClosed ?? prev.isClosed,
+      });
+    }
+  }
+
+  const sorted = Array.from(byTime.values()).sort((a, b) => a.time - b.time);
+  if (sorted.length > maxLimit) {
+    return sorted.slice(-maxLimit);
+  }
+  return sorted;
+}
+
+/**
+ * Build higher timeframes (3m, 5m, 15m, 30m) from stored M1 candles aligned to UTC bucket boundaries.
+ */
+export function buildHigherTfFromStoredM1(
+  m1Candles: RedSniperStoredCandle[],
+  tf: '3m' | '5m' | '15m' | '30m',
+  maxLimit: number = 5000
+): RedSniperStoredCandle[] {
+  if (!m1Candles || m1Candles.length === 0) return [];
+  const periodSec = getRedSniperTfPeriodSeconds(tf);
+  const sortedM1 = dedupeAndMergeRedSniperCandles([], m1Candles, 50000);
+  const buckets = new Map<number, RedSniperStoredCandle[]>();
+
+  for (const bar of sortedM1) {
+    const bucketSec = Math.floor(bar.time / periodSec) * periodSec;
+    const list = buckets.get(bucketSec);
+    if (list) list.push(bar);
+    else buckets.set(bucketSec, [bar]);
+  }
+
+  const out: RedSniperStoredCandle[] = [];
+  const keys = Array.from(buckets.keys()).sort((a, b) => a - b);
+  const expectedM1Count = periodSec / 60;
+
+  for (let idx = 0; idx < keys.length; idx++) {
+    const bucketSec = keys[idx];
+    const group = buckets.get(bucketSec)!;
+    const open = group[0].open;
+    const close = group[group.length - 1].close;
+    let high = group[0].high;
+    let low = group[0].low;
+    let tickVolume = 0;
+    let buyVol = 0;
+    let sellVol = 0;
+
+    for (const b of group) {
+      if (b.high > high) high = b.high;
+      if (b.low < low) low = b.low;
+      tickVolume += b.tickVolume || 0;
+      buyVol += b.buyVol || 0;
+      sellVol += b.sellVol || 0;
+    }
+
+    const isLast = idx === keys.length - 1;
+    out.push({
+      time: bucketSec,
+      open,
+      high,
+      low,
+      close,
+      tickVolume,
+      buyVol,
+      sellVol,
+      isClosed: !isLast || group.length >= expectedM1Count,
+    });
+  }
+
+  if (out.length > maxLimit) {
+    return out.slice(-maxLimit);
+  }
+  return out;
+}
+
+/**
+ * Determine if stored M1 candles cover the requested range for a higher timeframe (3m, 5m, 15m, 30m).
+ */
+export function doesStoredM1CoverRange(
+  m1Candles: RedSniperStoredCandle[],
+  directTfCandles: RedSniperStoredCandle[],
+  tf: '3m' | '5m' | '15m' | '30m',
+  requestedLimit: number
+): boolean {
+  if (!m1Candles || m1Candles.length === 0) return false;
+  if (tf === '3m') return true;
+  if (!directTfCandles || directTfCandles.length === 0) return true;
+
+  const built = buildHigherTfFromStoredM1(m1Candles, tf, requestedLimit);
+  if (built.length >= requestedLimit) return true;
+  if (built.length >= directTfCandles.length && m1Candles[0].time <= directTfCandles[0].time) {
+    return true;
+  }
+  return false;
+}
+
+function loadRedSniperJsonlForTf(tf: RedSniperDirectStoreTf): RedSniperStoredCandle[] {
+  ensureDataDir();
+  const filePath = getRedSniperJsonlFilePath(tf);
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const lines = content.split('\n');
+    const parsed: RedSniperStoredCandle[] = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const obj = JSON.parse(trimmed);
+        if (
+          obj &&
+          typeof obj.time === 'number' &&
+          Number.isFinite(obj.time) &&
+          obj.time > 0 &&
+          Number.isFinite(Number(obj.open)) &&
+          Number.isFinite(Number(obj.high)) &&
+          Number.isFinite(Number(obj.low)) &&
+          Number.isFinite(Number(obj.close))
+        ) {
+          parsed.push({
+            time: alignTimeSecToTf(obj.time, tf),
+            open: Number(obj.open),
+            high: Number(obj.high),
+            low: Number(obj.low),
+            close: Number(obj.close),
+            tickVolume: Math.max(0, Number(obj.tickVolume ?? obj.volume ?? 0)),
+            buyVol: Math.max(0, Number(obj.buyVol ?? 0)),
+            sellVol: Math.max(0, Number(obj.sellVol ?? 0)),
+            isClosed: obj.isClosed !== false,
+          });
+        }
+      } catch {
+        // Skip malformed line
+      }
+    }
+    const maxCap = tf === '1m' ? 10000 : 5000;
+    return dedupeAndMergeRedSniperCandles([], parsed, maxCap);
+  } catch (err: any) {
+    console.warn(`[RED SNIPER STORE] Failed reading ${filePath}:`, err?.message);
+    return [];
+  }
+}
+
+export function saveRedSniperJsonlStoreToDisk(): void {
+  try {
+    ensureDataDir();
+    for (const tf of RED_SNIPER_DIRECT_TFS) {
+      const list = redSniperStore[tf] || [];
+      if (list.length === 0) continue;
+      // Persist every closed candle (all bars before the latest forming bar, plus latest if marked isClosed)
+      const closedBars = list.filter((b, idx) => idx < list.length - 1 || b.isClosed === true);
+      if (closedBars.length === 0) continue;
+      const filePath = getRedSniperJsonlFilePath(tf);
+      const tmpPath = `${filePath}.tmp`;
+      const payload = closedBars.map((b) => JSON.stringify(b)).join('\n') + '\n';
+      fs.writeFileSync(tmpPath, payload, 'utf-8');
+      fs.renameSync(tmpPath, filePath);
+    }
+    lastRedSniperJsonlSaveMs = Date.now();
+  } catch (err: any) {
+    console.warn('[RED SNIPER STORE] Failed saving JSONL store:', err?.message);
+  }
+}
+
+function syncStoreToRedSniperMemory(): void {
+  const mapPairs: Array<[RedSniperDirectStoreTf, Candle[]]> = [
+    ['1m', store.M1],
+    ['5m', store.M5],
+    ['15m', store.M15],
+    ['30m', store.M30],
+    ['1h', store.H1],
+    ['4h', store.H4],
+    ['1d', store.D1],
+  ];
+  for (const [tf, legacyList] of mapPairs) {
+    const converted: RedSniperStoredCandle[] = [];
+    for (const c of legacyList || []) {
+      const sc = candleToRedSniperStored(c, tf);
+      if (sc) converted.push(sc);
+    }
+    const maxCap = tf === '1m' ? 10000 : 5000;
+    redSniperStore[tf] = dedupeAndMergeRedSniperCandles(redSniperStore[tf], converted, maxCap);
+  }
+}
+
 // Load persisted candles from disk
 export function loadCandlesFromDisk(): CandleStore {
   ensureDataDir();
+  for (const tf of RED_SNIPER_DIRECT_TFS) {
+    redSniperStore[tf] = loadRedSniperJsonlForTf(tf);
+  }
   if (fs.existsSync(DATA_FILE)) {
     try {
       const content = fs.readFileSync(DATA_FILE, 'utf-8');
@@ -279,7 +603,28 @@ export function loadCandlesFromDisk(): CandleStore {
           H4: parsed.H4 || [],
           D1: parsed.D1 || [],
         };
+        syncStoreToRedSniperMemory();
+        // Also ensure store.M1..D1 includes any older candles from redSniperStore JSONL
+        const toLegacy = (sc: RedSniperStoredCandle): Candle => ({
+          openTime: new Date(sc.time * 1000).toISOString(),
+          open: sc.open,
+          high: sc.high,
+          low: sc.low,
+          close: sc.close,
+          volume: sc.tickVolume || 1,
+          isClosed: sc.isClosed !== false,
+          usableForZones: true,
+        });
+        store.M1 = mergeCandleSeries(redSniperStore['1m'].map(toLegacy), store.M1, 10000);
+        store.M5 = mergeCandleSeries(redSniperStore['5m'].map(toLegacy), store.M5, 5000);
+        store.M15 = mergeCandleSeries(redSniperStore['15m'].map(toLegacy), store.M15, 5000);
+        store.M30 = mergeCandleSeries(redSniperStore['30m'].map(toLegacy), store.M30, 5000);
+        store.H1 = mergeCandleSeries(redSniperStore['1h'].map(toLegacy), store.H1, 5000);
+        store.H4 = mergeCandleSeries(redSniperStore['4h'].map(toLegacy), store.H4, 5000);
+        store.D1 = mergeCandleSeries(redSniperStore['1d'].map(toLegacy), store.D1, 5000);
+
         runGapDetectionAudit();
+        saveRedSniperJsonlStoreToDisk();
         console.log(`[CANDLE ENGINE] Loaded candles from disk: M1=${store.M1.length}, M5=${store.M5.length}, M15=${store.M15.length}, M30=${store.M30.length}, H1=${store.H1.length}, H4=${store.H4.length}, D1=${store.D1.length}`);
         return store;
       }
@@ -291,10 +636,11 @@ export function loadCandlesFromDisk(): CandleStore {
       }
     }
   }
+  syncStoreToRedSniperMemory();
   return store;
 }
 
-// Persist candles to disk so history survives restarts (keep up to 1200 per timeframe)
+// Persist candles to disk so history survives restarts
 export function saveCandlesToDisk() {
   try {
     ensureDataDir();
@@ -307,6 +653,8 @@ export function saveCandlesToDisk() {
       }
       writeJsonAtomic(path.resolve(localDataDir, 'candles.json'), store);
     }
+    syncStoreToRedSniperMemory();
+    saveRedSniperJsonlStoreToDisk();
     lastSaveTime = Date.now();
   } catch (err: any) {
     console.error('[CANDLE ENGINE] Failed to save candles to disk:', err.message);
@@ -324,7 +672,8 @@ function updateTimeframeCandles(
   candles: Candle[],
   periodMinutes: number,
   price: number,
-  timestampMs: number
+  timestampMs: number,
+  maxRetain: number = 5000
 ): boolean {
   const openTime = getPeriodStartTime(timestampMs, periodMinutes);
   const current = candles[candles.length - 1];
@@ -354,8 +703,7 @@ function updateTimeframeCandles(
       usableForZones: !hasGap,
     });
 
-    // Retain up to 1200 candles to fulfill minimum 1000 candles requirement
-    if (candles.length > 1200) {
+    if (candles.length > maxRetain) {
       candles.shift();
     }
   } else {
@@ -368,20 +716,20 @@ function updateTimeframeCandles(
   return didClose;
 }
 
-// Process new tick from live feed into all 7 timeframes (M5 base; build M15, M30, H1 from it)
+// Process new tick from live feed into all 7 timeframes
 export function processTick(price: number, timestampMs: number) {
-  const c1 = updateTimeframeCandles(store.M1, 1, price, timestampMs);
-  const c5 = updateTimeframeCandles(store.M5, 5, price, timestampMs);
-  const c15 = updateTimeframeCandles(store.M15, 15, price, timestampMs);
-  const c30 = updateTimeframeCandles(store.M30, 30, price, timestampMs);
-  const c60 = updateTimeframeCandles(store.H1, 60, price, timestampMs);
-  const c240 = updateTimeframeCandles(store.H4, 240, price, timestampMs);
-  const c1440 = updateTimeframeCandles(store.D1, 1440, price, timestampMs);
+  const c1 = updateTimeframeCandles(store.M1, 1, price, timestampMs, 10000);
+  const c5 = updateTimeframeCandles(store.M5, 5, price, timestampMs, 5000);
+  const c15 = updateTimeframeCandles(store.M15, 15, price, timestampMs, 5000);
+  const c30 = updateTimeframeCandles(store.M30, 30, price, timestampMs, 5000);
+  const c60 = updateTimeframeCandles(store.H1, 60, price, timestampMs, 5000);
+  const c240 = updateTimeframeCandles(store.H4, 240, price, timestampMs, 5000);
+  const c1440 = updateTimeframeCandles(store.D1, 1440, price, timestampMs, 5000);
 
   if (c5 && store.M5.length > 0) {
-    store.M15 = mergeCandleSeries(store.M15, buildTimeframeFromM5(store.M5, 15));
-    store.M30 = mergeCandleSeries(store.M30, buildTimeframeFromM5(store.M5, 30));
-    store.H1 = mergeCandleSeries(store.H1, buildTimeframeFromM5(store.M5, 60));
+    store.M15 = mergeCandleSeries(store.M15, buildTimeframeFromM5(store.M5, 15), 5000);
+    store.M30 = mergeCandleSeries(store.M30, buildTimeframeFromM5(store.M5, 30), 5000);
+    store.H1 = mergeCandleSeries(store.H1, buildTimeframeFromM5(store.M5, 60), 5000);
   }
 
   const anyClosed = c1 || c5 || c15 || c30 || c60 || c240 || c1440;
@@ -391,8 +739,8 @@ export function processTick(price: number, timestampMs: number) {
 }
 
 // Fetch authentic historical candles from biquote.io endpoint for a specific interval
-async function fetchTimeframeOhlc(intervalParam: string): Promise<Candle[]> {
-  const res = await fetch(`https://biquote.io/api/XAUUSD/ohlc?interval=${intervalParam}&limit=500`, {
+async function fetchTimeframeOhlc(intervalParam: string, limit: number = 1000): Promise<Candle[]> {
+  const res = await fetch(`https://biquote.io/api/XAUUSD/ohlc?interval=${intervalParam}&limit=${limit}`, {
     headers: { Accept: 'application/json', 'User-Agent': 'SARRAF-Engine/2.0' },
   });
 
@@ -401,7 +749,7 @@ async function fetchTimeframeOhlc(intervalParam: string): Promise<Candle[]> {
   }
 
   const data = await res.json();
-  const rawBars: any[] = data.bars || data.candles || [];
+  const rawBars: any[] = data?.data?.bars || data?.bars || data?.candles || data?.data?.candles || [];
 
   if (!Array.isArray(rawBars) || rawBars.length === 0) {
     return [];
@@ -411,7 +759,7 @@ async function fetchTimeframeOhlc(intervalParam: string): Promise<Candle[]> {
   const chronological = [...rawBars].reverse();
 
   return chronological.map((b: any, idx: number) => ({
-    openTime: b.openTime || new Date(b.time || Date.now()).toISOString(),
+    openTime: b.openTime || new Date(typeof b.time === 'number' && b.time < 10_000_000_000 ? b.time * 1000 : b.time || Date.now()).toISOString(),
     open: Number(b.open),
     high: Number(b.high),
     low: Number(b.low),
@@ -422,8 +770,192 @@ async function fetchTimeframeOhlc(intervalParam: string): Promise<Candle[]> {
   }));
 }
 
+/**
+ * Poll broker OHLC (M1 first, plus M5/M15/M30/H1/H4/D1) and merge/persist closed candles to disk at least once per minute.
+ */
+export async function syncBrokerCandlesToStore(): Promise<void> {
+  try {
+    const [m1Bars, m5Bars, m15Bars, m30Bars, h1Bars, h4Bars, d1Bars] = await Promise.all([
+      fetchTimeframeOhlc('1m', 1000).catch(() => []),
+      fetchTimeframeOhlc('5m', 1000).catch(() => []),
+      fetchTimeframeOhlc('15m', 1000).catch(() => []),
+      fetchTimeframeOhlc('30m', 1000).catch(() => []),
+      fetchTimeframeOhlc('1h', 1000).catch(() => []),
+      fetchTimeframeOhlc('4h', 1000).catch(() => []),
+      fetchTimeframeOhlc('1d', 1000).catch(() => []),
+    ]);
+
+    if (m1Bars.length > 0) store.M1 = mergeCandleSeries(store.M1, m1Bars, 10000);
+    if (m5Bars.length > 0) store.M5 = mergeCandleSeries(store.M5, m5Bars, 5000);
+    if (m15Bars.length > 0) store.M15 = mergeCandleSeries(store.M15, m15Bars, 5000);
+    if (m30Bars.length > 0) store.M30 = mergeCandleSeries(store.M30, m30Bars, 5000);
+    if (h1Bars.length > 0) store.H1 = mergeCandleSeries(store.H1, h1Bars, 5000);
+    if (h4Bars.length > 0) store.H4 = mergeCandleSeries(store.H4, h4Bars, 5000);
+    if (d1Bars.length > 0) store.D1 = mergeCandleSeries(store.D1, d1Bars, 5000);
+
+    syncStoreToRedSniperMemory();
+    saveCandlesToDisk();
+  } catch (err: any) {
+    console.warn('[RED SNIPER STORE] Periodic broker sync warning:', err?.message);
+  }
+}
+
+export function startRedSniperCandlePersistenceWorker(): void {
+  if (redSniperWorkerStarted) return;
+  redSniperWorkerStarted = true;
+  setInterval(() => {
+    void syncBrokerCandlesToStore();
+  }, 60 * 1000);
+}
+
+/**
+ * Serve candles for GET /api/redsniper/candles?tf=1m&limit=5000.
+ * Builds higher timeframes (3m, 5m, 15m, 30m) from stored M1 when they cover the requested range.
+ */
+export async function getRedSniperCandlesForApi(
+  tfRaw: string,
+  limitRaw: number = 5000
+): Promise<{
+  tf: RedSniperStoreTf;
+  source: 'store' | 'broker';
+  builtFromM1: boolean;
+  count: number;
+  oldestTime: number | null;
+  oldestIso: string | null;
+  newestTime: number | null;
+  bars: RedSniperStoredCandle[];
+}> {
+  const validTfs: RedSniperStoreTf[] = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'];
+  const tf: RedSniperStoreTf = validTfs.includes(tfRaw as RedSniperStoreTf)
+    ? (tfRaw as RedSniperStoreTf)
+    : '1m';
+  const limit = Math.max(1, Math.min(10000, Number(limitRaw) || 5000));
+
+  syncStoreToRedSniperMemory();
+
+  // If store for M1 or requested TF is completely empty, attempt an immediate sync from broker
+  if (redSniperStore['1m'].length === 0 || (tf !== '3m' && redSniperStore[tf].length === 0)) {
+    await syncBrokerCandlesToStore();
+  }
+
+  const m1Stored = redSniperStore['1m'] || [];
+  let bars: RedSniperStoredCandle[] = [];
+  let builtFromM1 = false;
+
+  if (tf === '3m' || tf === '5m' || tf === '15m' || tf === '30m') {
+    const directStored = tf === '3m' ? [] : redSniperStore[tf] || [];
+    const m1Covers = doesStoredM1CoverRange(m1Stored, directStored, tf, limit);
+    if (m1Covers) {
+      const fromM1 = buildHigherTfFromStoredM1(m1Stored, tf, limit);
+      bars = dedupeAndMergeRedSniperCandles(directStored, fromM1, limit);
+      builtFromM1 = true;
+    } else {
+      const fromM1 = buildHigherTfFromStoredM1(m1Stored, tf, limit);
+      bars = dedupeAndMergeRedSniperCandles(fromM1, directStored, limit);
+      builtFromM1 = false;
+    }
+  } else {
+    bars = (redSniperStore[tf] || []).slice(-limit);
+  }
+
+  return {
+    tf,
+    source: 'store',
+    builtFromM1,
+    count: bars.length,
+    oldestTime: bars.length > 0 ? bars[0].time : null,
+    oldestIso: bars.length > 0 ? new Date(bars[0].time * 1000).toISOString() : null,
+    newestTime: bars.length > 0 ? bars[bars.length - 1].time : null,
+    bars,
+  };
+}
+
+// ============================================================================
+// SERVER BOT LOG PERSISTENCE (last 200 entries in DATA_DIR/redsniper_bot_log.json)
+// ============================================================================
+
+export interface ServerBotLogEntry {
+  id: string;
+  time: number;
+  isoTime: string;
+  type: 'ZONE_DETECTED' | 'ENTRY' | 'TP1_BE' | 'TP2_PARTIAL' | 'TRAIL_MOVE' | 'EXIT';
+  tf: string;
+  side: 'BUY' | 'SELL';
+  zoneId?: string;
+  tradeId?: string;
+  price?: number;
+  oldSl?: number;
+  newSl?: number;
+  exitReason?: string;
+  pnl?: number;
+  r?: number;
+  message: string;
+}
+
+const RED_SNIPER_BOT_LOG_FILE = path.resolve(DATA_DIR, 'redsniper_bot_log.json');
+let serverBotLogCache: ServerBotLogEntry[] | null = null;
+
+export function loadRedSniperBotLogFromDisk(): ServerBotLogEntry[] {
+  if (serverBotLogCache !== null) return serverBotLogCache;
+  ensureDataDir();
+  if (!fs.existsSync(RED_SNIPER_BOT_LOG_FILE)) {
+    serverBotLogCache = [];
+    return serverBotLogCache;
+  }
+  try {
+    const raw = fs.readFileSync(RED_SNIPER_BOT_LOG_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      serverBotLogCache = parsed.slice(0, 200);
+      return serverBotLogCache;
+    }
+  } catch (err: any) {
+    console.warn('[RED SNIPER BOT LOG] Could not read redsniper_bot_log.json:', err?.message);
+  }
+  serverBotLogCache = [];
+  return serverBotLogCache;
+}
+
+export function appendRedSniperBotLogToDisk(incoming: ServerBotLogEntry[]): ServerBotLogEntry[] {
+  const existing = loadRedSniperBotLogFromDisk();
+  const byId = new Map<string, ServerBotLogEntry>();
+  for (const item of existing) {
+    if (item && typeof item.id === 'string') {
+      byId.set(item.id, item);
+    }
+  }
+  for (const item of incoming || []) {
+    if (item && typeof item.id === 'string' && typeof item.message === 'string') {
+      byId.set(item.id, item);
+    }
+  }
+  // Sort newest first, cap at 200 entries
+  const merged = Array.from(byId.values())
+    .sort((a, b) => b.time - a.time)
+    .slice(0, 200);
+  serverBotLogCache = merged;
+  try {
+    ensureDataDir();
+    writeJsonAtomic(RED_SNIPER_BOT_LOG_FILE, merged);
+  } catch (err: any) {
+    console.warn('[RED SNIPER BOT LOG] Failed to write redsniper_bot_log.json:', err?.message);
+  }
+  return merged;
+}
+
+export function clearRedSniperBotLogOnDisk(): ServerBotLogEntry[] {
+  serverBotLogCache = [];
+  try {
+    ensureDataDir();
+    writeJsonAtomic(RED_SNIPER_BOT_LOG_FILE, []);
+  } catch {}
+  return [];
+}
+
 // Bootstrap authentic historical candles from biquote.io for M1, M5, M15, M30, H1, H4, D1
 export async function bootstrapHistoricalCandles(): Promise<boolean> {
+  startRedSniperCandlePersistenceWorker();
+
   const hasEnough =
     store.M1.length >= 300 &&
     store.M5.length >= 250 &&
@@ -442,29 +974,29 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
     console.log('[CANDLE ENGINE] Fetching authentic historical candles from biquote.io for M1, M5, M15, M30, H1, H4, D1...');
 
     const [m1Bars, m5Bars, m15Bars, m30Bars, h1Bars, h4Bars, d1Bars] = await Promise.all([
-      fetchTimeframeOhlc('1m').catch(() => []),
-      fetchTimeframeOhlc('5m').catch(() => []),
-      fetchTimeframeOhlc('15m').catch(() => []),
-      fetchTimeframeOhlc('30m').catch(() => []),
-      fetchTimeframeOhlc('1h').catch(() => []),
-      fetchTimeframeOhlc('4h').catch(() => []),
-      fetchTimeframeOhlc('1d').catch(() => []),
+      fetchTimeframeOhlc('1m', 1000).catch(() => []),
+      fetchTimeframeOhlc('5m', 1000).catch(() => []),
+      fetchTimeframeOhlc('15m', 1000).catch(() => []),
+      fetchTimeframeOhlc('30m', 1000).catch(() => []),
+      fetchTimeframeOhlc('1h', 1000).catch(() => []),
+      fetchTimeframeOhlc('4h', 1000).catch(() => []),
+      fetchTimeframeOhlc('1d', 1000).catch(() => []),
     ]);
 
-    if (m1Bars.length > 0) store.M1 = mergeCandleSeries(store.M1, m1Bars);
-    if (m5Bars.length > 0) store.M5 = mergeCandleSeries(store.M5, m5Bars);
-    if (m15Bars.length > 0) store.M15 = mergeCandleSeries(store.M15, m15Bars);
-    if (m30Bars.length > 0) store.M30 = mergeCandleSeries(store.M30, m30Bars);
-    if (h1Bars.length > 0) store.H1 = mergeCandleSeries(store.H1, h1Bars);
+    if (m1Bars.length > 0) store.M1 = mergeCandleSeries(store.M1, m1Bars, 10000);
+    if (m5Bars.length > 0) store.M5 = mergeCandleSeries(store.M5, m5Bars, 5000);
+    if (m15Bars.length > 0) store.M15 = mergeCandleSeries(store.M15, m15Bars, 5000);
+    if (m30Bars.length > 0) store.M30 = mergeCandleSeries(store.M30, m30Bars, 5000);
+    if (h1Bars.length > 0) store.H1 = mergeCandleSeries(store.H1, h1Bars, 5000);
 
     // If M5 is short, build from M1
     if (store.M5.length < 60 && store.M1.length > 0) {
       const fromM1 = buildM5FromM1(store.M1);
-      store.M5 = mergeCandleSeries(store.M5, fromM1);
+      store.M5 = mergeCandleSeries(store.M5, fromM1, 5000);
     }
 
     if (h4Bars.length > 0) {
-      store.H4 = mergeCandleSeries(store.H4, h4Bars);
+      store.H4 = mergeCandleSeries(store.H4, h4Bars, 5000);
       store.htfBootstrapMethod = 'NATIVE_BIQUOTE_OHLC_INTERVALS (Direct 4h & 1d API bootstrap)';
     } else if (store.H1.length > 0) {
       store.H4 = buildH4FromH1(store.H1);
@@ -472,7 +1004,7 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
     }
 
     if (d1Bars.length > 0) {
-      store.D1 = mergeCandleSeries(store.D1, d1Bars);
+      store.D1 = mergeCandleSeries(store.D1, d1Bars, 5000);
     } else if (store.H1.length > 0) {
       store.D1 = buildD1FromH1(store.H1);
     }
@@ -485,7 +1017,7 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
   } catch (err: any) {
     console.warn('[CANDLE ENGINE] Historical bootstrap failed, attempting aggregation fallback:', err.message);
     if (store.M1.length > 0 && store.M5.length < 60) {
-      store.M5 = mergeCandleSeries(store.M5, buildM5FromM1(store.M1));
+      store.M5 = mergeCandleSeries(store.M5, buildM5FromM1(store.M1), 5000);
     }
     if (store.H1.length > 0) {
       store.H4 = buildH4FromH1(store.H1);
@@ -504,24 +1036,24 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
 export async function backfillCandleGaps(): Promise<boolean> {
   try {
     const [m1Bars, m5Bars, m15Bars, m30Bars, h1Bars, h4Bars, d1Bars] = await Promise.all([
-      fetchTimeframeOhlc('1m').catch(() => []),
-      fetchTimeframeOhlc('5m').catch(() => []),
-      fetchTimeframeOhlc('15m').catch(() => []),
-      fetchTimeframeOhlc('30m').catch(() => []),
-      fetchTimeframeOhlc('1h').catch(() => []),
-      fetchTimeframeOhlc('4h').catch(() => []),
-      fetchTimeframeOhlc('1d').catch(() => []),
+      fetchTimeframeOhlc('1m', 1000).catch(() => []),
+      fetchTimeframeOhlc('5m', 1000).catch(() => []),
+      fetchTimeframeOhlc('15m', 1000).catch(() => []),
+      fetchTimeframeOhlc('30m', 1000).catch(() => []),
+      fetchTimeframeOhlc('1h', 1000).catch(() => []),
+      fetchTimeframeOhlc('4h', 1000).catch(() => []),
+      fetchTimeframeOhlc('1d', 1000).catch(() => []),
     ]);
 
     let anyMerged = false;
-    if (m1Bars.length > 0) { store.M1 = mergeCandleSeries(store.M1, m1Bars); anyMerged = true; }
-    if (m5Bars.length > 0) { store.M5 = mergeCandleSeries(store.M5, m5Bars); anyMerged = true; }
-    if (m15Bars.length > 0) { store.M15 = mergeCandleSeries(store.M15, m15Bars); anyMerged = true; }
-    if (m30Bars.length > 0) { store.M30 = mergeCandleSeries(store.M30, m30Bars); anyMerged = true; }
-    if (h1Bars.length > 0) { store.H1 = mergeCandleSeries(store.H1, h1Bars); anyMerged = true; }
+    if (m1Bars.length > 0) { store.M1 = mergeCandleSeries(store.M1, m1Bars, 10000); anyMerged = true; }
+    if (m5Bars.length > 0) { store.M5 = mergeCandleSeries(store.M5, m5Bars, 5000); anyMerged = true; }
+    if (m15Bars.length > 0) { store.M15 = mergeCandleSeries(store.M15, m15Bars, 5000); anyMerged = true; }
+    if (m30Bars.length > 0) { store.M30 = mergeCandleSeries(store.M30, m30Bars, 5000); anyMerged = true; }
+    if (h1Bars.length > 0) { store.H1 = mergeCandleSeries(store.H1, h1Bars, 5000); anyMerged = true; }
 
     if (h4Bars.length > 0) {
-      store.H4 = mergeCandleSeries(store.H4, h4Bars);
+      store.H4 = mergeCandleSeries(store.H4, h4Bars, 5000);
       anyMerged = true;
     } else if (store.H1.length > 0) {
       store.H4 = buildH4FromH1(store.H1);
@@ -529,7 +1061,7 @@ export async function backfillCandleGaps(): Promise<boolean> {
     }
 
     if (d1Bars.length > 0) {
-      store.D1 = mergeCandleSeries(store.D1, d1Bars);
+      store.D1 = mergeCandleSeries(store.D1, d1Bars, 5000);
       anyMerged = true;
     } else if (store.H1.length > 0) {
       store.D1 = buildD1FromH1(store.H1);
@@ -629,6 +1161,7 @@ export function getEngineStatus() {
     },
     signalsActive: state === 'READY' || state === 'HTF LIMITED',
     htfBootstrapMethod: store.htfBootstrapMethod,
+    lastRedSniperJsonlSaveMs,
     message,
   };
 }
@@ -636,3 +1169,4 @@ export function getEngineStatus() {
 export function getCandleStore(): CandleStore {
   return store;
 }
+

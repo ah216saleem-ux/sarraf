@@ -47,7 +47,7 @@ function resolveModel(
 }
 
 /**
- * Legacy helper kept for API compatibility (edge badges removed from 007 chart UI).
+ * Legacy helper kept for API compatibility (edge badges removed from Fire Zone chart UI).
  */
 export function computeOutOfRangeZoneBadges(
   _series: ISeriesApi<'Candlestick'>,
@@ -171,7 +171,7 @@ function drawStructureBreakSegment(
 }
 
 /**
- * Clean "007" Chart Overlay shared by both Fire Zone and Red Sniper:
+ * Clean Fire Zone Chart Overlay shared by both Fire Zone and Red Sniper:
  * 1) Active zones:
  *    - Thin box [LO, HI], full plot width (0 to plotWidth)
  *    - Border: 1.3px solid (#ff4d66 SELL, #2fe08a BUY)

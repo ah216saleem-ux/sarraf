@@ -80,9 +80,8 @@ export function evaluateGates(
   // Gate 7: Level Not in BROKEN State
   let levelNotBrokenPass = activePlan !== null;
   if (typeof zhOrZone === 'object' && zhOrZone !== null) {
-    const zState = ('state' in zhOrZone ? zhOrZone.state : (zhOrZone as FireZone).lifecycleState);
-    const isDead = ('isDead' in zhOrZone ? (zhOrZone as FireZone).isDead : false);
-    if (zState === 'BROKEN' || isDead) {
+    const isDead = 'isDead' in zhOrZone ? (zhOrZone as FireZone).isDead : false;
+    if (isDead) {
       levelNotBrokenPass = false;
     }
   }
@@ -230,7 +229,7 @@ export interface SimpleLadderRow {
 }
 
 /**
- * Builds the 007-radar simple ladder rows from ONLY the two NEAREST plans + live price:
+ * Builds the Fire Zone simple ladder rows from ONLY the two NEAREST plans + live price:
  * - SELL rows first (SELL STOP, SELL ENTRY, SELL TP1, SELL TP2, SELL TP3)
  * - BUY rows second (BUY STOP, BUY ENTRY, BUY TP1, BUY TP2, BUY TP3)
  * - ENTRY price = zone anchor

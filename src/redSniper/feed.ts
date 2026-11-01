@@ -40,8 +40,38 @@ export interface Rolling60sFlow {
   sellPct: number | null;
 }
 
+export interface HistoryFromToLogEntry {
+  page: number;
+  limit: number;
+  from: string | null;
+  to: string | null;
+  returnedBars: number;
+  newOlderBarsAdded: number;
+}
+
+export interface TimeframeHistoryLog {
+  tf: RedSniperTimeframe;
+  source: 'store' | 'broker';
+  barsLoaded: number;
+  oldestCandleTime: number | null;
+  oldestCandleIso: string | null;
+  builtFromM1: boolean;
+  targetBars: number;
+  requestedBars: number;
+  finalBarsLoaded: number;
+  returnedBarsPerPage: number[];
+  fromToUsed: HistoryFromToLogEntry[];
+  historyLimitReached: string | null;
+}
+
+export type RedSniperHistoryDiagnosticsMap = Record<
+  RedSniperTimeframe,
+  TimeframeHistoryLog
+>;
+
 export interface RedSniperFeedState {
   bars: RedSniperBarsMap;
+  historyDiagnostics: RedSniperHistoryDiagnosticsMap;
   livePrice: number | null;
   bid: number | null;
   ask: number | null;
@@ -171,7 +201,7 @@ export function sessions(now: Date = new Date()): RedSniperSessionInfo {
 }
 
 /**
- * Normalize raw candle from biquote.io /ohlc endpoint.
+ * Normalize raw candle from biquote.io /ohlc endpoint or server candle store.
  * Preserves existing buyVol/sellVol if present, otherwise initializes to 0 (never faked).
  */
 export function normalizeRedSniperCandle(raw: any, tf: RedSniperTimeframe): Candle | null {
@@ -198,8 +228,8 @@ export function normalizeRedSniperCandle(raw: any, tf: RedSniperTimeframe): Cand
   if (
     !timeSec ||
     !Number.isFinite(open) ||
-    !Number.isFinite(high) ||
     !Number.isFinite(low) ||
+    !Number.isFinite(high) ||
     !Number.isFinite(close) ||
     open <= 0 ||
     high <= 0 ||
@@ -267,20 +297,23 @@ export function sortAndDedupeCandles(candles: Candle[]): Candle[] {
 }
 
 /**
- * Build 3m bars by aggregating 1m bars aligned to 180-second UTC buckets.
+ * Build higher timeframe bars (3m, 5m, 15m, 30m) by aggregating 1m bars aligned to UTC buckets.
  */
-export function build3mFrom1m(
+export function buildHigherTimeframeFrom1m(
   m1Bars: Candle[],
-  existing3mBars: Candle[] = [],
-  maxBars: number = 500
+  tf: '3m' | '5m' | '15m' | '30m',
+  existingBars: Candle[] = [],
+  maxBars: number = 2000
 ): Candle[] {
-  if (!m1Bars || m1Bars.length === 0) return sortAndDedupeCandles(existing3mBars).slice(-maxBars);
+  if (!m1Bars || m1Bars.length === 0) {
+    return sortAndDedupeCandles(existingBars).slice(-maxBars);
+  }
 
   const sorted1m = sortAndDedupeCandles(m1Bars);
   const buckets = new Map<number, Candle[]>();
 
   for (const bar of sorted1m) {
-    const bucketSec = getBucketStartSec(bar.time, '3m');
+    const bucketSec = getBucketStartSec(bar.time, tf);
     const list = buckets.get(bucketSec);
     if (list) {
       list.push(bar);
@@ -290,7 +323,7 @@ export function build3mFrom1m(
   }
 
   const existingByTime = new Map<number, Candle>();
-  for (const b of existing3mBars) {
+  for (const b of existingBars) {
     existingByTime.set(b.time, b);
   }
 
@@ -312,10 +345,9 @@ export function build3mFrom1m(
       sellVol += b.sellVol;
     }
 
-    // If 1m bars had no live ticks yet (e.g. pure OHLC history) and existing3mBars had live tick ratios, preserve scaled ratio
-    const prev3m = existingByTime.get(bucketSec);
-    if (buyVol + sellVol === 0 && prev3m && prev3m.buyVol + prev3m.sellVol > 0 && tickVolume > 0) {
-      const ratio = prev3m.buyVol / (prev3m.buyVol + prev3m.sellVol);
+    const prevBar = existingByTime.get(bucketSec);
+    if (buyVol + sellVol === 0 && prevBar && prevBar.buyVol + prevBar.sellVol > 0 && tickVolume > 0) {
+      const ratio = prevBar.buyVol / (prevBar.buyVol + prevBar.sellVol);
       buyVol = Math.round(tickVolume * ratio);
       sellVol = Math.max(0, tickVolume - buyVol);
     } else if (buyVol + sellVol > 0 && tickVolume > 0 && buyVol + sellVol !== tickVolume) {
@@ -336,7 +368,38 @@ export function build3mFrom1m(
     });
   }
 
-  return sortAndDedupeCandles([...existing3mBars, ...aggregated]).slice(-maxBars);
+  return sortAndDedupeCandles([...existingBars, ...aggregated]).slice(-maxBars);
+}
+
+/**
+ * Build 3m bars by aggregating 1m bars aligned to 180-second UTC buckets.
+ */
+export function build3mFrom1m(
+  m1Bars: Candle[],
+  existing3mBars: Candle[] = [],
+  maxBars: number = 2000
+): Candle[] {
+  return buildHigherTimeframeFrom1m(m1Bars, '3m', existing3mBars, maxBars);
+}
+
+/**
+ * Check if stored 1m bars cover the requested range for building 3m/5m/15m/30m.
+ */
+export function doesM1CoverTimeframeRange(
+  m1Bars: Candle[],
+  directBars: Candle[],
+  tf: '3m' | '5m' | '15m' | '30m',
+  targetBars: number = 400
+): boolean {
+  if (!m1Bars || m1Bars.length === 0) return false;
+  if (tf === '3m') return true;
+  if (!directBars || directBars.length === 0) return true;
+  const agg = buildHigherTimeframeFrom1m(m1Bars, tf, [], 5000);
+  if (agg.length >= targetBars) return true;
+  if (agg.length >= directBars.length && agg[0].time <= directBars[0].time) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -345,7 +408,7 @@ export function build3mFrom1m(
 export function reconcileOfficialBars(
   localBars: Candle[],
   officialBars: Candle[],
-  maxBars: number = 500
+  maxBars: number = 2000
 ): Candle[] {
   if (!officialBars || officialBars.length === 0) return localBars;
 
@@ -385,13 +448,23 @@ export function reconcileOfficialBars(
     .slice(-maxBars);
 }
 
-async function fetchBrokerOhlc(
+async function fetchBrokerOhlcPage(
   interval: Exclude<RedSniperTimeframe, '3m'>,
-  limit: number
+  limit: number,
+  fromIso?: string,
+  toIso?: string
 ): Promise<Candle[]> {
+  const params = new URLSearchParams({
+    interval,
+    limit: String(limit),
+  });
+  if (fromIso) params.set('from', fromIso);
+  if (toIso) params.set('to', toIso);
+  const query = params.toString();
+
   const urls = [
-    `https://biquote.io/api/XAUUSD/ohlc?interval=${interval}&limit=${limit}`,
-    `/api/doji/ohlc?interval=${interval}&limit=${limit}`,
+    `https://biquote.io/api/XAUUSD/ohlc?${query}`,
+    `/api/doji/ohlc?${query}`,
   ];
 
   for (const url of urls) {
@@ -407,14 +480,13 @@ async function fetchBrokerOhlc(
         (Array.isArray(json) ? json : []);
 
       if (Array.isArray(rawList) && rawList.length > 0) {
-        // Broker returns newest-first; normalize, reverse, sort ascending & dedupe
         const normalized: Candle[] = [];
         for (let i = rawList.length - 1; i >= 0; i--) {
           const c = normalizeRedSniperCandle(rawList[i], interval);
           if (c) normalized.push(c);
         }
         if (normalized.length > 0) {
-          return sortAndDedupeCandles(normalized).slice(-limit);
+          return sortAndDedupeCandles(normalized);
         }
       }
     } catch {
@@ -423,6 +495,205 @@ async function fetchBrokerOhlc(
   }
 
   return [];
+}
+
+export async function fetchBrokerOhlcWithDiagnostics(
+  interval: Exclude<RedSniperTimeframe, '3m'>,
+  limit: number
+): Promise<{ bars: Candle[]; diagnostics: TimeframeHistoryLog }> {
+  const targetBars =
+    limit <= 20
+      ? limit
+      : interval === '4h'
+      ? Math.max(400, limit)
+      : interval === '1d'
+      ? Math.max(300, limit)
+      : Math.max(400, limit);
+
+  const requestedBars = limit <= 20 ? limit : Math.max(1000, targetBars);
+  const returnedBarsPerPage: number[] = [];
+  const fromToUsed: HistoryFromToLogEntry[] = [];
+
+  // Page 1: Try larger limit (1000) to capture maximum available bars in one request
+  let collected = await fetchBrokerOhlcPage(interval, requestedBars);
+  returnedBarsPerPage.push(collected.length);
+  fromToUsed.push({
+    page: 1,
+    limit: requestedBars,
+    from: null,
+    to: null,
+    returnedBars: collected.length,
+    newOlderBarsAdded: collected.length,
+  });
+
+  if (collected.length === 0 || limit <= 20) {
+    const sliced = collected.slice(-targetBars);
+    const oldestTime = sliced.length > 0 ? sliced[0].time : null;
+    return {
+      bars: sliced,
+      diagnostics: {
+        tf: interval,
+        source: 'broker',
+        barsLoaded: sliced.length,
+        oldestCandleTime: oldestTime,
+        oldestCandleIso: oldestTime ? new Date(oldestTime * 1000).toISOString() : null,
+        builtFromM1: false,
+        targetBars,
+        requestedBars,
+        finalBarsLoaded: sliced.length,
+        returnedBarsPerPage,
+        fromToUsed,
+        historyLimitReached:
+          limit > 20 && sliced.length < targetBars
+            ? `history limit reached: ${sliced.length} bars`
+            : null,
+      },
+    };
+  }
+
+  // If fewer than targetBars candles were returned, paginate backward using chunked from/to windows
+  const periodSec = getTimeframeSeconds(interval);
+  let attempts = 0;
+  while (collected.length < targetBars && attempts < 3) {
+    attempts++;
+    const oldestSec = collected[0]?.time;
+    if (!oldestSec || oldestSec <= 0) break;
+
+    const toSec = attempts === 1 ? oldestSec - periodSec : oldestSec;
+    const chunkBars = attempts === 1 ? 250 : 500 * attempts;
+    const fromIso = new Date((toSec - chunkBars * periodSec) * 1000).toISOString();
+    const toIso = new Date(toSec * 1000).toISOString();
+
+    const olderBatch = await fetchBrokerOhlcPage(
+      interval,
+      requestedBars,
+      fromIso,
+      toIso
+    );
+    const strictlyOlder = olderBatch.filter((b) => b.time < oldestSec);
+    returnedBarsPerPage.push(olderBatch.length);
+    fromToUsed.push({
+      page: attempts + 1,
+      limit: requestedBars,
+      from: fromIso,
+      to: toIso,
+      returnedBars: olderBatch.length,
+      newOlderBarsAdded: strictlyOlder.length,
+    });
+
+    if (strictlyOlder.length === 0) {
+      if (attempts >= 2) break;
+      continue;
+    }
+    collected = sortAndDedupeCandles([...strictlyOlder, ...collected]);
+  }
+
+  const finalBars = collected.slice(-Math.max(targetBars, 500));
+  const historyLimitReached =
+    finalBars.length < targetBars
+      ? `history limit reached: ${finalBars.length} bars`
+      : null;
+  const oldestTime = finalBars.length > 0 ? finalBars[0].time : null;
+
+  return {
+    bars: finalBars,
+    diagnostics: {
+      tf: interval,
+      source: 'broker',
+      barsLoaded: finalBars.length,
+      oldestCandleTime: oldestTime,
+      oldestCandleIso: oldestTime ? new Date(oldestTime * 1000).toISOString() : null,
+      builtFromM1: false,
+      targetBars,
+      requestedBars,
+      finalBarsLoaded: finalBars.length,
+      returnedBarsPerPage,
+      fromToUsed,
+      historyLimitReached,
+    },
+  };
+}
+
+/**
+ * 1) SERVER CANDLE STORE FIRST:
+ * Query GET /api/redsniper/candles?tf=...&limit=5000 first, and fall back to biquote only if it is empty.
+ */
+export async function fetchStoreCandlesFirstWithFallback(
+  interval: Exclude<RedSniperTimeframe, '3m'>,
+  limit: number = 5000
+): Promise<{ bars: Candle[]; diagnostics: TimeframeHistoryLog }> {
+  const targetBars =
+    interval === '1m'
+      ? Math.min(5000, limit)
+      : interval === '1d'
+      ? Math.max(300, Math.min(2000, limit))
+      : Math.max(400, Math.min(2000, limit));
+
+  try {
+    const res = await fetch(
+      `/api/redsniper/candles?tf=${encodeURIComponent(interval)}&limit=${limit}`,
+      { headers: { Accept: 'application/json' } }
+    );
+    if (res.ok) {
+      const json = await res.json();
+      const rawCandles = Array.isArray(json?.candles) ? json.candles : [];
+      if (rawCandles.length > 0) {
+        const normalized: Candle[] = [];
+        for (const r of rawCandles) {
+          const c = normalizeRedSniperCandle(r, interval);
+          if (c) normalized.push(c);
+        }
+        const deduped = sortAndDedupeCandles(normalized).slice(-limit);
+        if (deduped.length > 0) {
+          const oldestTime = deduped[0].time;
+          const builtFromM1 = Boolean(json?.builtFromM1);
+          const source: 'store' | 'broker' =
+            json?.source === 'broker' ? 'broker' : 'store';
+          return {
+            bars: deduped,
+            diagnostics: {
+              tf: interval,
+              source,
+              barsLoaded: deduped.length,
+              oldestCandleTime: oldestTime,
+              oldestCandleIso: new Date(oldestTime * 1000).toISOString(),
+              builtFromM1,
+              targetBars,
+              requestedBars: limit,
+              finalBarsLoaded: deduped.length,
+              returnedBarsPerPage: [deduped.length],
+              fromToUsed: [
+                {
+                  page: 1,
+                  limit,
+                  from: new Date(oldestTime * 1000).toISOString(),
+                  to: new Date(deduped[deduped.length - 1].time * 1000).toISOString(),
+                  returnedBars: deduped.length,
+                  newOlderBarsAdded: deduped.length,
+                },
+              ],
+              historyLimitReached:
+                deduped.length < 400
+                  ? `history limit reached: ${deduped.length} bars`
+                  : null,
+            },
+          };
+        }
+      }
+    }
+  } catch {
+    // Fall back to broker if server store is unreachable or empty
+  }
+
+  return fetchBrokerOhlcWithDiagnostics(interval, 500);
+}
+
+export async function fetchBrokerOhlc(
+  interval: Exclude<RedSniperTimeframe, '3m'>,
+  limit: number
+): Promise<Candle[]> {
+  const res = await fetchBrokerOhlcWithDiagnostics(interval, limit);
+  return res.bars;
 }
 
 const EMPTY_BARS_MAP: RedSniperBarsMap = {
@@ -436,8 +707,31 @@ const EMPTY_BARS_MAP: RedSniperBarsMap = {
   '1d': [],
 };
 
+function makeEmptyDiagnosticsMap(): RedSniperHistoryDiagnosticsMap {
+  const out = {} as RedSniperHistoryDiagnosticsMap;
+  for (const tf of RED_SNIPER_TIMEFRAMES) {
+    out[tf] = {
+      tf,
+      source: 'store',
+      barsLoaded: 0,
+      oldestCandleTime: null,
+      oldestCandleIso: null,
+      builtFromM1: false,
+      targetBars: tf === '4h' ? 400 : tf === '1d' ? 300 : tf === '3m' ? 160 : 400,
+      requestedBars: tf === '3m' ? 0 : 5000,
+      finalBarsLoaded: 0,
+      returnedBarsPerPage: [],
+      fromToUsed: [],
+      historyLimitReached: null,
+    };
+  }
+  return out;
+}
+
 export function useRedSniperFeed(): RedSniperFeedState {
   const [bars, setBars] = useState<RedSniperBarsMap>(EMPTY_BARS_MAP);
+  const [historyDiagnostics, setHistoryDiagnostics] =
+    useState<RedSniperHistoryDiagnosticsMap>(() => makeEmptyDiagnosticsMap());
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [bid, setBid] = useState<number | null>(null);
   const [ask, setAsk] = useState<number | null>(null);
@@ -684,8 +978,9 @@ export function useRedSniperFeed(): RedSniperFeedState {
               buyVol: side === 'BUY' ? rawTickVol : 0,
               sellVol: side === 'SELL' ? rawTickVol : 0,
             });
-            if (tfBars.length > 500) {
-              tfBars.splice(0, tfBars.length - 500);
+            const maxRetention = tf === '1m' ? 5000 : 2000;
+            if (tfBars.length > maxRetention) {
+              tfBars.splice(0, tfBars.length - maxRetention);
             }
           } else {
             // Update forming candle
@@ -782,26 +1077,113 @@ export function useRedSniperFeed(): RedSniperFeedState {
     }
   }, [applyIncomingQuote]);
 
-  // 1. Initial Load: Fetch limit=500 per interval, build 3m by aggregating 1m bars
+  // 1. Initial Load: Fetch from server candle store first (/api/redsniper/candles?tf=..&limit=5000),
+  // fall back to biquote only if empty, and build 3m, 5m, 15m, 30m from stored M1 when M1 covers the range.
   useEffect(() => {
     let isCancelled = false;
 
     async function loadHistory() {
       setIsLoading(true);
       const results = await Promise.all(
-        DIRECT_FETCH_TIMEFRAMES.map((tf) => fetchBrokerOhlc(tf, 500))
+        DIRECT_FETCH_TIMEFRAMES.map((tf) => fetchStoreCandlesFirstWithFallback(tf, 5000))
       );
 
       if (isCancelled) return;
 
-      const m1 = results[0];
-      const m5 = results[1];
-      const m15 = results[2];
-      const m30 = results[3];
-      const h1 = results[4];
-      const h4 = results[5];
-      const d1 = results[6];
-      const m3 = build3mFrom1m(m1, [], 500);
+      const m1Res = results[0];
+      const m5Res = results[1];
+      const m15Res = results[2];
+      const m30Res = results[3];
+      const h1Res = results[4];
+      const h4Res = results[5];
+      const d1Res = results[6];
+
+      const m1 = m1Res.bars;
+      const m3 = build3mFrom1m(m1, [], 2000);
+
+      // Build 5m, 15m, 30m from stored M1 when stored M1 covers the requested range
+      const useM1For5m =
+        m1Res.diagnostics.source === 'store' &&
+        doesM1CoverTimeframeRange(m1, m5Res.bars, '5m', 400);
+      const m5 = useM1For5m
+        ? buildHigherTimeframeFrom1m(m1, '5m', m5Res.bars, 2000)
+        : m5Res.bars;
+
+      const useM1For15m =
+        m1Res.diagnostics.source === 'store' &&
+        doesM1CoverTimeframeRange(m1, m15Res.bars, '15m', 400);
+      const m15 = useM1For15m
+        ? buildHigherTimeframeFrom1m(m1, '15m', m15Res.bars, 2000)
+        : m15Res.bars;
+
+      const useM1For30m =
+        m1Res.diagnostics.source === 'store' &&
+        doesM1CoverTimeframeRange(m1, m30Res.bars, '30m', 400);
+      const m30 = useM1For30m
+        ? buildHigherTimeframeFrom1m(m1, '30m', m30Res.bars, 2000)
+        : m30Res.bars;
+
+      const h1 = h1Res.bars;
+      const h4 = h4Res.bars;
+      const d1 = d1Res.bars;
+
+      const nextDiag = makeEmptyDiagnosticsMap();
+      for (const r of results) {
+        nextDiag[r.diagnostics.tf] = r.diagnostics;
+      }
+
+      const oldestM3 = m3.length > 0 ? m3[0].time : null;
+      nextDiag['3m'] = {
+        tf: '3m',
+        source: m1Res.diagnostics.source,
+        barsLoaded: m3.length,
+        oldestCandleTime: oldestM3,
+        oldestCandleIso: oldestM3 ? new Date(oldestM3 * 1000).toISOString() : null,
+        builtFromM1: true,
+        targetBars: 160,
+        requestedBars: m1Res.diagnostics.requestedBars,
+        finalBarsLoaded: m3.length,
+        returnedBarsPerPage: [m3.length],
+        fromToUsed: m1Res.diagnostics.fromToUsed,
+        historyLimitReached:
+          m3.length < 160 ? `history limit reached: ${m3.length} bars` : null,
+      };
+
+      if (useM1For5m && m5.length > 0) {
+        nextDiag['5m'] = {
+          ...nextDiag['5m'],
+          source: 'store',
+          barsLoaded: m5.length,
+          finalBarsLoaded: m5.length,
+          oldestCandleTime: m5[0].time,
+          oldestCandleIso: new Date(m5[0].time * 1000).toISOString(),
+          builtFromM1: true,
+        };
+      }
+      if (useM1For15m && m15.length > 0) {
+        nextDiag['15m'] = {
+          ...nextDiag['15m'],
+          source: 'store',
+          barsLoaded: m15.length,
+          finalBarsLoaded: m15.length,
+          oldestCandleTime: m15[0].time,
+          oldestCandleIso: new Date(m15[0].time * 1000).toISOString(),
+          builtFromM1: true,
+        };
+      }
+      if (useM1For30m && m30.length > 0) {
+        nextDiag['30m'] = {
+          ...nextDiag['30m'],
+          source: 'store',
+          barsLoaded: m30.length,
+          finalBarsLoaded: m30.length,
+          oldestCandleTime: m30[0].time,
+          oldestCandleIso: new Date(m30[0].time * 1000).toISOString(),
+          builtFromM1: true,
+        };
+      }
+
+      setHistoryDiagnostics(nextDiag);
 
       const initialMap: RedSniperBarsMap = {
         '1m': m1,
@@ -923,7 +1305,6 @@ export function useRedSniperFeed(): RedSniperFeedState {
     let isCancelled = false;
 
     const reconcileAll = async () => {
-      // Fetch limit=9 for 1m so we can also accurately reconcile the last 3 bars of 3m, and limit=3 for all other timeframes
       const [m1Last, m5Last, m15Last, m30Last, h1Last, h4Last, d1Last] = await Promise.all([
         fetchBrokerOhlc('1m', 9),
         fetchBrokerOhlc('5m', 3),
@@ -937,20 +1318,19 @@ export function useRedSniperFeed(): RedSniperFeedState {
       if (isCancelled) return;
 
       const current = barsRef.current;
-      const reconciled1m = reconcileOfficialBars(current['1m'], m1Last.slice(-3), 500);
-      // Rebuild last 3m bars using reconciled 1m bars while preserving existing 3m history and buy/sell ratio
-      const recent1mFor3m = reconcileOfficialBars(current['1m'], m1Last, 500).slice(-15);
-      const reconciled3m = build3mFrom1m(recent1mFor3m, current['3m'], 500);
+      const reconciled1m = reconcileOfficialBars(current['1m'], m1Last.slice(-3), 5000);
+      const recent1mFor3m = reconcileOfficialBars(current['1m'], m1Last, 5000).slice(-15);
+      const reconciled3m = build3mFrom1m(recent1mFor3m, current['3m'], 2000);
 
       const nextMap: RedSniperBarsMap = {
         '1m': reconciled1m,
         '3m': reconciled3m,
-        '5m': reconcileOfficialBars(current['5m'], m5Last, 500),
-        '15m': reconcileOfficialBars(current['15m'], m15Last, 500),
-        '30m': reconcileOfficialBars(current['30m'], m30Last, 500),
-        '1h': reconcileOfficialBars(current['1h'], h1Last, 500),
-        '4h': reconcileOfficialBars(current['4h'], h4Last, 500),
-        '1d': reconcileOfficialBars(current['1d'], d1Last, 500),
+        '5m': reconcileOfficialBars(current['5m'], m5Last, 2000),
+        '15m': reconcileOfficialBars(current['15m'], m15Last, 2000),
+        '30m': reconcileOfficialBars(current['30m'], m30Last, 2000),
+        '1h': reconcileOfficialBars(current['1h'], h1Last, 2000),
+        '4h': reconcileOfficialBars(current['4h'], h4Last, 2000),
+        '1d': reconcileOfficialBars(current['1d'], d1Last, 2000),
       };
 
       barsRef.current = nextMap;
@@ -969,6 +1349,7 @@ export function useRedSniperFeed(): RedSniperFeedState {
 
   return {
     bars,
+    historyDiagnostics,
     livePrice,
     bid,
     ask,

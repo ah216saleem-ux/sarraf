@@ -3,8 +3,9 @@ import { Candle, FireZone, FireZoneTimeframe, LevelWall, Pivot, ZoneSide } from 
 import { findPivots } from './engineCore';
 import {
   PIVOT_ORIGIN_WEIGHTS,
+  SL_ATR_MULT,
   ZoneOriginCandidate,
-  build007TradePlan,
+  buildFireZoneTradePlan,
   clusterAndBonusZoneCandidates,
   evaluateOriginCandidate,
 } from './levels';
@@ -102,13 +103,14 @@ function computeRollingTrend(candles: Candle[], pivotsL5: Pivot[]): Array<1 | -1
 /**
  * Backtest using the exact same H1 candidate scoring, freshness rule (0->+4, 1->+2, 2->0, >=3 discarded),
  * closed-candle break buffer (> 0.25*ATR beyond far edge), $3 same-side clustering + bonuses,
- * and 007 Trade Plan (SL = outer edge -/+ max($12, 1.2*ATR) and snapped TP1).
+ * and Fire Zone Trade Plan (SL = outer edge -/+ max($12, SL_ATR_MULT * ATR14) with SL_ATR_MULT = 1.0 and snapped TP1).
  * Verdict: < 20 trades = 'sample too small'.
  */
 export function runFireZoneBacktest(
   candles: Candle[],
   timeframe: FireZoneTimeframe = '1H'
 ): FireZoneBacktestSummary {
+  void SL_ATR_MULT;
   const emptyResult: FireZoneBacktestSummary = {
     timeframe,
     trades: 0,
@@ -214,7 +216,7 @@ export function runFireZoneBacktest(
       continue;
     }
 
-    // Build LevelWall targets from all valid clustered candidates at bar i for 007 TP1 snapping
+    // Build LevelWall targets from all valid clustered candidates at bar i for Fire Zone TP1 snapping
     const levelWallsAtI: LevelWall[] = clusteredAtI
       .filter((cl) => cl.id !== matchedZone.id)
       .map((cl, idx) => ({
@@ -252,7 +254,7 @@ export function runFireZoneBacktest(
       distance: 0,
     };
 
-    const plan = build007TradePlan(fireZoneObj, levelWallsAtI, atr, c.close, true);
+    const plan = buildFireZoneTradePlan(fireZoneObj, levelWallsAtI, atr, c.close, true);
     const entryPrice = c.close;
     const sl = plan.sl;
     const tp1 = plan.tp1;

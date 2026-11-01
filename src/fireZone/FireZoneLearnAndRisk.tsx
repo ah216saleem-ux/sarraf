@@ -33,7 +33,7 @@ const LEARN_TOPICS: LearnItem[] = [
   {
     id: 'freshness-rule',
     title: '2. Fresh Zones Are Stronger (Each Retest Weakens a Zone)',
-    body: 'Purane system ke baraks jahan touches points barhate thay, 007 engine mein FRESH zones sab se mazboot hotay hain: 0 retests = +4 points (fresh). Har retest zone ko kamzor karta hai (1 retest = +2 points, 2 retests = 0 points), aur 3rd retest ke baad zone retire / discard ho jata hai kyunke wahan ke resting orders absorb ho chuke hotay hain.',
+    body: 'Purane system ke baraks jahan touches points barhate thay, Fire Zone engine mein FRESH zones sab se mazboot hotay hain: 0 retests = +4 points (fresh). Har retest zone ko kamzor karta hai (1 retest = +2 points, 2 retests = 0 points), aur 3rd retest ke baad zone retire / discard ho jata hai kyunke wahan ke resting orders absorb ho chuke hotay hain.',
   },
   {
     id: 'break-buffer-rule',
@@ -53,7 +53,7 @@ const LEARN_TOPICS: LearnItem[] = [
   {
     id: 'sl-and-tp-snapping',
     title: '6. Trade Plan: SL & Snapped TP1 / TP2 / TP3',
-    body: 'Entry price BUY ke liye HI aur SELL ke liye LO hoti hai. Stop Loss zone ke far edge se max($12.00, 1.2 × ATR) bahar rakha jata hai. TP1, TP2 aur TP3 trade direction mein pehle teen distinct levels par snap hotay hain jo entry se kam az kam $9, $13 aur $18 door hon. R:R(TP1) = |TP1 - anchor| / |anchor - SL|.',
+    body: 'Entry price BUY ke liye HI aur SELL ke liye LO hoti hai. Stop Loss zone ke far edge se max($12.00, 1.0 × ATR14) bahar rakha jata hai (SL_ATR_MULT = 1.0). TP1, TP2 aur TP3 trade direction mein pehle teen distinct levels par snap hotay hain jo entry se kam az kam $9, $13 aur $18 door hon. R:R(TP1) = |TP1 - anchor| / |anchor - SL|.',
   },
   {
     id: 'single-source-truth',
@@ -75,7 +75,7 @@ export const FireZoneLearnTab: React.FC = () => {
       <div className="flex items-center gap-2 pb-1">
         <BookOpen className="w-4 h-4 text-[#f5b842]" />
         <span className="text-[10.5px] font-bold uppercase tracking-[0.26em] text-white/50">
-          LEARN FIRE ZONE (007 RULES)
+          LEARN FIRE ZONE RULES
         </span>
       </div>
 

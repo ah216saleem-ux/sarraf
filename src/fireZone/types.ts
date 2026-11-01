@@ -42,14 +42,9 @@ export type ZoneSide = 'BUY' | 'SELL';
 export type ZoneType = 'NEAREST' | 'DEEP' | 'SWING';
 export type ZoneStrengthLabel = 'CRITICAL' | 'STRONG' | 'MODERATE' | 'MEDIUM';
 
-export type ZoneLifecycleState =
-  | 'FRESH'
-  | 'TESTING'
-  | 'PLAYED_HELD'
-  | 'BROKEN'
-  | 'EXPIRED';
+export type ZoneLifecycleState = 'FRESH' | 'TESTING';
 
-export type RetiredZoneResult = 'HELD' | 'BROKEN' | 'EXPIRED';
+export type RetiredZoneResult = 'HELD' | 'BROKEN';
 
 export interface RetiredZoneHistoryItem {
   id: string;
@@ -62,15 +57,6 @@ export interface RetiredZoneHistoryItem {
   nextZoneAnchor?: number;
 }
 
-export interface FlippedLevelCandidate {
-  anchor: number;
-  fromSide: ZoneSide;
-  toSide: ZoneSide;
-  brokenCandleTime: number;
-  brokenBarIndex: number;
-  bonusScore: number; // +2 rank bonus
-}
-
 export interface FlipWatch {
   id: string; // "F" + Math.round(anchor), e.g. "F4103"
   fromZoneId?: string;
@@ -81,21 +67,6 @@ export interface FlipWatch {
   confirmed: boolean;
   brokenAtTime?: number;
   brokenBarIndex?: number;
-}
-
-export interface FireZonePersistedState {
-  version: 1;
-  activeZones: Array<{
-    id: string;
-    side: ZoneSide;
-    anchor: number;
-    type: ZoneType;
-    state: 'FRESH'; // TESTING is transient and never saved
-    createdBarTime: number;
-    score: number;
-  }>;
-  history: RetiredZoneHistoryItem[];
-  flippedLevels: FlippedLevelCandidate[];
 }
 
 export interface FireZonePersistedStateV2 {
@@ -185,7 +156,7 @@ export interface FireZone {
   deathTime?: number;
   barsAgoBroken?: number;
   touches: number;
-  score: number; // 007 level importance score (>=11 CRITICAL, >=8 STRONG, else MODERATE)
+  score: number; // Fire Zone level importance score (>=11 CRITICAL, >=8 STRONG, else MODERATE)
   label: ZoneStrengthLabel;
   type?: ZoneType; // NEAREST, SWING, DEEP
   isStar?: boolean;
@@ -278,7 +249,7 @@ export interface FireZoneEngineResult {
   allZones: FireZone[];
   deadZones: FireZone[];
   recentlyBroken: FireZone[];
-  retiredHistory: RetiredZoneHistoryItem[]; // Last 10 retired zones (HELD / BROKEN / EXPIRED)
+  retiredHistory: RetiredZoneHistoryItem[]; // Last 10 retired zones (HELD / BROKEN)
   latestLevelEvent: string | null; // Formatted sentence for LEVEL EVENTS card
   levelEvents?: string[]; // Last 4 lifecycle events (BROKE / FLIP / HELD)
   brokenIds?: string[];

@@ -14,6 +14,10 @@ import {
   getEngineStatus,
   getCandleStore,
   getClosedCandles,
+  getRedSniperCandlesForApi,
+  loadRedSniperBotLogFromDisk,
+  appendRedSniperBotLogToDisk,
+  clearRedSniperBotLogOnDisk,
 } from './src/server/candleEngine.ts';
 import {
   loadActualsMeta,
@@ -3379,6 +3383,45 @@ app.get('/api/admin/logs', requireAdminAuth, (_req, res) => {
     status: 'SUCCESS',
     ...logReport,
   });
+});
+
+// GET /api/redsniper/candles?tf=1m&limit=5000 - Long-term Red Sniper candle store
+app.get('/api/redsniper/candles', async (req, res) => {
+  try {
+    const tf = String(req.query.tf || '1m').toLowerCase();
+    const limit = Number(req.query.limit || 5000);
+    const data = await getRedSniperCandlesForApi(tf, limit);
+    return res.json(data);
+  } catch (err: any) {
+    return res.status(500).json({
+      error: err?.message || 'Failed to read Red Sniper candle store',
+      bars: [],
+    });
+  }
+});
+
+// GET /api/redsniper/bot-log - Persistent Red Sniper bot trade log (last 200 entries)
+app.get('/api/redsniper/bot-log', (_req, res) => {
+  const entries = loadRedSniperBotLogFromDisk();
+  return res.json({ status: 'SUCCESS', count: entries.length, entries });
+});
+
+// POST /api/redsniper/bot-log - Append/sync Red Sniper bot log entries to server file
+app.post('/api/redsniper/bot-log', (req, res) => {
+  const body = req.body || {};
+  const list = Array.isArray(body.entries)
+    ? body.entries
+    : body.entry
+    ? [body.entry]
+    : [];
+  const entries = appendRedSniperBotLogToDisk(list);
+  return res.json({ status: 'SUCCESS', count: entries.length, entries });
+});
+
+// DELETE /api/redsniper/bot-log - Clear Red Sniper bot log on reset
+app.delete('/api/redsniper/bot-log', (_req, res) => {
+  const entries = clearRedSniperBotLogOnDisk();
+  return res.json({ status: 'SUCCESS', count: entries.length, entries });
 });
 
 // GET /api/admin/backup/list - List available backup snapshots

@@ -3,7 +3,6 @@ import {
   Candle,
   FireZone,
   FlipWatch,
-  FlippedLevelCandidate,
   LevelImportance,
   LevelKind,
   LevelSourceKind,
@@ -17,16 +16,12 @@ import {
   ZoneType,
 } from './types';
 import { computeAtr, findPivots } from './engineCore';
-import {
-  appendRetiredHistory,
-  evaluateZoneClosedLifecycle,
-  getLiveZoneDisplayState,
-} from './lifecycle';
-
+import { getLiveZoneDisplayState } from './lifecycle';
 
 export const ZONE_HALF = 2.0; // Zone = anchor +/- $2 -> exact $4.00 width
 export const ZONE_WIDTH = 4.0;
 export const CLUSTER_RADIUS = 3.0; // Cluster candidates within $3 of each other
+export const SL_ATR_MULT = 1.0; // SL = outer edge -/+ max($12, 1.0 * ATR14)
 
 export const PIVOT_ORIGIN_WEIGHTS: Record<5 | 20 | 50, number> = {
   5: 1,
@@ -499,7 +494,6 @@ export function buildRankedLevels(
   _h4Candles: Candle[] = [],
   _d1Candles: Candle[] = [],
   refPrice = 0,
-  _extraFlippedCandidates: FlippedLevelCandidate[] = [],
   atrOverride?: number,
   confirmedFlips: FlipWatch[] = [],
   brokenIds?: ReadonlySet<string>,
@@ -632,7 +626,6 @@ export function selectZonesFromLevels(
   buyZones: FireZone[];
   sellZones: FireZone[];
   retiredHistory: RetiredZoneHistoryItem[];
-  flippedCandidates: FlippedLevelCandidate[];
 } {
   const halfWidth = options?.halfWidth && options.halfWidth > 0 ? options.halfWidth : ZONE_HALF;
   const effectiveAtr = Math.max(0.5, atr);
@@ -642,78 +635,7 @@ export function selectZonesFromLevels(
     Math.abs(halfWidth - ZONE_HALF) < 1e-6 ? 12.0 : Math.max(4.0, 3 * halfWidth);
 
   let history = [...existingHistory];
-  const flippedCandidates: FlippedLevelCandidate[] = [];
-  const activePool: LevelWall[] = [];
-
-  // Only run legacy closed-candle lifecycle evaluation when legacy 'lvl-*' test levels are passed directly
-  const isLegacyLevelPool =
-    closedCandles.length > 0 &&
-    allRankedLevels.some((l) => l.id.startsWith('lvl-'));
-
-  if (isLegacyLevelPool) {
-    for (const lvl of allRankedLevels) {
-      const naturalSide: ZoneSide =
-        lvl.allowedSide ?? (lvl.price < refPrice ? 'BUY' : 'SELL');
-      const anchorBar =
-        typeof lvl.anchorBarIndex === 'number'
-          ? lvl.anchorBarIndex
-          : Math.max(0, closedCandles.length - 45);
-
-      const outcome = evaluateZoneClosedLifecycle(
-        naturalSide,
-        lvl.price,
-        anchorBar,
-        closedCandles,
-         Math.max(1.5, atr)
-      );
-
-      if (outcome.state === 'FRESH') {
-        activePool.push({ ...lvl, allowedSide: naturalSide });
-      } else {
-        const resultKind =
-          outcome.state === 'PLAYED_HELD'
-            ? 'HELD'
-            : outcome.state === 'BROKEN'
-            ? 'BROKEN'
-            : 'EXPIRED';
-
-        history = appendRetiredHistory(history, {
-          id: `ret-${naturalSide}-${lvl.price.toFixed(2)}-${outcome.eventCandleTime ?? latestTime}`,
-          side: naturalSide,
-          anchor: lvl.price,
-          type: lvl.sources.includes('D1') || lvl.sources.includes('H4') ? 'SWING' : 'NEAREST',
-          result: resultKind,
-          candleTime: outcome.eventCandleTime ?? latestTime,
-          moveAfter: outcome.moveAfter,
-        });
-
-        if (outcome.state === 'BROKEN' && outcome.flippedCandidate) {
-          flippedCandidates.push(outcome.flippedCandidate);
-          const flippedSide = outcome.flippedCandidate.toSide;
-          const postBreakOutcome = evaluateZoneClosedLifecycle(
-            flippedSide,
-            lvl.price,
-            outcome.flippedCandidate.brokenBarIndex,
-            closedCandles,
-            Math.max(1.5, atr)
-          );
-          if (postBreakOutcome.state === 'FRESH') {
-            activePool.push({
-              ...lvl,
-              id: `${lvl.id}-flip-${flippedSide}`,
-              sources: [...lvl.sources, 'FLIP'],
-              score: lvl.score + 2,
-              anchorBarIndex: outcome.flippedCandidate.brokenBarIndex,
-              anchorTime: outcome.flippedCandidate.brokenCandleTime,
-              allowedSide: flippedSide,
-            });
-          }
-        }
-      }
-    }
-  } else {
-    activePool.push(...allRankedLevels);
-  }
+  const activePool: LevelWall[] = [...allRankedLevels];
 
   // Add any CONFIRMED FlipWatch candidates (unconfirmed flips are NEVER shown)
   for (const fw of confirmedFlips) {
@@ -988,7 +910,6 @@ export function selectZonesFromLevels(
     buyZones,
     sellZones,
     retiredHistory: history.slice(0, 10),
-    flippedCandidates,
   };
 }
 
@@ -1057,12 +978,12 @@ export function filterAndRankKeptLevels(
 /**
  * 4) TRADE PLAN:
  * - Entry price = HI for BUY, LO for SELL.
- * - SL = zone outer edge -/+ max($12, 1.2*ATR14).
+ * - SL = zone outer edge -/+ max($12, SL_ATR_MULT * ATR14) where SL_ATR_MULT = 1.0.
  * - TP1/2/3 = the first three distinct levels beyond entry in the trade direction
  *   with distance >= $9 / $13 / $18 (fallback entry +/- $9/$13/$18).
  * - R:R(TP1) = |TP1 - anchor| / |anchor - SL|.
  */
-export function build007TradePlan(
+export function buildFireZoneTradePlan(
   zone: FireZone,
   allLevels: LevelWall[],
   atr14H1: number,
@@ -1076,7 +997,7 @@ export function build007TradePlan(
   const entryRange: [number, number] = [lo, hi];
   const entryPrice = isBuy ? hi : lo;
 
-  const slOffset = Math.max(12.0, Number((1.2 * atr14H1).toFixed(2)));
+  const slOffset = Math.max(12.0, Number((SL_ATR_MULT * atr14H1).toFixed(2)));
   const sl = isBuy
     ? Number((lo - slOffset).toFixed(2))
     : Number((hi + slOffset).toFixed(2));

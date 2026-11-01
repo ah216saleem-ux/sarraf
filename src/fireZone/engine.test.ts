@@ -1,11 +1,10 @@
 /**
- * Unit tests for Fire Zone 007 Core Engine & Zone Lifecycle (src/fireZone/lifecycle.ts):
+ * Unit tests for Fire Zone Core Engine & Zone Lifecycle (src/fireZone/lifecycle.ts):
  * - Fixed H1 basis + H4/D1 level ranking (src/fireZone/levels.ts)
  * - Candidate clustering within $3 & importance scoring + rank style buckets
  * - Zones from levels with constant width $4.00 (anchor +/- $2.00)
- * - 007 Trade Plan level-snapping TP1/TP2/TP3 (>= $9, >= $13, >= $18) & SL = max($12, 1.2*ATR)
- * - Zone Lifecycle (FRESH, TESTING, PLAYED_HELD, BROKEN, EXPIRED), retire -> replacement,
- *   broken flip rule (+2 bonus), LEVEL EVENTS sentence, and localStorage (fireZone.v1) restore & re-validation.
+ * - Fire Zone Trade Plan level-snapping TP1/TP2/TP3 (>= $9, >= $13, >= $18) & SL = outer edge -/+ max($12, SL_ATR_MULT * ATR14) with SL_ATR_MULT = 1.0
+ * - Zone Lifecycle v2 (FRESH, TESTING, HELD retest counting, BROKEN, FlipWatch arm + retest, and localStorage fireZone.v2 restore & re-validation).
  * Run with: npm run test:firezone
  */
 import {
@@ -21,17 +20,14 @@ import {
   getStyleBucketByRank,
   buildRankedLevels,
   selectZonesFromLevels,
-  build007TradePlan,
+  SL_ATR_MULT,
+  buildFireZoneTradePlan,
   resetFireZoneEngineStore,
   getRecomputeCount,
   getFireZoneStore,
   LevelWall,
-  evaluateZoneClosedLifecycle,
   getLiveZoneDisplayState,
   formatLevelEventSentence,
-  saveFireZoneLifecycleState,
-  loadFireZoneLifecycleState,
-  restoreAndRevalidateLifecycleState,
   saveFireZoneV2State,
   loadFireZoneV2State,
   restoreAndRevalidateV2State,
@@ -69,7 +65,15 @@ function assert(condition: boolean, message: string) {
   }
 }
 
-console.log('--- Starting Fire Zone 007 Core Engine, Levels & Lifecycle Tests ---');
+void stepFlipWatchWithCandle;
+void evaluateZoneHeldOnCandles;
+void formatBreakEventSentence;
+void formatHeldEventSentence;
+void getFlipWatches;
+void getLifecycleEvents;
+void formatLevelEventSentence;
+
+console.log('--- Starting Fire Zone Core Engine, Levels & Lifecycle Tests ---');
 
 function makeCandle(
   index: number,
@@ -161,8 +165,9 @@ function makeCandle(
   console.log('✓ Level Engine ($3 clustering, importance score & rank style buckets) passed');
 }
 
-// 4. Test Zone Width Always Exactly $4.00 (anchor +/- $2.00) & 007 TP Snapping
+// 4. Test Zone Width Always Exactly $4.00 (anchor +/- $2.00), SL_ATR_MULT = 1.0 & Fire Zone TP Snapping
 {
+  assert(SL_ATR_MULT === 1.0, `Expected SL_ATR_MULT === 1.0, got ${SL_ATR_MULT}`);
   const h1: FireZoneCandle[] = [];
   for (let i = 0; i < 180; i++) h1.push(makeCandle(i, 4050, 4054, 4046, 4050));
   h1[40] = makeCandle(40, 4065, 4082, 4060, 4070);
@@ -177,6 +182,15 @@ function makeCandle(
     assert(width === 4.0, `Zone ${z.id} width must be 4.00, got ${width}`);
   }
 
+  assert(
+    getLiveZoneDisplayState({ bottom: 3998, top: 4002 }, 4000.5) === 'TESTING',
+    'Live price inside [3998, 4002] shows TESTING'
+  );
+  assert(
+    getLiveZoneDisplayState({ bottom: 3998, top: 4002 }, 4008) === 'FRESH',
+    'Live price outside [3998, 4002] shows FRESH'
+  );
+
   const buyZone = {
     id: 'FZ-BUY-4000.00', side: 'BUY' as const, anchor: 4000, bottom: 3998, top: 4002,
     pivotIndex: 50, pivotTime: 1700000000, pivotPrice: 4000, pivotLevel: 15 as const,
@@ -189,224 +203,14 @@ function makeCandle(
     { id: 'l3', price: 4017.0, kind: 'PIVOT', label: 'H4', sources: ['H4'], touches: 1, score: 4, rank: 3, importance: 'MAJOR', distance: 15.0 },
     { id: 'l4', price: 4025.0, kind: 'ROUND_NUMBER', label: '$4025', sources: ['D1'], touches: 2, score: 7, rank: 1, importance: 'KEY', distance: 23.0 },
   ];
-  const plan = build007TradePlan(buyZone, mockLevels, 10, 4001, true);
+  const plan = buildFireZoneTradePlan(buyZone, mockLevels, 10, 4001, true);
   assert(plan.tp1 === 4012.5 && plan.tp2 === 4017.0 && plan.tp3 === 4025.0, 'TP1/2/3 snapped to levels');
-  console.log('✓ Zone width $4.00 & 007 Trade Plan TP snapping passed');
-}
-
-// 5. Test LIFECYCLE (src/fireZone/lifecycle.ts):
-//    - FRESH & live TESTING (not saved)
-//    - Wick-only beyond LO-$1 / HI+$1 does NOT break
-//    - Close beyond LO-$1 / HI+$1 -> BROKEN + flip candidate (+2 bonus)
-//    - PLAYED_HELD via 1*ATR close away OR 3 consecutive closes away
-//    - EXPIRED (>150 H1 candles)
-//    - Retire -> replacement picked + LEVEL EVENTS sentence
-//    - Persist & restore/re-validate in fireZone.v1
-{
-  const atr = 10; // BUY zone at anchor 4000 -> LO = 3998, HI = 4002
-
-  // (a) FRESH & Live TESTING
-  const freshBars = [
-    makeCandle(0, 4010, 4015, 4000, 4012), // anchor bar 0
-    makeCandle(1, 4012, 4016, 4005, 4014), // never touched [3998, 4002]
-  ];
-  const outFresh = evaluateZoneClosedLifecycle('BUY', 4000, 0, freshBars, atr);
-  assert(outFresh.state === 'FRESH', `Expected FRESH, got ${outFresh.state}`);
-  assert(
-    getLiveZoneDisplayState({ bottom: 3998, top: 4002 }, 4000.5) === 'TESTING',
-    'Live price inside [3998, 4002] shows TESTING'
-  );
-  assert(
-    getLiveZoneDisplayState({ bottom: 3998, top: 4002 }, 4008) === 'FRESH',
-    'Live price outside [3998, 4002] shows FRESH'
-  );
-
-  // (b) Wick-only touch beyond LO - $1 (low = 3994 < 3997) but close = 3999 (>= 3997) -> does NOT break!
-  //     And close = 4004 (< HI + ATR = 4012) -> stays FRESH (touched, waiting for 1*ATR or 3 closes)
-  const wickOnlyBars = [
-    makeCandle(0, 4010, 4015, 4000, 4012),
-    makeCandle(1, 4005, 4006, 3994, 4004), // deep wick to 3994, closes at 4004
-  ];
-  const outWickOnly = evaluateZoneClosedLifecycle('BUY', 4000, 0, wickOnlyBars, atr);
-  assert(
-    outWickOnly.state === 'FRESH',
-    `Wick-only beyond LO-$1 without close beyond must NOT break (got ${outWickOnly.state})`
-  );
-
-  // (c) Close beyond LO - $1 (BUY: close = 3996.5 < 3997) -> BROKEN + flips to SELL (+2 bonus)
-  const brokenBuyBars = [
-    makeCandle(0, 4010, 4015, 4000, 4012),
-    makeCandle(1, 4002, 4003, 3995, 3996.5), // closes < 3997 (LO - $1)
-  ];
-  const outBrokenBuy = evaluateZoneClosedLifecycle('BUY', 4000, 0, brokenBuyBars, atr);
-  assert(outBrokenBuy.state === 'BROKEN', `Expected BROKEN on close < LO-$1, got ${outBrokenBuy.state}`);
-  assert(
-    Boolean(outBrokenBuy.flippedCandidate) &&
-      outBrokenBuy.flippedCandidate!.toSide === 'SELL' &&
-      outBrokenBuy.flippedCandidate!.bonusScore === 2,
-    'Broken BUY zone creates SELL flipped candidate with +2 bonus'
-  );
-
-  // (d) PLAYED_HELD via 1*ATR close away (BUY: wicks into <= 4002, then closes >= HI + ATR = 4012)
-  const heldAtrBars = [
-    makeCandle(0, 4010, 4015, 4000, 4012),
-    makeCandle(1, 4006, 4032, 4001.2, 4025), // wicks to 4001.2 (<= 4002), closes at 4025 (>= 4012)
-  ];
-  const outHeldAtr = evaluateZoneClosedLifecycle('BUY', 4000, 0, heldAtrBars, atr);
-  assert(outHeldAtr.state === 'PLAYED_HELD', `Expected PLAYED_HELD (1*ATR close), got ${outHeldAtr.state}`);
-  assert(outHeldAtr.moveAfter >= 25, `Expected moveAfter >= $25, got ${outHeldAtr.moveAfter}`);
-
-  // (e) PLAYED_HELD via 3 consecutive closes away on the right side (each < HI + ATR, e.g. 4005, 4006, 4007)
-  const held3ClosesBars = [
-    makeCandle(0, 4010, 4015, 4000, 4012),
-    makeCandle(1, 4004, 4006, 4001.5, 4005), // wick into zone + close #1 > 4002
-    makeCandle(2, 4005, 4008, 4003.5, 4006), // close #2 > 4002
-    makeCandle(3, 4006, 4009, 4004.0, 4007), // close #3 > 4002 -> PLAYED_HELD!
-  ];
-  const outHeld3Closes = evaluateZoneClosedLifecycle('BUY', 4000, 0, held3ClosesBars, atr);
-  assert(
-    outHeld3Closes.state === 'PLAYED_HELD',
-    `Expected PLAYED_HELD (3 consecutive closes), got ${outHeld3Closes.state}`
-  );
-
-  // (f) EXPIRED: anchor older than 150 H1 candles
-  const expiredBars: FireZoneCandle[] = [];
-  for (let i = 0; i <= 160; i++) expiredBars.push(makeCandle(i, 4050, 4052, 4048, 4050));
-  const outExpired = evaluateZoneClosedLifecycle('BUY', 4000, 2, expiredBars, atr);
-  assert(outExpired.state === 'EXPIRED', `Expected EXPIRED (>150 H1 bars), got ${outExpired.state}`);
-
-  // (g) Retire -> Replacement picked & Flip Rule in selectZonesFromLevels
-  const simCandles: FireZoneCandle[] = [];
-  for (let i = 0; i < 60; i++) simCandles.push(makeCandle(i, 4040, 4042, 4038, 4040));
-  // Bar 20: touches BUY level 4020 (low=4019.5) and bounces strongly to 4052 -> 4020 is PLAYED_HELD!
-  simCandles[20] = makeCandle(20, 4035, 4052, 4019.5, 4050);
-  // Bars 22..24: price is below 4025 when SELL level 4025 forms at bar 22, then breaks upward at bar 25 (close=4030 > 4028)
-  simCandles[22] = makeCandle(22, 4021, 4025, 4018, 4021);
-  simCandles[23] = makeCandle(23, 4021, 4023, 4019, 4022);
-  simCandles[24] = makeCandle(24, 4022, 4024, 4020, 4022);
-  simCandles[25] = makeCandle(25, 4022, 4032, 4021, 4030);
-
-  const testRankedLevels: LevelWall[] = [
-    // Level A: BUY @ 4020 (score 14, anchored at bar 10) -> touched & bounced at bar 20 -> PLAYED_HELD -> must retire!
-    {
-      id: 'lvl-4020.00', price: 4020, kind: 'PDL', label: 'PDL',
-      sources: ['D1', 'PDL'], touches: 2, score: 14, rank: 1, importance: 'KEY',
-      distance: 20, anchorBarIndex: 10, anchorTime: simCandles[10].time,
-    },
-    // Level B: Replacement BUY @ 4005 (score 10, anchored at bar 15, untouched) -> must be picked!
-    {
-      id: 'lvl-4005.00', price: 4005, kind: 'ROUND_NUMBER', label: '$4000',
-      sources: ['H4', 'ROUND_100'], touches: 1, score: 10, rank: 2, importance: 'KEY',
-      distance: 35, anchorBarIndex: 15, anchorTime: simCandles[15].time,
-    },
-    // Level C: SELL @ 4025 (score 9, anchored at bar 22, allowedSide: 'SELL') -> broke upward at bar 25 (close 4030 > 4028) -> flips to BUY candidate (score 9+2=11) below refPrice 4040!
-    {
-      id: 'lvl-4025.00', price: 4025, kind: 'PIVOT', label: 'H4',
-      sources: ['H4', 'D1'], touches: 1, score: 9, rank: 3, importance: 'MAJOR',
-      distance: 15, anchorBarIndex: 22, anchorTime: simCandles[22].time, allowedSide: 'SELL',
-    },
-    // Level D: Active SELL @ 4065 (score 12, anchored at bar 35, untouched)
-    {
-      id: 'lvl-4065.00', price: 4065, kind: 'PDH', label: 'PDH',
-      sources: ['D1', 'PDH'], touches: 1, score: 12, rank: 2, importance: 'KEY',
-      distance: 25, anchorBarIndex: 35, anchorTime: simCandles[35].time,
-    },
-  ];
-
-  const sel = selectZonesFromLevels(
-    testRankedLevels,
-    4040,
-    8,
-    simCandles[59].time,
-    59,
-    undefined,
-    simCandles,
-    [],
-    4040
-  );
-
-  // Verify 4020 was retired as HELD and NOT in buyZones
-  assert(!sel.buyZones.some((z) => z.anchor === 4020), 'PLAYED_HELD zone 4020 must be retired from buyZones');
-  assert(
-    sel.retiredHistory.some((h) => h.anchor === 4020 && h.result === 'HELD'),
-    'PLAYED_HELD zone 4020 recorded in retiredHistory as HELD'
-  );
-
-  // Verify broken SELL @ 4025 flipped to BUY with +2 score bonus (score = 9 + 2 = 11) and was selected!
-  const flippedBuy = sel.buyZones.find((z) => z.anchor === 4025);
-  assert(
-    Boolean(flippedBuy) && flippedBuy!.isFlipped === true && flippedBuy!.score === 11,
-    'Broken SELL level 4025 flipped to BUY candidate with +2 bonus and was selected'
-  );
-  // And replacement 4005 is also selected
-  assert(
-    sel.buyZones.some((z) => z.anchor === 4005),
-    'Replacement BUY level 4005 selected after 4020 retired'
-  );
-
-  // Verify LEVEL EVENTS sentences
-  const heldItem = sel.retiredHistory.find((h) => h.anchor === 4020)!;
-  const heldSentence = formatLevelEventSentence(heldItem);
-  assert(
-    Boolean(heldSentence) &&
-      heldSentence!.includes('BUY zone 4020.00 held: price bounced +$') &&
-      heldSentence!.includes('Next BUY zone is'),
-    `Unexpected HELD sentence: ${heldSentence}`
-  );
-  const brokenItem = sel.retiredHistory.find((h) => h.anchor === 4025)!;
-  const brokenSentence = formatLevelEventSentence(brokenItem);
-  assert(
-    brokenSentence === 'SELL zone 4025.00 broke on candle close. It now acts as a BUY candidate',
-    `Unexpected BROKEN sentence: ${brokenSentence}`
-  );
-
-  // (h) Persist to localStorage (fireZone.v1) & restore + re-validate against candles
-  memoryStorage.removeItem?.(FIRE_ZONE_STORAGE_KEY);
-  saveFireZoneLifecycleState(
-    [
-      // Even if a zone has live TESTING state in memory, saveFireZoneLifecycleState must save 'FRESH'
-      {
-        ...sel.buyZones[0],
-        id: 'FZ-BUY-3990.00',
-        side: 'BUY',
-        anchor: 3990,
-        bottom: 3988,
-        top: 3992,
-        lifecycleState: 'TESTING',
-        pivotTime: simCandles[10].time,
-      },
-    ],
-    sel.retiredHistory,
-    sel.flippedCandidates,
-    memoryStorage
-  );
-
-  const rawLoaded = loadFireZoneLifecycleState(memoryStorage);
-  assert(Boolean(rawLoaded), 'Loaded state from fireZone.v1');
-  assert(
-    rawLoaded!.activeZones[0].state === 'FRESH',
-    'TESTING state is never persisted; saved state is always FRESH'
-  );
-
-  // Now simulate a new closed candle that breaks 3990 downward (close = 3984 < 3988 - 1)
-  const candlesWithBreak = [
-    ...simCandles,
-    makeCandle(60, 3992, 3993, 3982, 3984),
-  ];
-  const revalidated = restoreAndRevalidateLifecycleState(candlesWithBreak, 8, memoryStorage);
-  assert(
-    revalidated.validSavedZones.length === 0,
-    'Broken saved zone 3990 must be dropped during restore re-validation'
-  );
-  assert(
-    revalidated.history.some((h) => h.anchor === 3990 && h.result === 'BROKEN'),
-    'Broken saved zone 3990 added to retired history on restore'
-  );
-  assert(
-    revalidated.flippedLevels.some((f) => f.anchor === 3990 && f.toSide === 'SELL'),
-    'Broken saved zone 3990 added to flippedLevels as SELL candidate on restore'
-  );
-  console.log('✓ Lifecycle (FRESH, TESTING, PLAYED_HELD, BROKEN, EXPIRED, retire->replacement, flip +2, fireZone.v1 restore) passed');
+  // For ATR=10, max($12, 1.0*10) = $12 -> SL = 3998 - 12 = 3986
+  assert(plan.sl === 3986.0, `Expected SL 3986.0 for ATR=10 (max($12, 1.0*ATR)), got ${plan.sl}`);
+  // For ATR=15, max($12, 1.0*15) = $15 -> SL = 3998 - 15 = 3983
+  const planAtr15 = buildFireZoneTradePlan(buyZone, mockLevels, 15, 4001, true);
+  assert(planAtr15.sl === 3983.0, `Expected SL 3983.0 for ATR=15 (1.0*ATR14), got ${planAtr15.sl}`);
+  console.log('✓ Zone width $4.00, SL_ATR_MULT = 1.0 & Fire Zone Trade Plan TP snapping passed');
 }
 
 // 6. Test structure.ts & Autoscale Helper
@@ -602,12 +406,12 @@ function makeCandle(
 
 
 // ----------------------------------------------------------------------------
-// 13. Test 007 Style Acceptance:
+// 13. Test Fire Zone Style Acceptance:
 
 //     (1) Reloading or calling engine twice yields identical zone prices
 //     (2) Ladder and chart show the same zones (1-to-1)
 //     (3) BUY and SELL entries are each exactly $4.00 wide
-//     (4) 7 Gates adhere to 007 rules (proximity <= $6, Level Not Broken, no HTF text)
+//     (4) 7 Gates adhere to Fire Zone rules (proximity <= $6, Level Not Broken, no HTF text)
 //     (5) Backtest produces valid trades, win rate, avgR, profit factor, strong+ line, max DD
 // ----------------------------------------------------------------------------
 {
@@ -682,7 +486,7 @@ function makeCandle(
   assert(typeof bt.profitFactor === 'number', 'Backtest must output profitFactor');
   assert(typeof bt.maxDrawdownR === 'number', 'Backtest must output maxDrawdownR');
 
-  console.log('✓ 007 Style Acceptance Criteria (price stability, ladder/chart parity, $4 width, 7 gates, backtest) passed');
+  console.log('✓ Fire Zone Style Acceptance Criteria (price stability, ladder/chart parity, $4 width, 7 gates, backtest) passed');
 }
 
 // 14. Test Simple Sliding Zone Ladder (high-to-low sort, $0.05 deduplication with SELL priority, card/chart parity, live tick sliding)
@@ -981,7 +785,7 @@ function makeCandle(
   }
 
   // (g) Trade Plan R:R(TP1) = |TP1 - anchor| / |anchor - SL|
-  const planCheck = build007TradePlan(picked.sellZones[0], selPool, 10, 4050, true);
+  const planCheck = buildFireZoneTradePlan(picked.sellZones[0], selPool, 10, 4050, true);
   const expectedRr = Number(
     (Math.abs(planCheck.tp1 - planCheck.anchor) / Math.abs(planCheck.anchor - planCheck.sl)).toFixed(2)
   );
@@ -1579,10 +1383,10 @@ function makeCandle(
     );
     assert(
       tr.side === 'BUY' ? tr.sl < tr.entryPrice && tr.tp1 >= tr.entryPrice + 8.99 : tr.sl > tr.entryPrice && tr.tp1 <= tr.entryPrice - 8.99,
-      'Backtest trade must use 007 Trade Plan SL and snapped TP1'
+      'Backtest trade must use Fire Zone Trade Plan SL and snapped TP1'
     );
   }
-  console.log('✓ (4) BACKTEST (new candidate scoring, freshness rule, 0.25*ATR break buffer, 007 plan SL/TP1 & verdict logic) passed');
+  console.log('✓ (4) BACKTEST (new candidate scoring, freshness rule, 0.25*ATR break buffer, Fire Zone plan SL/TP1 & verdict logic) passed');
 }
 
 
@@ -1626,7 +1430,7 @@ function makeCandle(
         } | retests=${z.touches}`
       );
     }
-    console.log('--- ALL FIRE ZONE 007 CORE, LIFECYCLE & CHART MODEL TESTS PASSED SUCCESSFULLY ---');
+    console.log('--- ALL FIRE ZONE CORE, LIFECYCLE & CHART MODEL TESTS PASSED SUCCESSFULLY ---');
   } catch (err) {
     console.error(err);
     process.exit(1);
