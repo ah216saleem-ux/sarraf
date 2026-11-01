@@ -155,6 +155,49 @@ docker run -d \
 
 ---
 
+---
+
+## ☁️ Recommended Deployment Option C: Google Cloud Run (Serverless Container with Firestore Store)
+
+When deploying on Google Cloud Run, the local container filesystem (`/app/data`) is ephemeral and resets on restart, redeploy, or scale-to-zero. To ensure 100% persistent candle history and uninterrupted bot telemetry, follow these critical deployment rules:
+
+### 1. Mandatory Cloud Run Configuration:
+- **Min Instances**: Set `min-instances = 1` (DO NOT use 0). This prevents scale-to-zero so that the 60-second broker sync worker and live gap detection run continuously.
+- **CPU Allocation**: Set **CPU always allocated** (`--no-cpu-throttling` or "CPU is always allocated"). This guarantees the background tick loop and candle persistence worker receive full CPU cycles even when no external HTTP request is active.
+- **Service Account**: Attach a Google Cloud Service Account with the **Cloud Datastore User** (or **Firebase Admin SDK Administrator Service Agent**) role so Application Default Credentials (ADC) can read and write to Firestore without hardcoded secrets.
+
+### 2. Environment Variables to Set in Cloud Run:
+```env
+# Storage backend: selects Google Cloud Firestore for persistent candle and bot log storage
+REDSNIPER_STORE=firestore
+
+# Comma-separated list of terminal owner emails authorized to manage bot logs (no hardcoded credentials)
+OWNER_EMAILS=a.h216saleem@gmail.com,admin@sarraf.gold
+
+# Node environment and port
+NODE_ENV=production
+PORT=3000
+DATA_DIR=/app/data
+
+# Authentication credentials
+ADMIN_USER=admin@sarraf.gold
+ADMIN_PASS=YourStrongSecurePassword2026!
+
+# Telegram & AI Integrations
+TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+TELEGRAM_CHAT_ID=-1001234567890
+GEMINI_API_KEY=AIzaSy...
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+### 3. Verification:
+- Open the **RED SNIPER** tab and expand the debug panel.
+- Verify the badge shows **`FIRESTORE PERSISTENT`**.
+- Verify no red banner appears. (If deployed without persistent storage on Cloud Run, a red `STORAGE NOT PERSISTENT - history will reset` banner will alert the operator).
+- Check `/api/redsniper/health` to confirm `backend: "firestore"`, `persistent: true`, and `gaps: []`.
+
+---
+
 ## 📋 Pre-Flight Go-Live Checklist (11 Gates)
 
 1. [x] **XAU/USD Live Spot Telemetry**: Biquote.io stream active, quote age $< 5$s.

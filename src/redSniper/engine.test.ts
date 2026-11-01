@@ -46,6 +46,7 @@ import {
   dedupeAndMergeRedSniperCandles,
   doesStoredM1CoverRange,
 } from '../server/candleEngine';
+import { runAllStorageTests } from './storage.test';
 
 function makeScaledTimeframeBars(
   count: number,
@@ -2114,6 +2115,7 @@ async function main() {
   testMarketClosedCalibrationAndReplay();
   testRemainingParityFixes1To5();
   testZonesV3FreezeStoreConsumedReplayAndBotLog();
+  await runAllStorageTests();
   await printLiveXauusdZonesTable();
 }
 

@@ -632,11 +632,15 @@ export async function fetchStoreCandlesFirstWithFallback(
   try {
     const res = await fetch(
       `/api/redsniper/candles?tf=${encodeURIComponent(interval)}&limit=${limit}`,
-      { headers: { Accept: 'application/json' } }
+      { headers: { Accept: 'application/json' }, credentials: 'include' }
     );
     if (res.ok) {
       const json = await res.json();
-      const rawCandles = Array.isArray(json?.candles) ? json.candles : [];
+      const rawCandles = Array.isArray(json?.candles)
+        ? json.candles
+        : Array.isArray(json?.bars)
+        ? json.bars
+        : [];
       if (rawCandles.length > 0) {
         const normalized: Candle[] = [];
         for (const r of rawCandles) {

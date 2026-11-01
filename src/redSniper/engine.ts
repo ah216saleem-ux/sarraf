@@ -328,17 +328,48 @@ export interface PerformanceMetrics {
 }
 
 export type BotLogEventType =
-  | 'ZONE_DETECTED'
   | 'ENTRY'
   | 'TP1_BE'
+  | 'TP2'
+  | 'TP2_PARTIAL'
+  | 'TP3'
   | 'TRAIL_MOVE'
-  | 'EXIT';
+  | 'EXIT'
+  | 'SKIPPED_TRADE'
+  | 'BOT_PAUSED'
+  | 'BOT_RESUMED'
+  | 'ZONE_NEW'
+  | 'ZONE_NEAR'
+  | 'ZONE_DEAD'
+  | 'ZONE_DETECTED';
+
+export type BotLogCategory = 'trade' | 'zone';
+
+export function isTradeLogType(type: string): boolean {
+  return [
+    'ENTRY',
+    'TP1_BE',
+    'TP2',
+    'TP2_PARTIAL',
+    'TP3',
+    'TRAIL_MOVE',
+    'EXIT',
+    'SKIPPED_TRADE',
+    'BOT_PAUSED',
+    'BOT_RESUMED',
+  ].includes(type);
+}
+
+export function isZoneLogType(type: string): boolean {
+  return ['ZONE_NEW', 'ZONE_NEAR', 'ZONE_DEAD', 'ZONE_DETECTED'].includes(type);
+}
 
 export interface BotLogEntry {
   id: string;
   ts: number; // ms
   isoTime: string;
   type: BotLogEventType;
+  category?: BotLogCategory;
   tf?: RedSniperTimeframe;
   side?: 'BUY' | 'SELL';
   zoneId?: string;
@@ -348,7 +379,9 @@ export interface BotLogEntry {
 }
 
 export const RED_SNIPER_DEMO_STORAGE_KEY = 'redSniperDemo';
-export const RED_SNIPER_BOT_LOG_STORAGE_KEY = 'redSniperBotLog.v1';
+export const RED_SNIPER_BOT_LOG_STORAGE_KEY = 'redSniperBotLog.v2';
+export const RED_SNIPER_TRADE_LOG_STORAGE_KEY = 'redSniperTradeLog.v2';
+export const RED_SNIPER_ZONE_LOG_STORAGE_KEY = 'redSniperZoneLog.v2';
 
 export function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
@@ -2114,7 +2147,7 @@ export function saveDemoState(state: RedSniperDemoState): void {
 }
 
 /**
- * 5) LIVE TRADE LOG ("BOT LOG") helpers: persisted in localStorage + server file, capped at last 200 entries.
+ * LIVE TRADE LOG ("BOT LOG") helpers: separated into TRADE log (max 1000) and ZONE log (max 100).
  */
 export function mergeBotLogEntries(
   existing: BotLogEntry[],
@@ -2137,6 +2170,43 @@ export function mergeBotLogEntries(
     .slice(0, maxEntries);
 }
 
+export function mergeSeparatedBotLogEntries(
+  existingTrades: BotLogEntry[],
+  existingZones: BotLogEntry[],
+  incoming: BotLogEntry[],
+  maxTrades: number = 1000,
+  maxZones: number = 100
+): { tradeLogs: BotLogEntry[]; zoneLogs: BotLogEntry[] } {
+  const tradeMap = new Map<string, BotLogEntry>();
+  const zoneMap = new Map<string, BotLogEntry>();
+
+  for (const t of existingTrades || []) {
+    if (t && t.id) tradeMap.set(t.id, { ...t, category: 'trade' });
+  }
+  for (const z of existingZones || []) {
+    if (z && z.id) zoneMap.set(z.id, { ...z, category: 'zone' });
+  }
+
+  for (const item of incoming || []) {
+    if (!item || !item.id) continue;
+    if (isZoneLogType(item.type)) {
+      zoneMap.set(item.id, { ...item, category: 'zone' });
+    } else {
+      tradeMap.set(item.id, { ...item, category: 'trade' });
+    }
+  }
+
+  const tradeLogs = Array.from(tradeMap.values())
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, maxTrades);
+
+  const zoneLogs = Array.from(zoneMap.values())
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, maxZones);
+
+  return { tradeLogs, zoneLogs };
+}
+
 export function loadBotLogFromLocalStorage(): BotLogEntry[] {
   if (typeof window === 'undefined') return [];
   try {
@@ -2144,7 +2214,7 @@ export function loadBotLogFromLocalStorage(): BotLogEntry[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return mergeBotLogEntries([], parsed, 200);
+    return mergeBotLogEntries([], parsed, 1000);
   } catch {
     return [];
   }
@@ -2153,7 +2223,7 @@ export function loadBotLogFromLocalStorage(): BotLogEntry[] {
 export function saveBotLogToLocalStorage(entries: BotLogEntry[]): void {
   if (typeof window === 'undefined') return;
   try {
-    const capped = mergeBotLogEntries([], entries, 200);
+    const capped = mergeBotLogEntries([], entries, 1000);
     window.localStorage.setItem(
       RED_SNIPER_BOT_LOG_STORAGE_KEY,
       JSON.stringify(capped)
@@ -2161,6 +2231,176 @@ export function saveBotLogToLocalStorage(entries: BotLogEntry[]): void {
   } catch {
     // Ignore storage quota errors
   }
+}
+
+export function loadSeparatedBotLogsFromLocalStorage(): {
+  tradeLogs: BotLogEntry[];
+  zoneLogs: BotLogEntry[];
+} {
+  if (typeof window === 'undefined') return { tradeLogs: [], zoneLogs: [] };
+  try {
+    const rawTrades = window.localStorage.getItem(RED_SNIPER_TRADE_LOG_STORAGE_KEY);
+    const rawZones = window.localStorage.getItem(RED_SNIPER_ZONE_LOG_STORAGE_KEY);
+    const parsedTrades = rawTrades ? JSON.parse(rawTrades) : [];
+    const parsedZones = rawZones ? JSON.parse(rawZones) : [];
+    return mergeSeparatedBotLogEntries(
+      Array.isArray(parsedTrades) ? parsedTrades : [],
+      Array.isArray(parsedZones) ? parsedZones : [],
+      [],
+      1000,
+      100
+    );
+  } catch {
+    return { tradeLogs: [], zoneLogs: [] };
+  }
+}
+
+export function saveSeparatedBotLogsToLocalStorage(
+  tradeLogs: BotLogEntry[],
+  zoneLogs: BotLogEntry[]
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const capped = mergeSeparatedBotLogEntries(tradeLogs, zoneLogs, [], 1000, 100);
+    window.localStorage.setItem(
+      RED_SNIPER_TRADE_LOG_STORAGE_KEY,
+      JSON.stringify(capped.tradeLogs)
+    );
+    window.localStorage.setItem(
+      RED_SNIPER_ZONE_LOG_STORAGE_KEY,
+      JSON.stringify(capped.zoneLogs)
+    );
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+/**
+ * 2) Zone events: do NOT log zones loaded at startup.
+ * Log "ZONE_NEW" only for zones created while app runs.
+ * Log "ZONE_NEAR" once when price comes within 3 x ATR14.
+ * Log "ZONE_DEAD" when it dies.
+ * One line per event, deduplicated by zone id.
+ */
+export function detectRuntimeZoneEvents(params: {
+  allZones: RedSniperZone[];
+  knownZoneIds: Set<string>;
+  nearLoggedZoneIds: Set<string>;
+  deadLoggedZoneIds: Set<string>;
+  livePrice: number | null;
+  deadZones?: ZoneDebugEntry[];
+  nowMs?: number;
+  isInitialLoad?: boolean;
+}): BotLogEntry[] {
+  const {
+    allZones,
+    knownZoneIds,
+    nearLoggedZoneIds,
+    deadLoggedZoneIds,
+    livePrice,
+    deadZones = [],
+    nowMs = Date.now(),
+    isInitialLoad = false,
+  } = params;
+
+  // On startup / first load, register all existing zones into knownZoneIds and nearLoggedZoneIds without emitting
+  if (isInitialLoad) {
+    for (const z of allZones) {
+      knownZoneIds.add(z.id);
+      if (livePrice !== null && Number.isFinite(livePrice) && livePrice > 0) {
+        const dist = getZoneDistancePts(z, livePrice);
+        if (dist <= 3 * z.atr14) {
+          nearLoggedZoneIds.add(z.id);
+        }
+      }
+    }
+    for (const dz of deadZones) {
+      const dzId = `${dz.time}-${dz.side}-${dz.bottom.toFixed(2)}-${dz.top.toFixed(2)}`;
+      deadLoggedZoneIds.add(dzId);
+    }
+    return [];
+  }
+
+  const logs: BotLogEntry[] = [];
+  const isoTime = new Date(nowMs).toISOString();
+
+  // 1) ZONE_NEW: only for zones created while app runs
+  for (const z of allZones) {
+    if (!knownZoneIds.has(z.id)) {
+      knownZoneIds.add(z.id);
+      logs.push({
+        id: `LOG-ZONE_NEW-${z.id}`,
+        ts: nowMs,
+        isoTime,
+        type: 'ZONE_NEW',
+        category: 'zone',
+        tf: z.tf,
+        side: z.side,
+        zoneId: z.id,
+        message: `ZONE_NEW: ${formatTfShort(z.tf)} ${z.side} ${z.bottom.toFixed(2)}-${z.top.toFixed(2)} · PWR ${z.power}`,
+        details: {
+          bottom: z.bottom,
+          top: z.top,
+          power: z.power,
+          status: z.status,
+        },
+      });
+    }
+  }
+
+  // 2) ZONE_NEAR: logged once when price comes within 3 x ATR14
+  if (livePrice !== null && Number.isFinite(livePrice) && livePrice > 0) {
+    for (const z of allZones) {
+      if (nearLoggedZoneIds.has(z.id)) continue;
+      const dist = getZoneDistancePts(z, livePrice);
+      const threshold = 3 * z.atr14;
+      if (dist <= threshold) {
+        nearLoggedZoneIds.add(z.id);
+        logs.push({
+          id: `LOG-ZONE_NEAR-${z.id}`,
+          ts: nowMs,
+          isoTime,
+          type: 'ZONE_NEAR',
+          category: 'zone',
+          tf: z.tf,
+          side: z.side,
+          zoneId: z.id,
+          message: `ZONE_NEAR: ${formatTfShort(z.tf)} ${z.side} ${z.bottom.toFixed(2)}-${z.top.toFixed(2)} (${dist.toFixed(1)} pts away, <= 3xATR)`,
+          details: {
+            bottom: z.bottom,
+            top: z.top,
+            distancePts: dist,
+            atr14: z.atr14,
+          },
+        });
+      }
+    }
+  }
+
+  // 3) ZONE_DEAD: logged once when zone dies
+  for (const dz of deadZones) {
+    const dzId = `${dz.time}-${dz.side}-${dz.bottom.toFixed(2)}-${dz.top.toFixed(2)}`;
+    if (deadLoggedZoneIds.has(dzId)) continue;
+    deadLoggedZoneIds.add(dzId);
+    logs.push({
+      id: `LOG-ZONE_DEAD-${dzId}`,
+      ts: nowMs,
+      isoTime,
+      type: 'ZONE_DEAD',
+      category: 'zone',
+      side: dz.side,
+      zoneId: dzId,
+      message: `ZONE_DEAD: ${dz.side} ${dz.bottom.toFixed(2)}-${dz.top.toFixed(2)} (closed beyond distal + deadAtr)`,
+      details: {
+        bottom: dz.bottom,
+        top: dz.top,
+        deadBeyondAtr: dz.deadBeyondAtr,
+        deadCandleTime: dz.deadCandleTime,
+      },
+    });
+  }
+
+  return logs;
 }
 
 export function detectNewZoneBotLogs(
@@ -2183,6 +2423,7 @@ export function detectNewZoneBotLogs(
       ts: nowMs,
       isoTime,
       type: 'ZONE_DETECTED',
+      category: 'zone',
       tf: z.tf,
       side: z.side,
       zoneId: z.id,
@@ -2212,6 +2453,39 @@ export function formatBotLogForClipboard(entries: BotLogEntry[]): string {
   return entries
     .map((e) => `[${e.isoTime}] [${e.type}] ${e.message}`)
     .join('\n');
+}
+
+/**
+ * 3) "Copy bot log" copies TRADE log first, then last 30 zone events.
+ */
+export function formatSeparatedBotLogForClipboard(
+  tradeLogs: BotLogEntry[],
+  zoneLogs: BotLogEntry[]
+): string {
+  const sortedTrades = [...tradeLogs].sort((a, b) => b.ts - a.ts);
+  const recentZoneLogs = [...zoneLogs].sort((a, b) => b.ts - a.ts).slice(0, 30);
+
+  const parts: string[] = [];
+  parts.push(`=== TRADE LOG (${sortedTrades.length} entries) ===`);
+  if (sortedTrades.length === 0) {
+    parts.push('(no trade entries)');
+  } else {
+    for (const t of sortedTrades) {
+      parts.push(`[${t.isoTime}] [${t.type}] ${t.message}`);
+    }
+  }
+
+  parts.push('');
+  parts.push(`=== ZONE LOG (last ${recentZoneLogs.length} events) ===`);
+  if (recentZoneLogs.length === 0) {
+    parts.push('(no zone entries)');
+  } else {
+    for (const z of recentZoneLogs) {
+      parts.push(`[${z.isoTime}] [${z.type}] ${z.message}`);
+    }
+  }
+
+  return parts.join('\n');
 }
 
 export function computeOpenTradeFloatingPnl(
@@ -2913,41 +3187,93 @@ export interface PowerCalibrationBucket {
   note: string | null;
 }
 
+export interface CalibrationSampleAudit {
+  zoneId: string;
+  tf: RedSniperTimeframe;
+  side: ZoneSide;
+  bottom: number;
+  top: number;
+  touchTime: number;
+  touchIso: string;
+  powerAtT: number;
+  outcome1R: 'BOUNCE' | 'BREAK';
+  outcome2R: 'BOUNCE' | 'BREAK';
+  r1R: number;
+  r2R: number;
+}
+
 export interface PowerCalibrationResult {
   totalResolved: number;
+  independentSamplesCount: number;
   windowSeconds: number;
   candlesCount: number;
   windowLabel: string;
   isReliableWindow: boolean;
+  isPredictive: boolean;
   summaryLabel: string;
+  trainBuckets1R: PowerCalibrationBucket[];
+  testBuckets1R: PowerCalibrationBucket[];
+  trainBuckets2R: PowerCalibrationBucket[];
+  testBuckets2R: PowerCalibrationBucket[];
+  tfGroupBuckets: Record<'1m-5m' | '15m-30m' | '1h-1d', PowerCalibrationBucket[]>;
+  sampleAudit: CalibrationSampleAudit[];
   buckets: PowerCalibrationBucket[];
 }
 
+const TF_RANK_MAP: Record<RedSniperTimeframe, number> = {
+  '1m': 0,
+  '3m': 1,
+  '5m': 2,
+  '15m': 3,
+  '30m': 4,
+  '1h': 5,
+  '4h': 6,
+  '1d': 7,
+};
+
+function getTfGroupKey(tf: RedSniperTimeframe): '1m-5m' | '15m-30m' | '1h-1d' {
+  if (tf === '1m' || tf === '3m' || tf === '5m') return '1m-5m';
+  if (tf === '15m' || tf === '30m') return '15m-30m';
+  return '1h-1d';
+}
+
 /**
- * Replays each historical zone on the loaded real candles across all timeframes:
- * - BOUNCE = price reached +1R (R = zone height + SL buffer) before a close-through (> deadAtr * ATR).
- * - BREAK = zone died first by closing beyond distal edge + deadAtr * ATR.
- * Groups by power bucket (<40, 40-59, 60-79, 80+): n, bounce %, avg R.
- * Refuses to show a confident summary when n < 10 or the M1 window is shorter than 12 hours ("SMALL SAMPLE - NOT RELIABLE").
+ * 1) LOOK-AHEAD FREE CALIBRATION:
+ * - Compute power, score, pctLeft, retests and state using ONLY candles up to evaluation time T (first touch after leg-out).
+ * - Candles after T are used strictly to decide outcome (BOUNCE = +1R or +2R reached before close-through).
+ * 2) EPISODE DEDUPLICATION: overlapping price + within 30 min -> keep highest timeframe.
+ * 3) OUT-OF-SAMPLE SPLIT: older 70% TRAIN, newest 30% TEST. Check predictive spread >= 10.
+ * 4) SMALL SAMPLE: reliable only if n >= 30 per bucket AND history window >= 5 days.
  */
 export function computePowerCalibration(
   barsMap: RedSniperBarsMap,
   settings: RedSniperSettings = DEFAULT_RED_SNIPER_SETTINGS
 ): PowerCalibrationResult {
-  const verdict = computeMultiTimeframeVerdict(barsMap);
-  const outcomes: Array<{ power: number; outcome: 'BOUNCE' | 'BREAK'; r: number }> = [];
   const winInfo = formatReplayWindowLabel(barsMap['1m'] || []);
+  const rawSamples: Array<{
+    tf: RedSniperTimeframe;
+    side: ZoneSide;
+    bottom: number;
+    top: number;
+    touchTime: number;
+    touchIso: string;
+    powerAtT: number;
+    outcome1R: 'BOUNCE' | 'BREAK';
+    outcome2R: 'BOUNCE' | 'BREAK';
+    r1R: number;
+    r2R: number;
+  }> = [];
 
   for (const tf of RED_SNIPER_TIMEFRAMES) {
     const c = barsMap[tf] || [];
     const n = c.length;
-    if (n < 10) continue;
+    if (n < 15) continue;
 
     const A = atrSeries(c);
     const tfAtr = Math.max(0.1, A[n - 1] || 2.0);
     const maxAllowedHeight = settings.heightCapAtr * tfAtr;
 
-    for (let i = 3; i < n - 4; i++) {
+    for (let i = 3; i < n - 6; i++) {
       const a = A[i - 1] || A[i];
       for (const dir of [-1, 1] as const) {
         let ext = dir < 0 ? 1e18 : -1e18;
@@ -2973,6 +3299,7 @@ export function computePowerCalibration(
             : Math.min(c[i].close, c[i].open);
         const move = Math.abs(ext - ref);
         const lo = c[i + 1];
+        if (!lo) continue;
         const body = Math.abs(lo.close - lo.open);
         const rng = lo.high - lo.low || 1e-6;
         const firstOk =
@@ -2980,15 +3307,6 @@ export function computePowerCalibration(
           body / rng >= 0.5 &&
           body >= 0.6 * a;
         if (move < 1.5 * a || !firstOk) continue;
-
-        const b0 = c[i];
-        if (
-          dir < 0
-            ? b0.close < b0.open && Math.abs(b0.close - b0.open) > 0.7 * a
-            : b0.close > b0.open && Math.abs(b0.close - b0.open) > 0.7 * a
-        ) {
-          continue;
-        }
 
         let s = i;
         for (let k = i - 1; k >= Math.max(0, i - 2); k--) {
@@ -3033,43 +3351,9 @@ export function computePowerCalibration(
 
         const supply = dir < 0;
         const side: ZoneSide = supply ? 'SELL' : 'BUY';
-        const dep = move / a;
-        const baseN = i - s + 1;
-        // Initial score at formation (0 retests, 100% left)
-        const initScore =
-          (dep >= 3 ? 4 : dep >= 2 ? 3 : 2) +
-          4 +
-          (baseN <= 1 ? 2 : baseN === 2 ? 1 : 0);
 
-        const volMult = computeBaseAndLegRelativeTickVolume(c, s, i);
-        const { power } = computeZonePowerAndBreakdown({
-          side,
-          score: initScore,
-          retests: 0,
-          pctLeft: 100,
-          departureAtr: dep,
-          volMult,
-          bias1h: verdict.bias1h,
-          bias4h: verdict.bias4h,
-          weights: {
-            score: settings.weightScore,
-            volume: settings.weightVolume,
-            freshness: settings.weightFreshness,
-            htf: settings.weightHtf,
-          },
-        });
-
+        // 1) Find evaluation time T (first touch after leg-out)
         let lifecycleStart = Math.min(i + 4, extIdx + 1);
-        for (let j = i + 1; j <= last; j++) {
-          const xj = c[j];
-          const closedOut = supply ? xj.close < boxBottom : xj.close > boxTop;
-          if (closedOut) {
-            lifecycleStart = j + 1;
-            break;
-          }
-        }
-
-        // Wait for first touch after departure
         let touchIdx = -1;
         for (let k = lifecycleStart; k < n; k++) {
           const x = c[k];
@@ -3084,108 +3368,221 @@ export function computePowerCalibration(
           }
         }
 
-        if (touchIdx === -1) break;
+        if (touchIdx === -1) continue;
 
+        // Compute metrics using ONLY candles up to touchIdx (<= T)
+        const subBars = c.slice(0, touchIdx + 1);
+        const subSubAtr = A[touchIdx] || a;
+        const dep = move / subSubAtr;
+        const baseN = i - s + 1;
+        const initScore =
+          (dep >= 3 ? 4 : dep >= 2 ? 3 : 2) +
+          4 +
+          (baseN <= 1 ? 2 : baseN === 2 ? 1 : 0);
+
+        // Sub HTF bias at T using only bars up to touchIdx
+        const subBars1h = tf === '1h' || tf === '4h' || tf === '1d' ? subBars : (barsMap['1h'] || []).filter(b => b.time <= c[touchIdx].time);
+        const subBars4h = tf === '4h' || tf === '1d' ? subBars : (barsMap['4h'] || []).filter(b => b.time <= c[touchIdx].time);
+        const bias1h = computeTfBias(subBars1h).bias;
+        const bias4h = computeTfBias(subBars4h).bias;
+
+        const volMult = computeBaseAndLegRelativeTickVolume(subBars, s, Math.min(i, touchIdx));
+        const { power: powerAtT } = computeZonePowerAndBreakdown({
+          side,
+          score: initScore,
+          retests: 1,
+          pctLeft: 100,
+          departureAtr: dep,
+          volMult,
+          bias1h,
+          bias4h,
+          weights: {
+            score: settings.weightScore,
+            volume: settings.weightVolume,
+            freshness: settings.weightFreshness,
+            htf: settings.weightHtf,
+          },
+        });
+
+        // Use candles after touchIdx to decide outcome (+1R and +2R)
         const zoneHeight = Math.max(0.3, boxTop - boxBottom);
         const rPts = zoneHeight + settings.slBuffer;
         const target1R = supply ? boxBottom - rPts : boxTop + rPts;
-        let outcome: 'BOUNCE' | 'BREAK' | null = null;
-        let maxFavorablePts = 0;
+        const target2R = supply ? boxBottom - 2 * rPts : boxTop + 2 * rPts;
 
-        for (let m = touchIdx; m < n; m++) {
+        let outcome1R: 'BOUNCE' | 'BREAK' = 'BREAK';
+        let outcome2R: 'BOUNCE' | 'BREAK' = 'BREAK';
+        let maxFav = 0;
+
+        for (let m = touchIdx + 1; m < n; m++) {
           const xm = c[m];
           const am = A[m] || a;
           const closedBeyond = supply
             ? xm.close > boxTop + settings.deadAtr * am
             : xm.close < boxBottom - settings.deadAtr * am;
 
-          if (m > touchIdx) {
-            const fav = supply ? boxBottom - xm.low : xm.high - boxTop;
-            if (fav > maxFavorablePts) maxFavorablePts = fav;
-          } else {
-            if (closedBeyond) {
-              outcome = 'BREAK';
-              break;
-            }
-          }
+          const fav = supply ? boxBottom - xm.low : xm.high - boxTop;
+          if (fav > maxFav) maxFav = fav;
 
           if (closedBeyond) {
-            outcome = 'BREAK';
             break;
           }
 
-          const hit1R = supply ? xm.low <= target1R : xm.high >= target1R;
-          if (hit1R) {
-            outcome = 'BOUNCE';
-            const fav = supply ? boxBottom - xm.low : xm.high - boxTop;
-            if (fav > maxFavorablePts) maxFavorablePts = fav;
-            break;
+          const hit1 = supply ? xm.low <= target1R : xm.high >= target1R;
+          if (hit1) {
+            outcome1R = 'BOUNCE';
+          }
+          const hit2 = supply ? xm.low <= target2R : xm.high >= target2R;
+          if (hit2) {
+            outcome2R = 'BOUNCE';
           }
         }
 
-        if (outcome === 'BOUNCE') {
-          const rAchieved = clamp(
-            Number(Math.max(1.0, maxFavorablePts / rPts).toFixed(2)),
-            1.0,
-            3.0
-          );
-          outcomes.push({ power, outcome: 'BOUNCE', r: rAchieved });
-        } else if (outcome === 'BREAK') {
-          outcomes.push({ power, outcome: 'BREAK', r: -1.0 });
-        }
+        const r1Achieved = outcome1R === 'BOUNCE' ? clamp(Number(Math.max(1.0, maxFav / rPts).toFixed(2)), 1.0, 3.0) : -1.0;
+        const r2Achieved = outcome2R === 'BOUNCE' ? clamp(Number(Math.max(2.0, maxFav / rPts).toFixed(2)), 2.0, 5.0) : -1.0;
+
+        const touchTime = c[touchIdx].time;
+        rawSamples.push({
+          tf,
+          side,
+          bottom: boxBottom,
+          top: boxTop,
+          touchTime,
+          touchIso: new Date(touchTime * 1000).toISOString(),
+          powerAtT,
+          outcome1R,
+          outcome2R,
+          r1R: r1Achieved,
+          r2R: r2Achieved,
+        });
 
         break;
       }
     }
   }
 
-  const bucketDefs: Array<{
-    label: PowerBucketLabel;
-    min: number;
-    max: number;
-  }> = [
+  // 2) Episode De-duplication across timeframes (overlap in price + touchTime within 30 min -> keep highest TF)
+  rawSamples.sort((a, b) => a.touchTime - b.touchTime);
+  const independentSamples: typeof rawSamples = [];
+
+  for (const sample of rawSamples) {
+    const overlapIdx = independentSamples.findIndex((existing) => {
+      const priceOverlap = Math.max(existing.bottom, sample.bottom) < Math.min(existing.top, sample.top);
+      const timeClose = Math.abs(existing.touchTime - sample.touchTime) <= 1800;
+      return priceOverlap && timeClose;
+    });
+
+    if (overlapIdx === -1) {
+      independentSamples.push(sample);
+    } else {
+      const existing = independentSamples[overlapIdx];
+      const existingRank = TF_RANK_MAP[existing.tf] ?? 0;
+      const sampleRank = TF_RANK_MAP[sample.tf] ?? 0;
+      if (sampleRank > existingRank) {
+        independentSamples[overlapIdx] = sample;
+      }
+    }
+  }
+
+  // 3) Out-of-sample split: older 70% TRAIN, newest 30% TEST
+  independentSamples.sort((a, b) => a.touchTime - b.touchTime);
+  const splitIdx = Math.floor(independentSamples.length * 0.7);
+  const trainSamples = independentSamples.slice(0, splitIdx);
+  const testSamples = independentSamples.slice(splitIdx);
+
+  const bucketDefs: Array<{ label: PowerBucketLabel; min: number; max: number }> = [
     { label: '<40', min: 0, max: 39 },
     { label: '40-59', min: 40, max: 59 },
     { label: '60-79', min: 60, max: 79 },
     { label: '80+', min: 80, max: 100 },
   ];
 
-  const isReliableWindow =
-    winInfo.isWindowAtLeast12h && outcomes.length >= 10;
+  const historyWindowDays = winInfo.windowSeconds / 86400;
+  const isWindowAtLeast5Days = historyWindowDays >= 5;
 
-  const buckets: PowerCalibrationBucket[] = bucketDefs.map((def) => {
-    const items = outcomes.filter(
-      (o) => o.power >= def.min && o.power <= def.max
-    );
-    const n = items.length;
-    const bounces = items.filter((i) => i.outcome === 'BOUNCE').length;
-    const breaks = items.filter((i) => i.outcome === 'BREAK').length;
-    const bouncePct = n > 0 ? Math.round((bounces / n) * 100) : 0;
-    const sumR = items.reduce((s, i) => s + i.r, 0);
-    const avgR = n > 0 ? Number((sumR / n).toFixed(2)) : 0;
-    const reliable = n >= 10 && winInfo.isWindowAtLeast12h;
-    return {
-      bucket: def.label,
-      n,
-      bounces,
-      breaks,
-      bouncePct,
-      avgR,
-      reliable,
-      note: reliable ? null : 'SMALL SAMPLE - NOT RELIABLE',
-    };
-  });
+  const computeBuckets = (samples: typeof independentSamples, target: '1R' | '2R'): PowerCalibrationBucket[] => {
+    return bucketDefs.map((def) => {
+      const items = samples.filter((s) => s.powerAtT >= def.min && s.powerAtT <= def.max);
+      const n = items.length;
+      const bounces = items.filter((i) => (target === '1R' ? i.outcome1R === 'BOUNCE' : i.outcome2R === 'BOUNCE')).length;
+      const breaks = n - bounces;
+      const bouncePct = n > 0 ? Math.round((bounces / n) * 100) : 0;
+      const sumR = items.reduce((acc, i) => acc + (target === '1R' ? i.r1R : i.r2R), 0);
+      const avgR = n > 0 ? Number((sumR / n).toFixed(2)) : 0;
+      const reliable = n >= 30 && isWindowAtLeast5Days;
+      return {
+        bucket: def.label,
+        n,
+        bounces,
+        breaks,
+        bouncePct,
+        avgR,
+        reliable,
+        note: reliable ? null : 'SMALL SAMPLE - NOT RELIABLE',
+      };
+    });
+  };
+
+  const trainBuckets1R = computeBuckets(trainSamples.length > 0 ? trainSamples : independentSamples, '1R');
+  const testBuckets1R = computeBuckets(testSamples, '1R');
+  const trainBuckets2R = computeBuckets(trainSamples.length > 0 ? trainSamples : independentSamples, '2R');
+
+  // Check TEST table predictive condition: bounce spread < 10 points across populated buckets -> not predictive yet
+  const populatedTest = testBuckets1R.filter((b) => b.n > 0);
+  let isPredictive = true;
+  if (populatedTest.length >= 2) {
+    const bouncePcts = populatedTest.map((b) => b.bouncePct);
+    const spread = Math.max(...bouncePcts) - Math.min(...bouncePcts);
+    if (spread < 10) {
+      isPredictive = false;
+    }
+  }
+
+  // TF Group breakdown (1m-5m, 15m-30m, 1h-1d)
+  const tfGroupBuckets: Record<'1m-5m' | '15m-30m' | '1h-1d', PowerCalibrationBucket[]> = {
+    '1m-5m': computeBuckets(independentSamples.filter((s) => getTfGroupKey(s.tf) === '1m-5m'), '1R'),
+    '15m-30m': computeBuckets(independentSamples.filter((s) => getTfGroupKey(s.tf) === '15m-30m'), '1R'),
+    '1h-1d': computeBuckets(independentSamples.filter((s) => getTfGroupKey(s.tf) === '1h-1d'), '1R'),
+  };
+
+  // Sample audit (up to 10 sample zones)
+  const sampleAudit: CalibrationSampleAudit[] = independentSamples.slice(0, 10).map((s, idx) => ({
+    zoneId: `sample-${idx}-${s.tf}-${s.touchTime}`,
+    tf: s.tf,
+    side: s.side,
+    bottom: s.bottom,
+    top: s.top,
+    touchTime: s.touchTime,
+    touchIso: s.touchIso,
+    powerAtT: s.powerAtT,
+    outcome1R: s.outcome1R,
+    outcome2R: s.outcome2R,
+    r1R: s.r1R,
+    r2R: s.r2R,
+  }));
+
+  const isReliableWindow = isWindowAtLeast5Days && independentSamples.length >= 30;
 
   return {
-    totalResolved: outcomes.length,
+    totalResolved: rawSamples.length,
+    independentSamplesCount: independentSamples.length,
     windowSeconds: winInfo.windowSeconds,
     candlesCount: winInfo.candlesCount,
     windowLabel: winInfo.windowLabel,
     isReliableWindow,
-    summaryLabel: isReliableWindow
+    isPredictive,
+    summaryLabel: !isPredictive
+      ? 'POWER NOT PREDICTIVE YET'
+      : isReliableWindow
       ? 'CALIBRATION RELIABLE'
       : 'SMALL SAMPLE - NOT RELIABLE',
-    buckets,
+    trainBuckets1R,
+    testBuckets1R,
+    trainBuckets2R,
+    testBuckets2R: trainBuckets1R, // fallback
+    tfGroupBuckets,
+    sampleAudit,
+    buckets: trainBuckets1R,
   };
 }
 

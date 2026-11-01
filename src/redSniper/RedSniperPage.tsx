@@ -19,14 +19,18 @@ import {
   createInitialReplaySession,
   DEFAULT_RED_SNIPER_SETTINGS,
   detectNewZoneBotLogs,
+  detectRuntimeZoneEvents,
   formatBotLogForClipboard,
+  formatSeparatedBotLogForClipboard,
   formatReplayWindowLabel,
   getZoneDistancePts,
   isZoneNear,
   loadBotLogFromLocalStorage,
+  loadSeparatedBotLogsFromLocalStorage,
   loadDemoState,
   loadRedSniperSettings,
   mergeBotLogEntries,
+  mergeSeparatedBotLogEntries,
   OpenSniperTrade,
   RED_SNIPER_ZONE_ENGINE_VERSION,
   RedSniperDemoState,
@@ -35,6 +39,7 @@ import {
   resolveDefaultRetestModeForTf,
   RetestMode,
   saveBotLogToLocalStorage,
+  saveSeparatedBotLogsToLocalStorage,
   saveDemoState,
   saveRedSniperSettings,
   stepAutoTraderOnTick,
@@ -42,6 +47,7 @@ import {
   TfBias,
 } from './engine';
 import { RedSniperChart } from './RedSniperChart';
+import { RedSniperDebugPanel, RedSniperHealthData } from './RedSniperDebugPanel';
 
 const HUD_CLIP =
   'polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 12px 100%, 0 calc(100% - 12px))';
@@ -123,9 +129,18 @@ export const RedSniperPage: React.FC = () => {
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [copiedDebug, setCopiedDebug] = useState<boolean>(false);
   const [copiedBotLog, setCopiedBotLog] = useState<boolean>(false);
-  const [botLog, setBotLog] = useState<BotLogEntry[]>(() =>
-    loadBotLogFromLocalStorage()
-  );
+  const [showDebugPanel, setShowDebugPanel] = useState<boolean>(false);
+  const [serverHealth, setServerHealth] = useState<RedSniperHealthData | null>(null);
+  const initialLogs = loadSeparatedBotLogsFromLocalStorage();
+  const [tradeLogs, setTradeLogs] = useState<BotLogEntry[]>(initialLogs.tradeLogs);
+  const [zoneLogs, setZoneLogs] = useState<BotLogEntry[]>(initialLogs.zoneLogs);
+  const [activeBotLogTab, setActiveBotLogTab] = useState<'trade' | 'zone'>('trade');
+
+  const knownZoneIdsRef = useRef<Set<string>>(new Set());
+  const nearLoggedZoneIdsRef = useRef<Set<string>>(new Set());
+  const deadLoggedZoneIdsRef = useRef<Set<string>>(new Set());
+  const isInitialZoneLoadRef = useRef<boolean>(true);
+
   const seenZoneIdsRef = useRef<Set<string>>(new Set());
   const [lastEnteredDecision, setLastEnteredDecision] = useState<string | null>(null);
   const [nowDate, setNowDate] = useState<Date>(() => new Date());
@@ -136,15 +151,16 @@ export const RedSniperPage: React.FC = () => {
   // Sync persistent BOT LOG with server file on mount
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/redsniper/bot-log')
+    fetch('/api/redsniper/bot-log', { credentials: 'include' })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (cancelled || !data || !Array.isArray(data.entries)) return;
-        setBotLog((prev) => {
-          const merged = mergeBotLogEntries(prev, data.entries as BotLogEntry[]);
-          saveBotLogToLocalStorage(merged);
-          return merged;
-        });
+        if (cancelled || !data) return;
+        const serverEntries = Array.isArray(data.entries) ? data.entries : Array.isArray(data.tradeLogs) ? [...data.tradeLogs, ...(data.zoneLogs || [])] : [];
+        if (serverEntries.length === 0) return;
+        const separated = mergeSeparatedBotLogEntries(tradeLogs, zoneLogs, serverEntries, 1000, 100);
+        setTradeLogs(separated.tradeLogs);
+        setZoneLogs(separated.zoneLogs);
+        saveSeparatedBotLogsToLocalStorage(separated.tradeLogs, separated.zoneLogs);
       })
       .catch(() => {});
     return () => {
@@ -152,33 +168,56 @@ export const RedSniperPage: React.FC = () => {
     };
   }, []);
 
-  const appendBotLogs = useCallback((entries: BotLogEntry[]) => {
+  // Poll /api/redsniper/health for live server SQLite store telemetry
+  useEffect(() => {
+    let cancelled = false;
+    const fetchHealth = () => {
+      fetch('/api/redsniper/health', { credentials: 'include' })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (!cancelled && data && data.ok) {
+            setServerHealth(data);
+          }
+        })
+        .catch(() => {});
+    };
+    fetchHealth();
+    const interval = setInterval(fetchHealth, 12000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const appendTradeLogs = useCallback((entries: BotLogEntry[]) => {
     if (!entries || entries.length === 0) return;
-    setBotLog((prev) => {
-      const merged = mergeBotLogEntries(prev, entries);
-      saveBotLogToLocalStorage(merged);
-      return merged;
+    setTradeLogs((prev) => {
+      const separated = mergeSeparatedBotLogEntries(prev, zoneLogs, entries, 1000, 100);
+      saveSeparatedBotLogsToLocalStorage(separated.tradeLogs, separated.zoneLogs);
+      return separated.tradeLogs;
     });
     fetch('/api/redsniper/bot-log', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ entries }),
     }).catch(() => {});
-  }, []);
+  }, [zoneLogs]);
 
   const handleCopyBotLog = useCallback(() => {
-    const text = formatBotLogForClipboard(botLog);
+    const text = formatSeparatedBotLogForClipboard(tradeLogs, zoneLogs);
     if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(text).catch(() => {});
     }
     setCopiedBotLog(true);
     setTimeout(() => setCopiedBotLog(false), 1800);
-  }, [botLog]);
+  }, [tradeLogs, zoneLogs]);
 
   const handleClearBotLog = useCallback(() => {
-    setBotLog([]);
-    saveBotLogToLocalStorage([]);
-    fetch('/api/redsniper/bot-log', { method: 'DELETE' }).catch(() => {});
+    setTradeLogs([]);
+    setZoneLogs([]);
+    saveSeparatedBotLogsToLocalStorage([], []);
+    fetch('/api/redsniper/bot-log', { method: 'DELETE', credentials: 'include' }).catch(() => {});
   }, []);
 
   const handleHighlightZone = useCallback((zoneId: string) => {
@@ -233,19 +272,41 @@ export const RedSniperPage: React.FC = () => {
     [bars, livePrice, settings]
   );
 
-  // Log newly detected zones to persistent BOT LOG
+  // Log runtime zone events (ZONE_NEW, ZONE_NEAR, ZONE_DEAD)
   useEffect(() => {
-    if (!hasLiveFeed || allZones.length === 0) return;
-    const newLogs = detectNewZoneBotLogs(
-      allZones,
-      seenZoneIdsRef.current,
-      Date.now(),
-      settings.showConsumedZones
-    );
-    if (newLogs.length > 0) {
-      appendBotLogs(newLogs);
+    if (allZones.length === 0) return;
+    if (isInitialZoneLoadRef.current) {
+      detectRuntimeZoneEvents({
+        allZones,
+        knownZoneIds: knownZoneIdsRef.current,
+        nearLoggedZoneIds: nearLoggedZoneIdsRef.current,
+        deadLoggedZoneIds: deadLoggedZoneIdsRef.current,
+        livePrice,
+        isInitialLoad: true,
+      });
+      isInitialZoneLoadRef.current = false;
+      return;
     }
-  }, [hasLiveFeed, allZones, settings.showConsumedZones, appendBotLogs]);
+    const currentTfAnalysis = byTf[selectedTf];
+    const deadZones = currentTfAnalysis?.debugAliveZones?.filter((z) => z.reasonDropped === 'dead:closeBeyond') || [];
+    const zoneEvents = detectRuntimeZoneEvents({
+      allZones,
+      knownZoneIds: knownZoneIdsRef.current,
+      nearLoggedZoneIds: nearLoggedZoneIdsRef.current,
+      deadLoggedZoneIds: deadLoggedZoneIdsRef.current,
+      livePrice,
+      deadZones,
+      nowMs: Date.now(),
+      isInitialLoad: false,
+    });
+    if (zoneEvents.length > 0) {
+      setZoneLogs((prev) => {
+        const merged = mergeBotLogEntries(prev, zoneEvents, 100);
+        saveSeparatedBotLogsToLocalStorage(tradeLogs, merged);
+        return merged;
+      });
+    }
+  }, [allZones, livePrice, selectedTf, byTf, tradeLogs]);
 
   // Step auto-trader on every live tick (blocks new entries when isMarketClosed is true; resumes automatically on first fresh tick)
   useEffect(() => {
@@ -277,7 +338,7 @@ export const RedSniperPage: React.FC = () => {
       return prev;
     });
     if (emittedLogs.length > 0) {
-      appendBotLogs(emittedLogs);
+      appendTradeLogs(emittedLogs);
     }
   }, [
     livePrice,
@@ -289,7 +350,7 @@ export const RedSniperPage: React.FC = () => {
     settings,
     isMarketClosed,
     replaySession?.isRunning,
-    appendBotLogs,
+    appendTradeLogs,
   ]);
 
   // Replay 24h M1 candles at 20x speed using isolated demo account & history
@@ -422,10 +483,10 @@ export const RedSniperPage: React.FC = () => {
         return next;
       });
       if (manualExitLog) {
-        appendBotLogs([manualExitLog]);
+        appendTradeLogs([manualExitLog]);
       }
     },
-    [livePrice, appendBotLogs]
+    [livePrice, appendTradeLogs]
   );
 
   const handleResetDemo = useCallback(() => {
@@ -721,6 +782,12 @@ export const RedSniperPage: React.FC = () => {
       showConsumedZones: settings.showConsumedZones,
       deadAtrComparison,
       zonesBeforeSelection: currentTfAnalysis?.debugAliveZones ?? [],
+      serverHealth: serverHealth || null,
+      calibration: {
+        totalResolved: powerCalibration.totalResolved,
+        independentSamplesCount: powerCalibration.independentSamplesCount,
+        sampleAudit: powerCalibration.sampleAudit,
+      },
     };
     const jsonText = JSON.stringify(payload, null, 2);
     if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
@@ -737,6 +804,7 @@ export const RedSniperPage: React.FC = () => {
     livePrice,
     activeRetestModeForTf,
     settings,
+    serverHealth,
   ]);
 
   // SVG Donut math for TP2 Win Rate
@@ -1296,6 +1364,18 @@ export const RedSniperPage: React.FC = () => {
             </button>
             <button
               type="button"
+              onClick={() => setShowDebugPanel((v) => !v)}
+              title="Toggle Live Store Health & Diagnostics Debug Panel"
+              className={`cursor-pointer border px-1.5 py-0.5 text-[9px] font-bold transition-colors ${
+                showDebugPanel
+                  ? 'border-[#ff2d45] bg-[#ff2d45] text-black'
+                  : 'border-white/20 bg-black text-neutral-300 hover:border-[#ff2d45] hover:text-[#ff2d45]'
+              }`}
+            >
+              DEBUG
+            </button>
+            <button
+              type="button"
               onClick={() => setSettingsOpen((v) => !v)}
               aria-label="Open Red Sniper Settings"
               title="Red Sniper Settings"
@@ -1309,6 +1389,13 @@ export const RedSniperPage: React.FC = () => {
             </button>
           </div>
         </div>
+
+        {/* Live SQLite Store Health & Telemetry Debug Panel */}
+        {showDebugPanel && (
+          <div className="border-b border-[#ff2d45]/30 p-2">
+            <RedSniperDebugPanel />
+          </div>
+        )}
 
         {/* Compact Settings Sheet (persisted in localStorage 'redSniperSettings.v3') */}
         {settingsOpen && (
@@ -2635,31 +2722,50 @@ export const RedSniperPage: React.FC = () => {
         )}
       </section>
 
-      {/* 12) LIVE TRADE LOG ("BOT LOG", last 200 entries, localStorage + server file) */}
+      {/* 12) SEPARATED TRADE LOG & ZONE LOG */}
       <section
         className="mt-2.5 border border-[#ff2d45]/35 bg-[#07070b] p-3.5"
         style={{ clipPath: HUD_CLIP }}
       >
-        <div className="mb-2.5 flex items-center justify-between border-b border-[#ff2d45]/20 pb-2">
-          <div>
+        <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 border-b border-[#ff2d45]/20 pb-2">
+          <div className="flex items-center gap-2">
             <span
               className="text-xs font-extrabold tracking-[0.2em] text-[#ff2d45]"
               style={{ fontFamily: "'Orbitron', sans-serif" }}
             >
-              BOT LOG
+              BOT LOGS
             </span>
-            <span
-              className="ml-2 text-[10px] text-neutral-400"
-              style={{ fontFamily: "'JetBrains Mono', monospace" }}
-            >
-              ({botLog.length}/200 PERSISTED)
-            </span>
+            <div className="flex items-center gap-1" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+              <button
+                type="button"
+                onClick={() => setActiveBotLogTab('trade')}
+                className={`cursor-pointer px-2 py-0.5 text-[9.5px] font-bold transition-all ${
+                  activeBotLogTab === 'trade'
+                    ? 'border border-[#00e676] bg-[#00e676]/20 text-[#00e676]'
+                    : 'border border-white/10 bg-black text-neutral-400 hover:text-white'
+                }`}
+              >
+                TRADE LOG ({tradeLogs.length}/1000)
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveBotLogTab('zone')}
+                className={`cursor-pointer px-2 py-0.5 text-[9.5px] font-bold transition-all ${
+                  activeBotLogTab === 'zone'
+                    ? 'border border-[#00e5ff] bg-[#00e5ff]/20 text-[#00e5ff]'
+                    : 'border border-white/10 bg-black text-neutral-400 hover:text-white'
+                }`}
+              >
+                ZONE LOG ({zoneLogs.length}/100)
+              </button>
+            </div>
           </div>
+
           <div
             className="flex items-center gap-1.5"
             style={{ fontFamily: "'JetBrains Mono', monospace" }}
           >
-            {botLog.length > 0 && (
+            {(tradeLogs.length > 0 || zoneLogs.length > 0) && (
               <button
                 type="button"
                 onClick={handleClearBotLog}
@@ -2673,58 +2779,107 @@ export const RedSniperPage: React.FC = () => {
               onClick={handleCopyBotLog}
               className="cursor-pointer border border-[#ff2d45] bg-[#ff2d45]/15 px-2.5 py-0.5 text-[10px] font-bold text-[#ff2d45] transition-colors hover:bg-[#ff2d45] hover:text-black"
             >
-              {copiedBotLog ? 'COPIED BOT LOG' : 'Copy bot log'}
+              {copiedBotLog ? 'COPIED LOGS' : 'Copy bot log'}
             </button>
           </div>
         </div>
 
-        {botLog.length === 0 ? (
-          <div
-            className="py-4 text-center text-xs text-neutral-400"
-            style={{ fontFamily: "'JetBrains Mono', monospace" }}
-          >
-            NO BOT EVENTS LOGGED YET
-          </div>
+        {activeBotLogTab === 'trade' ? (
+          tradeLogs.length === 0 ? (
+            <div
+              className="py-4 text-center text-xs text-neutral-400"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              NO TRADE EVENTS LOGGED YET
+            </div>
+          ) : (
+            <div
+              className="max-h-72 space-y-1.5 overflow-y-auto pr-1 text-[11px]"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              {tradeLogs.map((entry) => {
+                const badgeColor =
+                  entry.type === 'ENTRY'
+                    ? '#00e676'
+                    : entry.type === 'TP1_BE' || entry.type === 'TP2' || entry.type === 'TP3'
+                    ? '#00e5ff'
+                    : entry.type === 'TRAIL_MOVE'
+                    ? '#ffab00'
+                    : entry.type === 'EXIT'
+                    ? '#ff2d45'
+                    : '#94a3b8';
+                return (
+                  <div
+                    key={entry.id}
+                    className="border border-white/10 bg-black/80 px-2.5 py-1.5"
+                    style={{ clipPath: HUD_CLIP_SM }}
+                  >
+                    <div className="flex items-center justify-between gap-2 text-[9.5px]">
+                      <span
+                        className="px-1.5 py-0.2 font-extrabold text-black"
+                        style={{ background: badgeColor }}
+                      >
+                        {entry.type}
+                      </span>
+                      <span className="text-neutral-500">
+                        {entry.isoTime.replace('T', ' ').slice(0, 19)} UTC
+                      </span>
+                    </div>
+                    <div className="mt-1 text-[10.5px] text-neutral-200">
+                      {entry.message}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )
         ) : (
-          <div
-            className="max-h-72 space-y-1.5 overflow-y-auto pr-1 text-[11px]"
-            style={{ fontFamily: "'JetBrains Mono', monospace" }}
-          >
-            {botLog.map((entry) => {
-              const badgeColor =
-                entry.type === 'ENTRY'
-                  ? '#00e676'
-                  : entry.type === 'TP1_BE'
-                  ? '#00e5ff'
-                  : entry.type === 'TRAIL_MOVE'
-                  ? '#ffab00'
-                  : entry.type === 'EXIT'
-                  ? '#ff2d45'
-                  : '#94a3b8';
-              return (
-                <div
-                  key={entry.id}
-                  className="border border-white/10 bg-black/80 px-2.5 py-1.5"
-                  style={{ clipPath: HUD_CLIP_SM }}
-                >
-                  <div className="flex items-center justify-between gap-2 text-[9.5px]">
-                    <span
-                      className="px-1.5 py-0.2 font-extrabold text-black"
-                      style={{ background: badgeColor }}
-                    >
-                      {entry.type}
-                    </span>
-                    <span className="text-neutral-500">
-                      {entry.isoTime.replace('T', ' ').slice(0, 19)} UTC
-                    </span>
+          zoneLogs.length === 0 ? (
+            <div
+              className="py-4 text-center text-xs text-neutral-400"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              NO ZONE EVENTS LOGGED YET
+            </div>
+          ) : (
+            <div
+              className="max-h-72 space-y-1.5 overflow-y-auto pr-1 text-[11px]"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              {zoneLogs.map((entry) => {
+                const badgeColor =
+                  entry.type === 'ZONE_NEW'
+                    ? '#2fe08a'
+                    : entry.type === 'ZONE_NEAR'
+                    ? '#00e5ff'
+                    : entry.type === 'ZONE_DEAD'
+                    ? '#ff2d45'
+                    : '#94a3b8';
+                return (
+                  <div
+                    key={entry.id}
+                    className="border border-white/10 bg-black/80 px-2.5 py-1.5"
+                    style={{ clipPath: HUD_CLIP_SM }}
+                  >
+                    <div className="flex items-center justify-between gap-2 text-[9.5px]">
+                      <span
+                        className="px-1.5 py-0.2 font-extrabold text-black"
+                        style={{ background: badgeColor }}
+                      >
+                        {entry.type}
+                      </span>
+                      <span className="text-neutral-500">
+                        {entry.isoTime.replace('T', ' ').slice(0, 19)} UTC
+                      </span>
+                    </div>
+                    <div className="mt-1 text-[10.5px] text-neutral-200">
+                      {entry.message}
+                    </div>
                   </div>
-                  <div className="mt-1 text-[10.5px] text-neutral-200">
-                    {entry.message}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )
         )}
       </section>
     </div>

@@ -18,7 +18,14 @@ import {
   loadRedSniperBotLogFromDisk,
   appendRedSniperBotLogToDisk,
   clearRedSniperBotLogOnDisk,
+  initRedSniperDatabase,
+  getRedSniperHealth,
+  seedRedSniperMemoryFromStore,
 } from './src/server/candleEngine.ts';
+import {
+  initActiveStore,
+  isUserTerminalOwner,
+} from './src/server/redsniperStore.ts';
 import {
   loadActualsMeta,
   saveActualsMeta,
@@ -3385,43 +3392,128 @@ app.get('/api/admin/logs', requireAdminAuth, (_req, res) => {
   });
 });
 
-// GET /api/redsniper/candles?tf=1m&limit=5000 - Long-term Red Sniper candle store
-app.get('/api/redsniper/candles', async (req, res) => {
+// -------------------------------------------------------------
+// RED SNIPER - RATE LIMITING & TERMINAL AUTHENTICATION
+// -------------------------------------------------------------
+const redSniperCandlesRateLimitMap = new Map<string, { count: number; resetTime: number }>();
+const RED_SNIPER_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const RED_SNIPER_MAX_CANDLE_REQ = 60;
+
+function checkRedSniperCandlesRateLimit(key: string): { allowed: boolean; remaining: number } {
+  const now = Date.now();
+  const entry = redSniperCandlesRateLimitMap.get(key);
+  if (!entry || now > entry.resetTime) {
+    redSniperCandlesRateLimitMap.set(key, { count: 1, resetTime: now + RED_SNIPER_RATE_LIMIT_WINDOW_MS });
+    return { allowed: true, remaining: RED_SNIPER_MAX_CANDLE_REQ - 1 };
+  }
+  if (entry.count >= RED_SNIPER_MAX_CANDLE_REQ) {
+    return { allowed: false, remaining: 0 };
+  }
+  entry.count += 1;
+  return { allowed: true, remaining: RED_SNIPER_MAX_CANDLE_REQ - entry.count };
+}
+
+function requireTerminalUserAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const token = getSessionToken(req);
+  if (!token || !activeSessions.has(token)) {
+    return res.status(401).json({
+      error: 'Unauthorized: Valid sarraf session required.',
+    });
+  }
+  const session = activeSessions.get(token);
+  if (!session || Date.now() > session.expiresAt) {
+    if (session) {
+      activeSessions.delete(token);
+      saveActiveSessions();
+    }
+    return res.status(401).json({ error: 'Session expired.' });
+  }
+
+  (req as any).user = session.user;
+  next();
+}
+
+function requireTerminalOwnerAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  requireTerminalUserAuth(req, res, () => {
+    const user = (req as any).user;
+    const isOwner = isUserTerminalOwner(user);
+
+    if (!isOwner) {
+      return res.status(403).json({
+        error: 'Forbidden: Only the owner can clear the bot log.',
+      });
+    }
+    next();
+  });
+}
+
+// GET /api/redsniper/candles?tf=1m&limit=5000 - Protected behind terminal auth & rate limited
+app.get('/api/redsniper/candles', requireTerminalUserAuth, async (req, res) => {
+  const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  const token = getSessionToken(req) || clientIp;
+
+  const rateLimit = checkRedSniperCandlesRateLimit(token);
+  if (!rateLimit.allowed) {
+    return res.status(429).json({
+      error: 'Rate limit exceeded: Max 60 candle requests per minute.',
+      bars: [],
+      candles: [],
+    });
+  }
+
+  const rawLimit = req.query.limit !== undefined ? Number(req.query.limit) : 5000;
+  if (isNaN(rawLimit) || rawLimit < 1 || rawLimit > 5000) {
+    return res.status(400).json({
+      error: 'Invalid limit: limit must be a positive integer between 1 and 5000.',
+      bars: [],
+      candles: [],
+    });
+  }
+
   try {
     const tf = String(req.query.tf || '1m').toLowerCase();
-    const limit = Number(req.query.limit || 5000);
-    const data = await getRedSniperCandlesForApi(tf, limit);
-    return res.json(data);
+    const data = await getRedSniperCandlesForApi(tf, rawLimit);
+    return res.json({
+      ...data,
+      candles: data.bars,
+    });
   } catch (err: any) {
     return res.status(500).json({
       error: err?.message || 'Failed to read Red Sniper candle store',
       bars: [],
+      candles: [],
     });
   }
 });
 
 // GET /api/redsniper/bot-log - Persistent Red Sniper bot trade log (last 200 entries)
-app.get('/api/redsniper/bot-log', (_req, res) => {
-  const entries = loadRedSniperBotLogFromDisk();
+app.get('/api/redsniper/bot-log', requireTerminalUserAuth, async (_req, res) => {
+  const entries = await loadRedSniperBotLogFromDisk();
   return res.json({ status: 'SUCCESS', count: entries.length, entries });
 });
 
-// POST /api/redsniper/bot-log - Append/sync Red Sniper bot log entries to server file
-app.post('/api/redsniper/bot-log', (req, res) => {
+// POST /api/redsniper/bot-log - Append/sync Red Sniper bot log entries
+app.post('/api/redsniper/bot-log', requireTerminalUserAuth, async (req, res) => {
   const body = req.body || {};
   const list = Array.isArray(body.entries)
     ? body.entries
     : body.entry
     ? [body.entry]
     : [];
-  const entries = appendRedSniperBotLogToDisk(list);
+  const entries = await appendRedSniperBotLogToDisk(list);
   return res.json({ status: 'SUCCESS', count: entries.length, entries });
 });
 
-// DELETE /api/redsniper/bot-log - Clear Red Sniper bot log on reset
-app.delete('/api/redsniper/bot-log', (_req, res) => {
-  const entries = clearRedSniperBotLogOnDisk();
+// DELETE /api/redsniper/bot-log - Clear Red Sniper bot log on reset (Owner only)
+app.delete('/api/redsniper/bot-log', requireTerminalOwnerAuth, async (_req, res) => {
+  const entries = await clearRedSniperBotLogOnDisk();
   return res.json({ status: 'SUCCESS', count: entries.length, entries });
+});
+
+// GET /api/redsniper/health - Health telemetry returning stored rows per timeframe, oldest and newest candle time, last write time, backend, persistent, gaps, and uptime
+app.get('/api/redsniper/health', async (_req, res) => {
+  const health = await getRedSniperHealth();
+  return res.json(health);
 });
 
 // GET /api/admin/backup/list - List available backup snapshots
@@ -3861,6 +3953,12 @@ async function startServer() {
   // 5b. Load last valid tick from disk
   loadLastTickFromDisk();
   setInterval(saveLastTickToDisk, 60 * 1000);
+
+  // 5c. Initialize Red Sniper Store (Firestore in Cloud Run/prod, SQLite in dev/tests)
+  await initActiveStore().catch((err) => {
+    console.warn('[RED SNIPER STORE] Startup init warning:', err?.message || err);
+  });
+  await seedRedSniperMemoryFromStore().catch(() => {});
 
   // 6. Load candles and signal state BEFORE first upstream connection
   loadCandlesFromDisk();

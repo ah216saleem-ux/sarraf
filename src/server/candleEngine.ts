@@ -6,6 +6,37 @@ import {
   writeJsonAtomic,
   recoverCorruptedFileFromLatestBackup,
 } from './deploymentSafety.ts';
+import {
+  initRedSniperDatabase,
+  saveCandlesToSqlite,
+  getCandlesFromSqlite,
+  loadRedSniperBotLogFromSqlite,
+  appendRedSniperBotLogToSqlite,
+  clearRedSniperBotLogFromSqlite,
+  setRedSniperDbPath,
+  closeRedSniperDatabase,
+} from './redSniperDatabase.ts';
+import {
+  getRedSniperStore,
+  initActiveStore,
+  setRedSniperStore,
+  detectRedSniperGaps,
+  RedSniperGap,
+  RedSniperHealthReport,
+  RedSniperStoredCandle,
+  ServerBotLogEntry,
+  RED_SNIPER_DIRECT_TFS as STORE_DIRECT_TFS,
+} from './redsniperStore.ts';
+
+export {
+  initRedSniperDatabase,
+  setRedSniperDbPath,
+  closeRedSniperDatabase,
+  getRedSniperStore,
+  initActiveStore,
+  setRedSniperStore,
+};
+export type { RedSniperHealthReport, RedSniperGap };
 
 export interface Candle {
   openTime: string; // ISO string
@@ -265,18 +296,7 @@ export function mergeCandleSeries(existing: Candle[], incoming: Candle[], maxLim
 
 export type RedSniperStoreTf = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d';
 export type RedSniperDirectStoreTf = Exclude<RedSniperStoreTf, '3m'>;
-
-export interface RedSniperStoredCandle {
-  time: number; // UTC unix timestamp in seconds (bucket-aligned)
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  tickVolume: number;
-  buyVol: number;
-  sellVol: number;
-  isClosed?: boolean;
-}
+export type { RedSniperStoredCandle };
 
 const RED_SNIPER_DIRECT_TFS: RedSniperDirectStoreTf[] = [
   '1m',
@@ -538,25 +558,39 @@ function loadRedSniperJsonlForTf(tf: RedSniperDirectStoreTf): RedSniperStoredCan
   }
 }
 
-export function saveRedSniperJsonlStoreToDisk(): void {
+export async function saveRedSniperJsonlStoreToDisk(): Promise<number> {
+  let totalSaved = 0;
   try {
     ensureDataDir();
+    const storeInstance = getRedSniperStore();
     for (const tf of RED_SNIPER_DIRECT_TFS) {
       const list = redSniperStore[tf] || [];
       if (list.length === 0) continue;
       // Persist every closed candle (all bars before the latest forming bar, plus latest if marked isClosed)
       const closedBars = list.filter((b, idx) => idx < list.length - 1 || b.isClosed === true);
       if (closedBars.length === 0) continue;
-      const filePath = getRedSniperJsonlFilePath(tf);
-      const tmpPath = `${filePath}.tmp`;
-      const payload = closedBars.map((b) => JSON.stringify(b)).join('\n') + '\n';
-      fs.writeFileSync(tmpPath, payload, 'utf-8');
-      fs.renameSync(tmpPath, filePath);
+
+      // Persist to active store backend (Firestore in prod, SQLite in dev/tests)
+      try {
+        const count = await storeInstance.saveCandles(closedBars, tf);
+        totalSaved += count;
+      } catch (err: any) {
+        console.warn(`[RED SNIPER STORE] Timeframe ${tf} save warning:`, err?.message);
+      }
+
+      try {
+        const filePath = getRedSniperJsonlFilePath(tf);
+        const tmpPath = `${filePath}.tmp`;
+        const payload = closedBars.map((b) => JSON.stringify(b)).join('\n') + '\n';
+        fs.writeFileSync(tmpPath, payload, 'utf-8');
+        fs.renameSync(tmpPath, filePath);
+      } catch {}
     }
     lastRedSniperJsonlSaveMs = Date.now();
   } catch (err: any) {
-    console.warn('[RED SNIPER STORE] Failed saving JSONL store:', err?.message);
+    console.warn('[RED SNIPER STORE] Failed saving store:', err?.message);
   }
+  return totalSaved;
 }
 
 function syncStoreToRedSniperMemory(): void {
@@ -585,6 +619,10 @@ export function loadCandlesFromDisk(): CandleStore {
   ensureDataDir();
   for (const tf of RED_SNIPER_DIRECT_TFS) {
     redSniperStore[tf] = loadRedSniperJsonlForTf(tf);
+    const fromSqlite = getCandlesFromSqlite(tf, 10000);
+    if (fromSqlite.length > 0) {
+      redSniperStore[tf] = dedupeAndMergeRedSniperCandles(redSniperStore[tf], fromSqlite, tf === '1m' ? 10000 : 5000);
+    }
   }
   if (fs.existsSync(DATA_FILE)) {
     try {
@@ -770,10 +808,18 @@ async function fetchTimeframeOhlc(intervalParam: string, limit: number = 1000): 
   }));
 }
 
+let activeRedSniperGaps: RedSniperGap[] = [];
+
+export function getActiveRedSniperGaps(): RedSniperGap[] {
+  return activeRedSniperGaps;
+}
+
 /**
- * Poll broker OHLC (M1 first, plus M5/M15/M30/H1/H4/D1) and merge/persist closed candles to disk at least once per minute.
+ * Poll broker OHLC (M1 first, plus M5/M15/M30/H1/H4/D1) and merge/persist closed candles at least once per minute.
+ * Compares newest stored M1 time with now, fills broker history, and updates remaining holes in activeRedSniperGaps.
+ * Logs one line per minute only on change ("saved N candles") or on error.
  */
-export async function syncBrokerCandlesToStore(): Promise<void> {
+export async function syncBrokerCandlesToStore(): Promise<number> {
   try {
     const [m1Bars, m5Bars, m15Bars, m30Bars, h1Bars, h4Bars, d1Bars] = await Promise.all([
       fetchTimeframeOhlc('1m', 1000).catch(() => []),
@@ -794,18 +840,86 @@ export async function syncBrokerCandlesToStore(): Promise<void> {
     if (d1Bars.length > 0) store.D1 = mergeCandleSeries(store.D1, d1Bars, 5000);
 
     syncStoreToRedSniperMemory();
-    saveCandlesToDisk();
+
+    // Gap detection: check any remaining holes in M1 candles compared with now (never invent candles)
+    activeRedSniperGaps = detectRedSniperGaps(redSniperStore['1m']);
+
+    const savedCount = await saveRedSniperJsonlStoreToDisk();
+    if (savedCount > 0) {
+      console.log(`[RED SNIPER STORE] saved ${savedCount} candles`);
+    }
+    return savedCount;
   } catch (err: any) {
-    console.warn('[RED SNIPER STORE] Periodic broker sync warning:', err?.message);
+    console.error('[RED SNIPER STORE] Periodic broker sync error:', err?.message);
+    return 0;
   }
 }
 
 export function startRedSniperCandlePersistenceWorker(): void {
   if (redSniperWorkerStarted) return;
   redSniperWorkerStarted = true;
+  // Safe cold start: catch-up immediately first, then run every 60s
+  syncBrokerCandlesToStore().catch((err) => {
+    console.error('[RED SNIPER STORE] Startup catch-up error:', err?.message);
+  });
   setInterval(() => {
-    void syncBrokerCandlesToStore();
+    syncBrokerCandlesToStore().catch((err) => {
+      console.error('[RED SNIPER STORE] Periodic worker error:', err?.message);
+    });
   }, 60 * 1000);
+}
+
+export async function seedRedSniperMemoryFromStore(): Promise<void> {
+  const storeInstance = getRedSniperStore();
+  for (const tf of RED_SNIPER_DIRECT_TFS) {
+    try {
+      const fromStore = await storeInstance.getCandles(tf, 10000);
+      if (fromStore.length > 0) {
+        redSniperStore[tf] = dedupeAndMergeRedSniperCandles(redSniperStore[tf], fromStore, tf === '1m' ? 10000 : 5000);
+      }
+    } catch {}
+  }
+}
+
+/**
+ * Health telemetry returning stored rows per timeframe, oldest and newest candle time,
+ * last write time, backend, persistent flag, gaps, firestoreOps counters, and instance uptime.
+ */
+export async function getRedSniperHealth(): Promise<RedSniperHealthReport> {
+  const storeInstance = getRedSniperStore();
+  try {
+    const base = await storeInstance.getHealth();
+    return {
+      ...base,
+      backend: storeInstance.getBackendName(),
+      persistent: storeInstance.isPersistent(),
+      isKService: Boolean(process.env.K_SERVICE),
+      instanceUptimeSeconds: Math.floor(process.uptime()),
+      gaps: activeRedSniperGaps,
+      firestoreOps: base.firestoreOps,
+      readLimitExceeded: base.readLimitExceeded,
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      backend: storeInstance.getBackendName(),
+      persistent: storeInstance.isPersistent(),
+      isKService: Boolean(process.env.K_SERVICE),
+      instanceUptimeSeconds: Math.floor(process.uptime()),
+      gaps: activeRedSniperGaps,
+      storedRowsPerTf: {},
+      totalRows: 0,
+      oldestCandleTime: null,
+      oldestCandleIso: null,
+      newestCandleTime: null,
+      newestCandleIso: null,
+      lastWriteTime: null,
+      lastWriteIso: null,
+      dbSource: storeInstance.getDbSource(),
+      botLogCount: 0,
+      readLimitExceeded: false,
+    };
+  }
 }
 
 /**
@@ -824,18 +938,30 @@ export async function getRedSniperCandlesForApi(
   oldestIso: string | null;
   newestTime: number | null;
   bars: RedSniperStoredCandle[];
+  candles: RedSniperStoredCandle[];
 }> {
   const validTfs: RedSniperStoreTf[] = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'];
   const tf: RedSniperStoreTf = validTfs.includes(tfRaw as RedSniperStoreTf)
     ? (tfRaw as RedSniperStoreTf)
     : '1m';
-  const limit = Math.max(1, Math.min(10000, Number(limitRaw) || 5000));
+  const limit = Math.max(1, Math.min(5000, Number(limitRaw) || 5000));
 
   syncStoreToRedSniperMemory();
 
   // If store for M1 or requested TF is completely empty, attempt an immediate sync from broker
   if (redSniperStore['1m'].length === 0 || (tf !== '3m' && redSniperStore[tf].length === 0)) {
     await syncBrokerCandlesToStore();
+  }
+
+  // Also merge any bars from active store
+  const storeInstance = getRedSniperStore();
+  if (tf !== '3m') {
+    try {
+      const fromStore = await storeInstance.getCandles(tf, limit);
+      if (fromStore.length > 0) {
+        redSniperStore[tf] = dedupeAndMergeRedSniperCandles(redSniperStore[tf], fromStore, tf === '1m' ? 10000 : 5000);
+      }
+    } catch {}
   }
 
   const m1Stored = redSniperStore['1m'] || [];
@@ -867,35 +993,28 @@ export async function getRedSniperCandlesForApi(
     oldestIso: bars.length > 0 ? new Date(bars[0].time * 1000).toISOString() : null,
     newestTime: bars.length > 0 ? bars[bars.length - 1].time : null,
     bars,
+    candles: bars,
   };
 }
 
 // ============================================================================
-// SERVER BOT LOG PERSISTENCE (last 200 entries in DATA_DIR/redsniper_bot_log.json)
+// SERVER BOT LOG PERSISTENCE (Active Store with local fallback)
 // ============================================================================
-
-export interface ServerBotLogEntry {
-  id: string;
-  time: number;
-  isoTime: string;
-  type: 'ZONE_DETECTED' | 'ENTRY' | 'TP1_BE' | 'TP2_PARTIAL' | 'TRAIL_MOVE' | 'EXIT';
-  tf: string;
-  side: 'BUY' | 'SELL';
-  zoneId?: string;
-  tradeId?: string;
-  price?: number;
-  oldSl?: number;
-  newSl?: number;
-  exitReason?: string;
-  pnl?: number;
-  r?: number;
-  message: string;
-}
 
 const RED_SNIPER_BOT_LOG_FILE = path.resolve(DATA_DIR, 'redsniper_bot_log.json');
 let serverBotLogCache: ServerBotLogEntry[] | null = null;
 
-export function loadRedSniperBotLogFromDisk(): ServerBotLogEntry[] {
+export async function loadRedSniperBotLogFromDisk(): Promise<ServerBotLogEntry[]> {
+  const storeInstance = getRedSniperStore();
+  try {
+    const fromStore = await storeInstance.loadLogs();
+    if (fromStore.length > 0) {
+      serverBotLogCache = fromStore;
+      return fromStore;
+    }
+  } catch (err: any) {
+    console.warn('[RED SNIPER BOT LOG] Error loading from store:', err?.message);
+  }
   if (serverBotLogCache !== null) return serverBotLogCache;
   ensureDataDir();
   if (!fs.existsSync(RED_SNIPER_BOT_LOG_FILE)) {
@@ -916,35 +1035,33 @@ export function loadRedSniperBotLogFromDisk(): ServerBotLogEntry[] {
   return serverBotLogCache;
 }
 
-export function appendRedSniperBotLogToDisk(incoming: ServerBotLogEntry[]): ServerBotLogEntry[] {
-  const existing = loadRedSniperBotLogFromDisk();
-  const byId = new Map<string, ServerBotLogEntry>();
-  for (const item of existing) {
-    if (item && typeof item.id === 'string') {
-      byId.set(item.id, item);
-    }
-  }
-  for (const item of incoming || []) {
-    if (item && typeof item.id === 'string' && typeof item.message === 'string') {
-      byId.set(item.id, item);
-    }
-  }
-  // Sort newest first, cap at 200 entries
-  const merged = Array.from(byId.values())
-    .sort((a, b) => b.time - a.time)
-    .slice(0, 200);
-  serverBotLogCache = merged;
+export async function appendRedSniperBotLogToDisk(incoming: ServerBotLogEntry[]): Promise<ServerBotLogEntry[]> {
+  const storeInstance = getRedSniperStore();
   try {
-    ensureDataDir();
-    writeJsonAtomic(RED_SNIPER_BOT_LOG_FILE, merged);
+    const saved = await storeInstance.appendLogs(incoming);
+    serverBotLogCache = saved;
+    try {
+      ensureDataDir();
+      writeJsonAtomic(RED_SNIPER_BOT_LOG_FILE, saved);
+    } catch {}
+    return saved;
   } catch (err: any) {
-    console.warn('[RED SNIPER BOT LOG] Failed to write redsniper_bot_log.json:', err?.message);
+    console.error('[RED SNIPER BOT LOG] Error appending logs:', err?.message);
+    const current = serverBotLogCache || [];
+    const merged = [...incoming, ...current].slice(0, 200);
+    serverBotLogCache = merged;
+    return merged;
   }
-  return merged;
 }
 
-export function clearRedSniperBotLogOnDisk(): ServerBotLogEntry[] {
+export async function clearRedSniperBotLogOnDisk(): Promise<ServerBotLogEntry[]> {
+  const storeInstance = getRedSniperStore();
   serverBotLogCache = [];
+  try {
+    await storeInstance.clearLogs();
+  } catch (err: any) {
+    console.error('[RED SNIPER BOT LOG] Error clearing logs:', err?.message);
+  }
   try {
     ensureDataDir();
     writeJsonAtomic(RED_SNIPER_BOT_LOG_FILE, []);
