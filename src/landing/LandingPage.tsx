@@ -9,7 +9,7 @@ import { NewsRadarOverlay } from './ui/NewsRadarOverlay';
 import { TelegramOverlay } from './ui/TelegramOverlay';
 import { FinaleOverlay } from './ui/FinaleOverlay';
 import { CustomCursor } from './ui/CustomCursor';
-import { Preloader } from './ui/Preloader';
+import { IntroDiamond } from '../components/IntroDiamond';
 import { StickyPriceBar } from './ui/StickyPriceBar';
 import { SideProgressRail } from './ui/SideProgressRail';
 import { LiteModeToggle } from './ui/LiteModeToggle';
@@ -99,8 +99,8 @@ export const LandingPage: React.FC = () => {
 
   return (
     <div className="relative bg-[#050505] text-white select-none overflow-x-hidden max-w-full w-full">
-      {/* Preloader with Vault opening effect (first visit of session only, tap-to-skip) */}
-      {!isLoaded && <Preloader onLoaded={() => setIsLoaded(true)} />}
+      {/* Three.js Diamond Intro with Vault opening effect (first visit of session only, tap-to-skip) */}
+      {!isLoaded && <IntroDiamond onComplete={() => setIsLoaded(true)} />}
 
       {/* Desktop Custom Glowing Cursor & Mobile Touch Gold Dust Trail */}
       <CustomCursor />

@@ -7,7 +7,7 @@ import React from 'react';
 import { MarketProvider, useMarket } from './context/MarketContext';
 import { LandingPage } from './landing/LandingPage';
 import { LoginModal } from './components/LoginModal';
-import { ParticleTunnelTransition } from './components/ParticleTunnelTransition';
+import { IntroDiamond } from './components/IntroDiamond';
 import { DashboardView } from './components/DashboardView';
 import { NewsTab } from './components/NewsTab';
 import { DojiBacktestPage } from './doji/DojiBacktestPage';
@@ -45,7 +45,7 @@ const MainApp: React.FC = () => {
     <>
       {isLoggedIn ? <DashboardView /> : <LandingPage />}
       <LoginModal />
-      {isTunnelActive && <ParticleTunnelTransition />}
+      {isTunnelActive && <IntroDiamond />}
     </>
   );
 };
