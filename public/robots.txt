@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Allow: /terms
+Allow: /privacy
+Allow: /risk-disclosure
+Disallow: /api/
+
+Sitemap: https://sarraf.app/sitemap.xml

@@ -1,14 +1,21 @@
-import {createRoot} from 'react-dom/client';
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 
-// Register PWA service worker for shell caching (APIs remain network-only)
-if ('serviceWorker' in navigator && import.meta.env.PROD) {
+// Register Service Worker safely for PWA (caches app shell only, never /api/*)
+if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch((err) => {
-      console.warn('[PWA] Service worker registration ignored:', err);
-    });
+    navigator.serviceWorker
+      .register('/sw.js', { scope: '/' })
+      .catch(() => {
+        // Ignore service worker registration errors in restricted iframe contexts
+      });
   });
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);

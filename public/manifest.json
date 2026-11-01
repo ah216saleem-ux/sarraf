@@ -1,8 +1,7 @@
 {
-  "id": "/",
-  "name": "SARRAF Gold Intelligence",
+  "name": "SARRAF — Gold, moving in real time",
   "short_name": "SARRAF",
-  "description": "Institutional real-time spot gold intelligence and algorithmic dispatch platform.",
+  "description": "Private, invite-only XAU/USD gold price tracker, global bullion sessions clock, macro news radar, and real-time Telegram signals.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
@@ -11,16 +10,40 @@
   "theme_color": "#050505",
   "icons": [
     {
-      "src": "/icon-192.svg",
-      "sizes": "192x192",
-      "type": "image/svg+xml",
+      "src": "/favicon-32x32.png",
+      "sizes": "32x32",
+      "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icon-512.svg",
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
       "sizes": "512x512",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

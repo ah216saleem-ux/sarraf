@@ -5,13 +5,22 @@ export interface IntroDiamondProps {
   onComplete?: () => void;
   /** Alias for compatibility with existing Preloader prop signature */
   onLoaded?: () => void;
+  /**
+   * When true, LandingPage's persistent Three.js canvas renders the 4800 particles
+   * so the intro-to-hero handoff has zero cut or re-initialization.
+   */
+  sharedCanvas?: boolean;
+  /**
+   * Reports normalized assembly progress (0..1) and punchprogress (0..1) to a shared scene.
+   */
+  onStateUpdate?: (assembleP: number, punchP: number, beamFlash: number) => void;
 }
 
-const PARTICLE_COUNT = 3200;
-const DUST_COUNT = 300;
-const SIMULATED_DURATION_MS = 3400;
+export const INTRO_PARTICLE_COUNT = 4800;
+const INTRO_DURATION_MS = 3600;
 const PAUSE_AT_100_MS = 350;
-const DOOR_SPLIT_DURATION_MS = 1250;
+const REVEAL_PUNCH_MS = 650;
+const WATCHDOG_TIMEOUT_MS = 7000;
 
 function easeOutCubic(x: number): number {
   const inv = 1 - Math.min(1, Math.max(0, x));
@@ -25,34 +34,69 @@ function easeInOutCubic(x: number): number {
 
 function getStatusText(progress: number): string {
   if (progress >= 95) return 'Ready';
-  if (progress >= 70) return 'Calibrating signals';
-  if (progress >= 35) return 'Syncing XAU/USD feed';
+  if (progress >= 68) return 'Calibrating signals';
+  if (progress >= 34) return 'Syncing XAU/USD feed';
   return 'Connecting to live market';
 }
 
-export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded }) => {
+function createSoftParticleTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255, 248, 220, 1)');
+    grad.addColorStop(0.28, 'rgba(255, 217, 122, 0.85)');
+    grad.addColorStop(0.65, 'rgba(232, 184, 74, 0.22)');
+    grad.addColorStop(1, 'rgba(184, 134, 40, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 64, 64);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+export const IntroDiamond: React.FC<IntroDiamondProps> = ({
+  onComplete,
+  onLoaded,
+  sharedCanvas = false,
+  onStateUpdate,
+}) => {
   const mountRef = useRef<HTMLDivElement>(null);
 
   const [displayProgress, setDisplayProgress] = useState<number>(0);
-  const [isSplitting, setIsSplitting] = useState<boolean>(false);
-  const [isSimpleFadeOut, setIsSimpleFadeOut] = useState<boolean>(false);
-  const [reducedMotion, setReducedMotion] = useState<boolean>(() => {
-    if (typeof window !== 'undefined' && window.matchMedia) {
-      return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    }
-    return false;
-  });
+  const [isRevealing, setIsRevealing] = useState<boolean>(false);
+  const [beamFlashActive, setBeamFlashActive] = useState<boolean>(false);
 
-  // Mutable animation state refs to avoid React re-renders tearing down WebGL
+  // CRITICAL: Keep all callbacks and environment flags in refs so parent re-renders
+  // NEVER restart the intro effect or reset progress.
+  const onCompleteRef = useRef(onComplete);
+  const onLoadedRef = useRef(onLoaded);
+  const onStateUpdateRef = useRef(onStateUpdate);
+  const sharedCanvasRef = useRef(sharedCanvas);
+  const reducedMotionRef = useRef<boolean>(
+    typeof window !== 'undefined' && window.matchMedia
+      ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      : false
+  );
+
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+    onLoadedRef.current = onLoaded;
+    onStateUpdateRef.current = onStateUpdate;
+    sharedCanvasRef.current = sharedCanvas;
+  }, [onComplete, onLoaded, onStateUpdate, sharedCanvas]);
+
+  const phaseRef = useRef<'loading' | 'pausing' | 'punching' | 'done'>('loading');
   const progressRef = useRef<number>(0);
-  const realTargetRef = useRef<number>(0);
-  const realReadyCountRef = useRef<number>(0);
-  const phaseRef = useRef<'loading' | 'pausing' | 'splitting' | 'done'>('loading');
-  const splitStartTimeRef = useRef<number>(0);
+  const pauseStartRef = useRef<number>(0);
+  const punchStartRef = useRef<number>(0);
   const hasCompletedRef = useRef<boolean>(false);
-  const timersRef = useRef<number[]>([]);
+  const skipRequestedRef = useRef<boolean>(false);
 
-  const fireComplete = useCallback(() => {
+  const completeOnce = useCallback(() => {
     if (hasCompletedRef.current) return;
     hasCompletedRef.current = true;
     phaseRef.current = 'done';
@@ -65,143 +109,108 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
       }
     }
 
-    onLoaded?.();
-    onComplete?.();
-  }, [onComplete, onLoaded]);
+    onStateUpdateRef.current?.(1, 1, 0);
+    onLoadedRef.current?.();
+    onCompleteRef.current?.();
+  }, []);
 
-  const triggerSplitSequence = useCallback(
-    (immediateSkip = false) => {
-      if (phaseRef.current === 'splitting' || phaseRef.current === 'done') return;
-
-      // Clear any pending pause timers
-      timersRef.current.forEach((id) => window.clearTimeout(id));
-      timersRef.current = [];
-
-      progressRef.current = 1;
-      setDisplayProgress(100);
-
-      if (reducedMotion) {
-        phaseRef.current = 'splitting';
-        setIsSimpleFadeOut(true);
-        const fadeTimer = window.setTimeout(() => {
-          fireComplete();
-        }, 420);
-        timersRef.current.push(fadeTimer);
-        return;
-      }
-
-      const startDoors = () => {
-        if (phaseRef.current === 'done') return;
-        phaseRef.current = 'splitting';
-        splitStartTimeRef.current = performance.now();
-        setIsSplitting(true);
-
-        const doneTimer = window.setTimeout(() => {
-          fireComplete();
-        }, DOOR_SPLIT_DURATION_MS);
-        timersRef.current.push(doneTimer);
-      };
-
-      if (immediateSkip) {
-        startDoors();
-      } else {
-        phaseRef.current = 'pausing';
-        const pauseTimer = window.setTimeout(startDoors, PAUSE_AT_100_MS);
-        timersRef.current.push(pauseTimer);
-      }
-    },
-    [fireComplete, reducedMotion]
-  );
-
-  // Skip handler on tap / click / keydown
   const handleSkip = useCallback(() => {
-    triggerSplitSequence(true);
-  }, [triggerSplitSequence]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const onChange = (e: MediaQueryListEvent) => setReducedMotion(e.matches);
-    mq.addEventListener?.('change', onChange);
-    return () => mq.removeEventListener?.('change', onChange);
+    if (phaseRef.current === 'done' || phaseRef.current === 'punching') return;
+    skipRequestedRef.current = true;
   }, []);
 
-  // Connect to REAL load state (fonts + first XAU/USD price fetch) with ~3.4s eased fallback
+  // Stable single-run effect (empty dependency array []) so parent re-renders NEVER restart the intro
   useEffect(() => {
-    let fontsResolved = false;
-    let priceResolved = false;
+    // 7s Watchdog timer that force-completes no matter what
+    const watchdogId = window.setTimeout(() => {
+      completeOnce();
+    }, WATCHDOG_TIMEOUT_MS);
 
-    const markTaskDone = (weight: number) => {
-      realTargetRef.current = Math.min(1, realTargetRef.current + weight);
-      realReadyCountRef.current += 1;
-    };
+    const startTime = performance.now();
+    let prevTime = startTime;
+    let rafId = 0;
+    let lastPct = -1;
 
-    // 1. Real font loading check
-    if (typeof document !== 'undefined' && document.fonts && document.fonts.ready) {
-      document.fonts.ready
-        .then(() => {
-          if (!fontsResolved) {
-            fontsResolved = true;
-            markTaskDone(0.45);
+    // If sharedCanvas is true, LandingPage owns the WebGL canvas and we drive progress + punch state
+    if (sharedCanvasRef.current || reducedMotionRef.current) {
+      const duration = reducedMotionRef.current ? 750 : INTRO_DURATION_MS;
+
+      const stepShared = (now: number) => {
+        if (hasCompletedRef.current) return;
+
+        if (skipRequestedRef.current && phaseRef.current === 'loading') {
+          progressRef.current = 1;
+          setDisplayProgress(100);
+          phaseRef.current = 'punching';
+          punchStartRef.current = now;
+          setBeamFlashActive(true);
+          setIsRevealing(true);
+        }
+
+        if (phaseRef.current === 'loading') {
+          const raw = Math.min(1, (now - startTime) / duration);
+          const eased = easeInOutCubic(raw);
+          progressRef.current = eased;
+
+          const pct = Math.min(100, Math.round(eased * 100));
+          if (pct !== lastPct) {
+            lastPct = pct;
+            setDisplayProgress(pct);
           }
-        })
-        .catch(() => {
-          if (!fontsResolved) {
-            fontsResolved = true;
-            markTaskDone(0.45);
+
+          onStateUpdateRef.current?.(eased, 0, 0);
+
+          if (raw >= 1) {
+            progressRef.current = 1;
+            setDisplayProgress(100);
+            if (reducedMotionRef.current) {
+              setIsRevealing(true);
+              completeOnce();
+              return;
+            }
+            phaseRef.current = 'pausing';
+            pauseStartRef.current = now;
+            setBeamFlashActive(true);
           }
-        });
-    } else {
-      fontsResolved = true;
-      markTaskDone(0.45);
-    }
+        } else if (phaseRef.current === 'pausing') {
+          const pauseElapsed = now - pauseStartRef.current;
+          const flashIntensity = Math.sin(Math.min(1, pauseElapsed / PAUSE_AT_100_MS) * Math.PI);
+          onStateUpdateRef.current?.(1, 0, flashIntensity);
 
-    // 2. Real first price/data fetch check
-    fetch('/api/price/xauusd')
-      .then((res) => {
-        if (!priceResolved) {
-          priceResolved = true;
-          markTaskDone(res.ok ? 0.55 : 0.45);
+          if (pauseElapsed >= PAUSE_AT_100_MS || skipRequestedRef.current) {
+            phaseRef.current = 'punching';
+            punchStartRef.current = now;
+            setIsRevealing(true);
+          }
+        } else if (phaseRef.current === 'punching') {
+          const punchT = Math.min(1, (now - punchStartRef.current) / REVEAL_PUNCH_MS);
+          const punchEase = easeOutCubic(punchT);
+          onStateUpdateRef.current?.(1, punchEase, Math.max(0, 1 - punchT * 1.5));
+
+          if (punchT >= 1) {
+            completeOnce();
+            return;
+          }
         }
-      })
-      .catch(() => {
-        if (!priceResolved) {
-          priceResolved = true;
-          markTaskDone(0.45);
-        }
-      });
 
-    return () => {
-      timersRef.current.forEach((id) => window.clearTimeout(id));
-      timersRef.current = [];
-    };
-  }, []);
-
-  // Main Three.js Scene & Progress Loop
-  useEffect(() => {
-    const container = mountRef.current;
-    if (!container) return;
-
-    // If reduced motion is enabled, run a lightweight progress timer and simple fade
-    if (reducedMotion) {
-      const start = performance.now();
-      let rafId = 0;
-      const tickReduced = (now: number) => {
-        const t = Math.min(1, (now - start) / 900);
-        progressRef.current = t;
-        setDisplayProgress(Math.round(t * 100));
-        if (t >= 1) {
-          triggerSplitSequence(false);
-        } else {
-          rafId = requestAnimationFrame(tickReduced);
-        }
+        rafId = requestAnimationFrame(stepShared);
       };
-      rafId = requestAnimationFrame(tickReduced);
-      return () => cancelAnimationFrame(rafId);
+
+      rafId = requestAnimationFrame(stepShared);
+      return () => {
+        window.clearTimeout(watchdogId);
+        cancelAnimationFrame(rafId);
+      };
     }
 
-    // Detect software WebGL for safe frame pacing / antialias
-    const isSoftwareGl = (() => {
+    // Standalone Three.js WebGL scene (used when IntroDiamond is mounted standalone)
+    const container = mountRef.current;
+    if (!container) {
+      completeOnce();
+      return () => window.clearTimeout(watchdogId);
+    }
+
+    const isLowEnd = (() => {
       try {
         const probe = document.createElement('canvas').getContext('webgl2');
         if (!probe) return true;
@@ -221,15 +230,16 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
-    camera.position.set(0, 0, isPortrait ? 9 : 7);
+    const baseCamZ = isPortrait ? 9.2 : 7.4;
+    camera.position.set(0, 0, baseCamZ);
 
     const renderer = new THREE.WebGLRenderer({
       alpha: true,
-      antialias: !isSoftwareGl,
+      antialias: !isLowEnd,
       powerPreference: 'high-performance',
     });
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(isLowEnd ? 1 : Math.min(window.devicePixelRatio || 1, 1.75));
     renderer.setSize(width, height);
     renderer.setClearColor(0x000000, 0);
 
@@ -239,48 +249,40 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
     canvasEl.style.height = '100%';
     container.appendChild(canvasEl);
 
-    // -------------------------------------------------------------------------
-    // 1. Thin Vertical Gold Light Beam (scaleY 0 -> 1 over 1.6s ease-out)
-    // -------------------------------------------------------------------------
+    // 1. Vertical Gold Light Beam
     const beamGroup = new THREE.Group();
     scene.add(beamGroup);
 
-    const coreBeamGeo = new THREE.PlaneGeometry(0.022, 16);
+    const coreBeamGeo = new THREE.PlaneGeometry(0.024, 18);
     const coreBeamMat = new THREE.MeshBasicMaterial({
       color: 0xffd97a,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.92,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
-    const coreBeamMesh = new THREE.Mesh(coreBeamGeo, coreBeamMat);
-    beamGroup.add(coreBeamMesh);
+    beamGroup.add(new THREE.Mesh(coreBeamGeo, coreBeamMat));
 
-    const glowBeamGeo = new THREE.PlaneGeometry(0.28, 16);
+    const glowBeamGeo = new THREE.PlaneGeometry(0.34, 18);
     const glowBeamMat = new THREE.MeshBasicMaterial({
       color: 0xe8b84a,
       transparent: true,
-      opacity: 0.24,
+      opacity: 0.25,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
-    const glowBeamMesh = new THREE.Mesh(glowBeamGeo, glowBeamMat);
-    beamGroup.add(glowBeamMesh);
-
+    beamGroup.add(new THREE.Mesh(glowBeamGeo, glowBeamMat));
     beamGroup.scale.set(1, 0.0001, 1);
 
-    // -------------------------------------------------------------------------
-    // 2. Diamond Group: 3200 Gold Particles + Elongated Octahedron Wireframe
-    // -------------------------------------------------------------------------
+    // 2. 4800 Gold Particles + Fake Bloom Glow Layer + Elongated Octahedron Wireframe
     const diamondGroup = new THREE.Group();
     scene.add(diamondGroup);
 
-    const diamondRadius = 1.35;
+    const diamondRadius = 1.45;
     const diamondYScale = 1.5;
 
-    // Build elongated octahedron geometry for wireframe & surface sampling
     const octaGeo = new THREE.OctahedronGeometry(diamondRadius, 0);
     octaGeo.scale(1, diamondYScale, 1);
 
@@ -292,10 +294,8 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
-    const wireframeLines = new THREE.LineSegments(edgesGeo, edgesMat);
-    diamondGroup.add(wireframeLines);
+    diamondGroup.add(new THREE.LineSegments(edgesGeo, edgesMat));
 
-    // Precompute the 8 triangular faces of the elongated octahedron for surface sampling
     const topV = [0, diamondRadius * diamondYScale, 0];
     const botV = [0, -diamondRadius * diamondYScale, 0];
     const eqV = [
@@ -329,17 +329,22 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
       [eqV[3], eqV[0]],
     ];
 
-    const startPositions = new Float32Array(PARTICLE_COUNT * 3);
-    const targetPositions = new Float32Array(PARTICLE_COUNT * 3);
-    const currentPositions = new Float32Array(PARTICLE_COUNT * 3);
-    const particleDelays = new Float32Array(PARTICLE_COUNT);
-    const particleSwirls = new Float32Array(PARTICLE_COUNT);
+    const startPositions = new Float32Array(INTRO_PARTICLE_COUNT * 3);
+    const targetPositions = new Float32Array(INTRO_PARTICLE_COUNT * 3);
+    const currentPositions = new Float32Array(INTRO_PARTICLE_COUNT * 3);
+    const colors = new Float32Array(INTRO_PARTICLE_COUNT * 3);
+    const delays = new Float32Array(INTRO_PARTICLE_COUNT);
+    const swirls = new Float32Array(INTRO_PARTICLE_COUNT);
 
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const palette = [
+      new THREE.Color(0xffd97a),
+      new THREE.Color(0xe8b84a),
+      new THREE.Color(0xb88628),
+    ];
+
+    for (let i = 0; i < INTRO_PARTICLE_COUNT; i++) {
       const i3 = i * 3;
-
-      // Scattered spherical start position: radius 3.5 - 8.5
-      const r = 3.5 + Math.random() * 5.0;
+      const r = 3.8 + Math.random() * 5.2;
       const theta = Math.random() * Math.PI * 2;
       const cosPhi = 2 * Math.random() - 1;
       const sinPhi = Math.sqrt(Math.max(0, 1 - cosPhi * cosPhi));
@@ -356,7 +361,6 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
       currentPositions[i3 + 1] = sy;
       currentPositions[i3 + 2] = sz;
 
-      // Target position on surface of elongated octahedron (25% along edges for crisp facets, 75% across faces)
       let tx = 0;
       let ty = 0;
       let tz = 0;
@@ -384,207 +388,143 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
       targetPositions[i3 + 1] = ty;
       targetPositions[i3 + 2] = tz;
 
-      // Each particle has a random delay (0 - 0.45) and swirl angle
-      particleDelays[i] = Math.random() * 0.45;
-      particleSwirls[i] = 1.35 + Math.random() * 1.65;
+      const c = palette[i % palette.length];
+      colors[i3] = c.r;
+      colors[i3 + 1] = c.g;
+      colors[i3 + 2] = c.b;
+
+      delays[i] = Math.random() * 0.44;
+      swirls[i] = 1.4 + Math.random() * 1.6;
     }
 
     const particlesGeo = new THREE.BufferGeometry();
-    const posAttribute = new THREE.BufferAttribute(currentPositions, 3);
-    posAttribute.setUsage(THREE.DynamicDrawUsage);
-    particlesGeo.setAttribute('position', posAttribute);
+    const posAttr = new THREE.BufferAttribute(currentPositions, 3);
+    posAttr.setUsage(THREE.DynamicDrawUsage);
+    particlesGeo.setAttribute('position', posAttr);
+    particlesGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-    const particlesMat = new THREE.PointsMaterial({
-      color: 0xffd97a,
-      size: 0.035,
+    const spriteTex = createSoftParticleTexture();
+
+    const corePointsMat = new THREE.PointsMaterial({
+      size: 0.055,
+      map: spriteTex,
+      vertexColors: true,
       sizeAttenuation: true,
       transparent: true,
-      opacity: 0.92,
+      opacity: 0.95,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
 
-    const diamondPoints = new THREE.Points(particlesGeo, particlesMat);
-    diamondPoints.frustumCulled = false;
-    diamondGroup.add(diamondPoints);
-
-    // -------------------------------------------------------------------------
-    // 3. ~300 Faint Dim-Gold Dust Particles Floating in Background
-    // -------------------------------------------------------------------------
-    const dustPositions = new Float32Array(DUST_COUNT * 3);
-    const dustSpeeds = new Float32Array(DUST_COUNT);
-    const dustPhases = new Float32Array(DUST_COUNT);
-
-    for (let i = 0; i < DUST_COUNT; i++) {
-      const i3 = i * 3;
-      dustPositions[i3] = (Math.random() - 0.5) * 14;
-      dustPositions[i3 + 1] = (Math.random() - 0.5) * 12;
-      dustPositions[i3 + 2] = -2 - Math.random() * 6;
-      dustSpeeds[i] = 0.08 + Math.random() * 0.18;
-      dustPhases[i] = Math.random() * Math.PI * 2;
-    }
-
-    const dustGeo = new THREE.BufferGeometry();
-    const dustPosAttr = new THREE.BufferAttribute(dustPositions, 3);
-    dustPosAttr.setUsage(THREE.DynamicDrawUsage);
-    dustGeo.setAttribute('position', dustPosAttr);
-
-    const dustMat = new THREE.PointsMaterial({
-      color: 0xb88628,
-      size: 0.028,
+    const glowPointsMat = new THREE.PointsMaterial({
+      size: 0.16,
+      map: spriteTex,
+      vertexColors: true,
       sizeAttenuation: true,
       transparent: true,
-      opacity: 0.32,
+      opacity: 0.24,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
-    const dustPoints = new THREE.Points(dustGeo, dustMat);
-    dustPoints.frustumCulled = false;
-    scene.add(dustPoints);
 
-    // -------------------------------------------------------------------------
-    // 4. Pointer / Touch Parallax & Responsive Camera Z
-    // -------------------------------------------------------------------------
-    let targetParallaxX = 0;
-    let targetParallaxY = 0;
-    let currentParallaxX = 0;
-    let currentParallaxY = 0;
-
-    const handlePointerMove = (e: PointerEvent) => {
-      const nx = (e.clientX / Math.max(1, window.innerWidth)) * 2 - 1;
-      const ny = (e.clientY / Math.max(1, window.innerHeight)) * 2 - 1;
-      targetParallaxX = nx * 0.32;
-      targetParallaxY = -ny * 0.24;
-    };
-
-    const handleTouchMove = (e: TouchEvent) => {
-      if (e.touches.length > 0) {
-        const t = e.touches[0];
-        const nx = (t.clientX / Math.max(1, window.innerWidth)) * 2 - 1;
-        const ny = (t.clientY / Math.max(1, window.innerHeight)) * 2 - 1;
-        targetParallaxX = nx * 0.32;
-        targetParallaxY = -ny * 0.24;
-      }
-    };
+    const corePoints = new THREE.Points(particlesGeo, corePointsMat);
+    const glowPoints = new THREE.Points(particlesGeo, glowPointsMat);
+    corePoints.frustumCulled = false;
+    glowPoints.frustumCulled = false;
+    diamondGroup.add(corePoints);
+    diamondGroup.add(glowPoints);
 
     const handleResize = () => {
       const w = window.innerWidth || 1;
       const h = window.innerHeight || 1;
       camera.aspect = w / h;
-      camera.position.z = h > w ? 9 : 7;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
-      renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2));
     };
-
-    window.addEventListener('pointermove', handlePointerMove, { passive: true });
-    window.addEventListener('touchmove', handleTouchMove, { passive: true });
     window.addEventListener('resize', handleResize, { passive: true });
 
-    // -------------------------------------------------------------------------
-    // 5. Animation Loop (60fps, Zero Per-Frame Allocations)
-    // -------------------------------------------------------------------------
-    let frameId = 0;
-    const startTime = performance.now();
-    let prevTime = startTime;
-    let lastDisplayRounded = -1;
-    let rotYAccumulator = 0;
+    let rotY = 0;
 
-    const afterDraw = (cb: () => void) => {
-      const gl = renderer.getContext() as WebGL2RenderingContext;
-      if (gl && typeof gl.fenceSync === 'function') {
-        const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
-        gl.flush();
-        const poll = () => {
-          const state = sync && gl.getSyncParameter(sync, gl.SYNC_STATUS);
-          if (state === gl.UNSIGNALED) {
-            frameId = window.setTimeout(poll, 5);
-          } else {
-            if (sync) gl.deleteSync(sync);
-            frameId = window.setTimeout(cb, 80);
-          }
-        };
-        frameId = window.setTimeout(poll, 5);
-      } else {
-        frameId = window.setTimeout(cb, 80);
+    const tick = (now: number) => {
+      if (hasCompletedRef.current) return;
+
+      if (document.hidden) {
+        prevTime = now;
+        rafId = requestAnimationFrame(tick);
+        return;
       }
-    };
 
-    const tick = () => {
-      if (phaseRef.current === 'done') return;
-
-      const now = performance.now();
       const dt = Math.min(0.05, (now - prevTime) / 1000);
       prevTime = now;
       const elapsedSec = (now - startTime) / 1000;
 
-      // 1) Update loading progress (simulated ~3.4s with easing blended with real tasks)
+      if (skipRequestedRef.current && phaseRef.current === 'loading') {
+        progressRef.current = 1;
+        setDisplayProgress(100);
+        phaseRef.current = 'punching';
+        punchStartRef.current = now;
+        setBeamFlashActive(true);
+        setIsRevealing(true);
+      }
+
       if (phaseRef.current === 'loading') {
-        const rawSim = Math.min(1, (now - startTime) / SIMULATED_DURATION_MS);
-        const simProgress = easeInOutCubic(rawSim);
+        const raw = Math.min(1, (now - startTime) / INTRO_DURATION_MS);
+        const eased = easeInOutCubic(raw);
+        progressRef.current = eased;
 
-        // If both real tasks (fonts + price) finished early, allow faster convergence after 1.6s beam growth
-        const bothRealReady = realReadyCountRef.current >= 2 && elapsedSec > 1.6;
-        const targetP = bothRealReady
-          ? Math.max(simProgress, Math.min(1, (elapsedSec - 0.3) / 1.8))
-          : Math.max(simProgress, realTargetRef.current * simProgress);
-
-        progressRef.current += (targetP - progressRef.current) * Math.min(1, dt * 10);
-        if (rawSim >= 0.995 || progressRef.current >= 0.996) {
-          progressRef.current = 1;
-        }
-
-        const pct = Math.min(100, Math.round(progressRef.current * 100));
-        if (pct !== lastDisplayRounded) {
-          lastDisplayRounded = pct;
+        const pct = Math.min(100, Math.round(eased * 100));
+        if (pct !== lastPct) {
+          lastPct = pct;
           setDisplayProgress(pct);
         }
 
-        if (progressRef.current >= 1) {
-          triggerSplitSequence(false);
+        if (raw >= 1) {
+          progressRef.current = 1;
+          setDisplayProgress(100);
+          phaseRef.current = 'pausing';
+          pauseStartRef.current = now;
+          setBeamFlashActive(true);
+        }
+      } else if (phaseRef.current === 'pausing') {
+        if (now - pauseStartRef.current >= PAUSE_AT_100_MS || skipRequestedRef.current) {
+          phaseRef.current = 'punching';
+          punchStartRef.current = now;
+          setIsRevealing(true);
+        }
+      }
+
+      let punchEase = 0;
+      if (phaseRef.current === 'punching') {
+        const punchT = Math.min(1, (now - punchStartRef.current) / REVEAL_PUNCH_MS);
+        punchEase = easeOutCubic(punchT);
+        if (punchT >= 1) {
+          completeOnce();
+          return;
         }
       }
 
       const p = progressRef.current;
 
-      // Compute exit progress (0 -> 1 over 1.25s when splitting)
-      let exitT = 0;
-      if (phaseRef.current === 'splitting') {
-        exitT = Math.min(1, Math.max(0, (now - splitStartTimeRef.current) / DOOR_SPLIT_DURATION_MS));
-      }
-      const exitEase = easeInOutCubic(exitT);
-
-      // 2) Vertical Gold Light Beam: scaleY 0 -> 1 in 1.6s ease-out, fades during split
+      // Update vertical gold light beam
       const beamGrow = easeOutCubic(elapsedSec / 1.6);
-      beamGroup.scale.set(1, Math.max(0.0001, beamGrow), 1);
-      const beamPulse = 0.88 + Math.sin(elapsedSec * 4.0) * 0.12;
-      const beamExitFade = 1 - Math.min(1, exitT * 1.6);
-      coreBeamMat.opacity = 0.9 * beamPulse * beamExitFade;
-      glowBeamMat.opacity = 0.24 * beamPulse * beamExitFade;
+      beamGroup.scale.set(1 + punchEase * 2.5, Math.max(0.0001, beamGrow), 1);
+      const flashBoost = phaseRef.current === 'pausing' ? 1.6 : 1.0;
+      coreBeamMat.opacity = 0.92 * flashBoost * (1 - punchEase);
+      glowBeamMat.opacity = 0.28 * flashBoost * (1 - punchEase);
 
-      // 3) Update 3200 Gold Particles (sphere -> swirl -> elongated octahedron surface)
-      for (let i = 0; i < PARTICLE_COUNT; i++) {
+      // Update 4800 particles
+      for (let i = 0; i < INTRO_PARTICLE_COUNT; i++) {
         const i3 = i * 3;
-        const delay = particleDelays[i];
+        const delay = delays[i];
         const localRaw = (p - delay) / (1 - delay);
         const localClamped = localRaw <= 0 ? 0 : localRaw >= 1 ? 1 : localRaw;
         const e = easeInOutCubic(localClamped);
 
-        const sx = startPositions[i3];
-        const sy = startPositions[i3 + 1];
-        const sz = startPositions[i3 + 2];
+        const lx = startPositions[i3] + (targetPositions[i3] - startPositions[i3]) * e;
+        const ly = startPositions[i3 + 1] + (targetPositions[i3 + 1] - startPositions[i3 + 1]) * e;
+        const lz = startPositions[i3 + 2] + (targetPositions[i3 + 2] - startPositions[i3 + 2]) * e;
 
-        const tx = targetPositions[i3];
-        const ty = targetPositions[i3 + 1];
-        const tz = targetPositions[i3 + 2];
-
-        // Linear position interpolation before swirl rotation
-        const lx = sx + (tx - sx) * e;
-        const ly = sy + (ty - sy) * e;
-        const lz = sz + (tz - sz) * e;
-
-        // Small Y-rotation swirl that decreases to 0 as particle assembles
-        const angle = (1 - e) * particleSwirls[i];
+        const angle = (1 - e) * swirls[i];
         const cosA = Math.cos(angle);
         const sinA = Math.sin(angle);
 
@@ -592,58 +532,29 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
         currentPositions[i3 + 1] = ly;
         currentPositions[i3 + 2] = lx * sinA + lz * cosA;
       }
-      posAttribute.needsUpdate = true;
+      posAttr.needsUpdate = true;
 
-      // 4) Wireframe edges fade in at progress > 75%
-      const wireFadeIn = p > 0.75 ? easeOutCubic((p - 0.75) / 0.25) : 0;
-      const fadeOutExit = 1 - exitEase;
-      edgesMat.opacity = wireFadeIn * 0.85 * fadeOutExit;
-      particlesMat.opacity = 0.92 * fadeOutExit;
+      const wireFade = p > 0.72 ? easeOutCubic((p - 0.72) / 0.28) : 0;
+      edgesMat.opacity = wireFade * 0.75 * (1 - punchEase);
 
-      // 5) Diamond rotation, X tilt, breathing scale,parallax, and exit scale-up toward camera
-      currentParallaxX += (targetParallaxX - currentParallaxX) * Math.min(1, dt * 6);
-      currentParallaxY += (targetParallaxY - currentParallaxY) * Math.min(1, dt * 6);
+      rotY += dt * 0.52;
+      diamondGroup.rotation.y = rotY;
+      diamondGroup.rotation.x = 0.16 + Math.sin(elapsedSec * 0.9) * 0.04;
 
-      rotYAccumulator += dt * 0.48;
-      diamondGroup.rotation.y = rotYAccumulator + currentParallaxX * 0.85;
-      diamondGroup.rotation.x = 0.18 + Math.sin(elapsedSec * 0.9) * 0.05 + currentParallaxY * 0.65;
-
-      const breathScale = 1 + Math.sin(elapsedSec * 2.1) * 0.035;
-      const exitScaleMultiplier = 1 + exitEase * 1.85;
-      diamondGroup.scale.setScalar(breathScale * exitScaleMultiplier);
-      diamondGroup.position.z = exitEase * 2.4;
-
-      // 6) Update ~300 background dim-gold dust particles
-      for (let i = 0; i < DUST_COUNT; i++) {
-        const i3 = i * 3;
-        dustPositions[i3 + 1] += dustSpeeds[i] * dt;
-        dustPositions[i3] += Math.sin(elapsedSec * 0.6 + dustPhases[i]) * 0.06 * dt;
-        if (dustPositions[i3 + 1] > 6) {
-          dustPositions[i3 + 1] = -6;
-        }
-      }
-      dustPosAttr.needsUpdate = true;
-      dustMat.opacity = 0.32 * fadeOutExit;
+      // Camera push-in punch at 100%
+      camera.position.z = baseCamZ - punchEase * 2.2;
 
       renderer.render(scene, camera);
-
-      if (isSoftwareGl) {
-        afterDraw(tick);
-      } else {
-        frameId = requestAnimationFrame(tick);
-      }
+      rafId = requestAnimationFrame(tick);
     };
 
-    frameId = requestAnimationFrame(tick);
+    rafId = requestAnimationFrame(tick);
 
     return () => {
-      cancelAnimationFrame(frameId);
-      clearTimeout(frameId);
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('touchmove', handleTouchMove);
+      window.clearTimeout(watchdogId);
+      cancelAnimationFrame(rafId);
       window.removeEventListener('resize', handleResize);
 
-      // Clean up all geometries, materials, and renderer
       coreBeamGeo.dispose();
       coreBeamMat.dispose();
       glowBeamGeo.dispose();
@@ -652,16 +563,16 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
       edgesGeo.dispose();
       edgesMat.dispose();
       particlesGeo.dispose();
-      particlesMat.dispose();
-      dustGeo.dispose();
-      dustMat.dispose();
-
+      corePointsMat.dispose();
+      glowPointsMat.dispose();
+      spriteTex.dispose();
       renderer.dispose();
+
       if (canvasEl.parentNode === container) {
         container.removeChild(canvasEl);
       }
     };
-  }, [reducedMotion, triggerSplitSequence]);
+  }, [completeOnce]);
 
   const statusText = getStatusText(displayProgress);
 
@@ -677,61 +588,49 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
           handleSkip();
         }
       }}
-      className={`fixed inset-0 z-50 flex items-center justify-center cursor-pointer select-none overflow-hidden transition-opacity duration-400 ${
-        isSimpleFadeOut ? 'opacity-0 pointer-events-none' : 'opacity-100'
+      className={`fixed inset-0 z-50 flex items-center justify-center cursor-pointer select-none overflow-hidden transition-opacity duration-600 ${
+        isRevealing ? 'opacity-0 pointer-events-none' : 'opacity-100'
       }`}
       style={{
+        backgroundColor: sharedCanvas ? 'transparent' : '#050505',
         paddingTop: 'env(safe-area-inset-top, 0px)',
         paddingBottom: 'env(safe-area-inset-bottom, 0px)',
         paddingLeft: 'env(safe-area-inset-left, 0px)',
         paddingRight: 'env(safe-area-inset-right, 0px)',
       }}
     >
-      {/* Left Vault Door */}
+      {/* Standalone WebGL mount when not sharing LandingPage's canvas */}
+      {!sharedCanvas && (
+        <div
+          ref={mountRef}
+          className="absolute inset-0 z-10 pointer-events-none w-full h-full"
+        />
+      )}
+
+      {/* Growing vertical gold light beam overlay (for sharedCanvas & flash boost) */}
       <div
-        className={`absolute top-0 bottom-0 left-0 w-1/2 bg-[#050505] border-r border-[#E8B84A]/25 z-10 will-change-transform ${
-          isSplitting ? '-translate-x-full' : 'translate-x-0'
-        }`}
+        className="pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 z-20 flex items-center justify-center transition-opacity duration-500"
         style={{
-          transition: 'transform 1.25s cubic-bezier(0.76, 0, 0.16, 1)',
+          opacity: isRevealing ? 0 : 1,
         }}
       >
         <div
-          className={`absolute right-0 top-0 bottom-0 w-[1.5px] bg-gradient-to-b from-transparent via-[#FFD97A] to-transparent shadow-[0_0_18px_#E8B84A] transition-opacity duration-500 ${
-            isSplitting ? 'opacity-0' : 'opacity-90'
-          }`}
+          className="w-[1.5px] h-full bg-gradient-to-b from-transparent via-[#FFD97A] to-transparent transition-transform duration-700 ease-out"
+          style={{
+            transform: `scaleY(${Math.max(0.08, displayProgress / 100)})`,
+            boxShadow: beamFlashActive
+              ? '0 0 38px 6px rgba(255, 217, 122, 0.95), 0 0 80px 16px rgba(232, 184, 74, 0.65)'
+              : '0 0 18px 2px rgba(232, 184, 74, 0.55)',
+          }}
         />
       </div>
 
-      {/* Right Vault Door */}
-      <div
-        className={`absolute top-0 bottom-0 right-0 w-1/2 bg-[#050505] border-l border-[#E8B84A]/25 z-10 will-change-transform ${
-          isSplitting ? 'translate-x-full' : 'translate-x-0'
-        }`}
-        style={{
-          transition: 'transform 1.25s cubic-bezier(0.76, 0, 0.16, 1)',
-        }}
-      >
-        <div
-          className={`absolute left-0 top-0 bottom-0 w-[1.5px] bg-gradient-to-b from-transparent via-[#FFD97A] to-transparent shadow-[0_0_18px_#E8B84A] transition-opacity duration-500 ${
-            isSplitting ? 'opacity-0' : 'opacity-90'
-          }`}
-        />
-      </div>
-
-      {/* Three.js WebGL Viewport Container */}
-      <div
-        ref={mountRef}
-        className="absolute inset-0 z-20 pointer-events-none w-full h-full"
-      />
-
-      {/* Existing Loading Text & Progress Bar Layout */}
+      {/* Loading HUD: SARRAF ◆ XAU/USD, thin gold bar, status text, percentage, TAP TO SKIP */}
       <div
         className={`relative z-30 flex flex-col items-center justify-end h-full w-full max-w-xs px-6 pb-12 sm:pb-16 pointer-events-none transition-all duration-500 ${
-          isSplitting ? 'opacity-0 translate-y-2' : 'opacity-100 translate-y-0'
+          isRevealing ? 'opacity-0 translate-y-3' : 'opacity-100 translate-y-0'
         }`}
       >
-        {/* Brand Name Typography: SARRAF ◆ XAU/USD */}
         <div className="flex items-center gap-2.5 mb-3.5">
           <span className="font-mono text-sm tracking-[0.35em] font-bold text-white">
             SARRAF
@@ -742,7 +641,6 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
           </span>
         </div>
 
-        {/* Thin Gold Progress Bar */}
         <div className="relative w-full h-[1.5px] bg-white/10 rounded-full overflow-hidden">
           <div
             className="absolute left-0 top-0 bottom-0 bg-gradient-to-r from-[#B88628] via-[#FFD97A] to-[#E8B84A] transition-all duration-75 ease-out shadow-[0_0_12px_#E8B84A]"
@@ -750,7 +648,6 @@ export const IntroDiamond: React.FC<IntroDiamondProps> = ({ onComplete, onLoaded
           />
         </div>
 
-        {/* Status Text & Percentage Readout */}
         <div className="w-full mt-3 flex justify-between items-center text-[10px] font-mono text-neutral-400 tabular-nums">
           <span className="tracking-widest">{statusText}</span>
           <span className="text-[#FFD97A] font-bold">{displayProgress}%</span>

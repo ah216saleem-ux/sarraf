@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { MarketProvider, useMarket } from './context/MarketContext';
 import { LandingPage } from './landing/LandingPage';
 import { LoginModal } from './components/LoginModal';
@@ -11,12 +11,43 @@ import { IntroDiamond } from './components/IntroDiamond';
 import { DashboardView } from './components/DashboardView';
 import { NewsTab } from './components/NewsTab';
 import { DojiBacktestPage } from './doji/DojiBacktestPage';
+import { LegalPage, LegalSlug } from './components/LegalPage';
+
+function normalizePath(p: string): string {
+  const trimmed = p.replace(/\/+$/, '');
+  return trimmed === '' ? '/' : trimmed;
+}
 
 const MainApp: React.FC = () => {
   const { isLoggedIn, isTunnelActive, priceData } = useMarket();
-  const isDojiBacktestPage =
-    typeof window !== 'undefined' &&
-    window.location.pathname.replace(/\/+$/, '') === '/doji-backtest';
+
+  const [currentPath, setCurrentPath] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return normalizePath(window.location.pathname);
+    }
+    return '/';
+  });
+
+  useEffect(() => {
+    const onPopState = () => {
+      setCurrentPath(normalizePath(window.location.pathname));
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  const handleNavigate = useCallback((path: string) => {
+    if (typeof window === 'undefined') return;
+    window.history.pushState({}, '', path);
+    setCurrentPath(normalizePath(path));
+  }, []);
+
+  const isDojiBacktestPage = currentPath === '/doji-backtest';
+  const isLegalRoute =
+    currentPath === '/terms' ||
+    currentPath === '/privacy' ||
+    currentPath === '/risk-disclosure';
+
   const isDevNewsPreview =
     import.meta.env.DEV &&
     typeof window !== 'undefined' &&
@@ -28,6 +59,15 @@ const MainApp: React.FC = () => {
 
   if (isDojiBacktestPage) {
     return <DojiBacktestPage />;
+  }
+
+  if (isLegalRoute) {
+    return (
+      <LegalPage
+        slug={currentPath as LegalSlug}
+        onNavigate={handleNavigate}
+      />
+    );
   }
 
   if (isDevNewsPreview) {
