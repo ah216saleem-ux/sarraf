@@ -69,8 +69,30 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
       renormalisedFactor = 1,
       absorbDriveScore,
       absorbDriveAgrees,
+      absorbDriveMagnitudeOk = Math.abs(absorbDriveScore) >= 20,
+      volumeSpikeRatio = 0,
+      hasVolumeSpike = false,
+      flowBuy60sPct = 50,
+      flowSell60sPct = 50,
+      flowConflictBlocked = false,
+      vol1mBtc = 0,
+      lowLiquidityBlocked = false,
+      newsBlocked = false,
+      newsBlockedTitle = null,
+      trend1h = 'UNKNOWN',
+      trend4h = 'UNKNOWN',
+      trendStateLabel = 'HTF Building...',
+      htfTrendBlocked = false,
+      keyLevelBonusApplied = 0,
+      keyLevelBonusNote = null,
+      keyLevelOppositeBlocked = false,
+      pendingConfirmation = null,
+      requiredConfidence = 75,
+      requiredLead = 30,
       canFire,
       cooldownRemainingSec,
+      dailyTradesCount = 0,
+      maxDailyTrades = 5,
       waitReason,
     } = decision;
 
@@ -81,6 +103,15 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
       spotAgeMs > 0 && spotAgeMs < 999999
         ? `${(spotAgeMs / 1000).toFixed(1)}s`
         : '--';
+
+    const trendBadgeColor =
+      htfTrendBlocked
+        ? 'bg-rose-950/70 border-rose-500/40 text-rose-300'
+        : trend1h === 'BULL' && trend4h === 'BULL'
+        ? 'bg-teal-950/70 border-teal-500/40 text-teal-300'
+        : trend1h === 'BEAR' && trend4h === 'BEAR'
+        ? 'bg-rose-950/70 border-rose-500/40 text-rose-300'
+        : 'bg-neutral-900 border-white/10 text-neutral-300';
 
     return (
       <div className="bg-[#08080a] border border-[#E8B84A]/20 rounded-xl p-3.5 sm:p-5 backdrop-blur-md shadow-[0_4px_24px_rgba(0,0,0,0.5)] space-y-3.5">
@@ -98,6 +129,17 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
                 <span className="font-mono text-[10px] text-[#FFD97A]">
                   · Backend Only
                 </span>
+                <span
+                  className={`font-mono text-[10px] px-1.5 py-0.5 rounded border font-semibold ${trendBadgeColor}`}
+                  title="1H & 4H EMA21/EMA50 Trend Filter"
+                >
+                  {trendStateLabel}
+                </span>
+                {keyLevelBonusNote && (
+                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-[#FFD97A]/15 border border-[#FFD97A]/40 text-[#FFD97A]">
+                    {keyLevelBonusNote}
+                  </span>
+                )}
                 {isStaleOrOffline && (
                   <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-500/40 text-rose-300">
                     STALE · {ageLabel}
@@ -105,7 +147,7 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
                 )}
               </div>
               <div className="font-mono text-[10px] text-neutral-400">
-                Silent first 3m &amp; when SPOT dot not green (&lt;3s) · Score -100 to +100
+                Silent first 3m &amp; when SPOT dot not green (&lt;3s) · Conf &ge;{requiredConfidence}% · Lead &ge;{requiredLead}% · 90s Confirm
               </div>
             </div>
           </div>
@@ -128,6 +170,13 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
               <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
               <span>
                 LIMITED DATA ({activeComponentsCount}/8 active · excluded wt {excludedWeightSum})
+              </span>
+            </div>
+          ) : pendingConfirmation ? (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-950/80 border border-[#FFD97A]/50 text-[#FFD97A] font-mono text-[11px] font-bold animate-pulse">
+              <Clock className="w-3.5 h-3.5 text-[#FFD97A] shrink-0" />
+              <span>
+                PENDING {pendingConfirmation.side} ({pendingConfirmation.remainingSec}s / 90s · Adv ${pendingConfirmation.adverseMove.toFixed(1)}/${pendingConfirmation.maxAdverseAllowed.toFixed(1)})
               </span>
             </div>
           ) : canFire ? (
@@ -189,7 +238,7 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
             <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between">
               <span>NET SCORE</span>
               <span className="text-neutral-500">
-                {isStaleOrOffline ? `age ${ageLabel}` : '±100'}
+                {isStaleOrOffline ? `age ${ageLabel}` : keyLevelBonusApplied !== 0 ? `KL ${keyLevelBonusApplied > 0 ? '+5' : '-5'}` : '±100'}
               </span>
             </div>
             <div
@@ -226,8 +275,8 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
           <div className="bg-black/50 border border-white/5 rounded-lg p-2.5">
             <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between">
               <span>CONFIDENCE</span>
-              <span className={confidence >= 68 && !isStaleOrOffline ? 'text-teal-400' : 'text-neutral-500'}>
-                {isStaleOrOffline ? `age ${ageLabel}` : '≥68%'}
+              <span className={confidence >= requiredConfidence && !isStaleOrOffline ? 'text-teal-400' : 'text-neutral-500'}>
+                {isStaleOrOffline ? `age ${ageLabel}` : `≥${requiredConfidence}%`}
               </span>
             </div>
             <div
@@ -243,7 +292,7 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
             <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden mt-1.5 border border-white/5">
               <div
                 className={`h-full transition-all duration-300 ${
-                  confidence >= 68 && !isStaleOrOffline ? 'bg-[#FFD97A]' : 'bg-neutral-600'
+                  confidence >= requiredConfidence && !isStaleOrOffline ? 'bg-[#FFD97A]' : 'bg-neutral-600'
                 }`}
                 style={{ width: `${Math.min(100, confidence)}%` }}
               />
@@ -254,8 +303,8 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
           <div className="bg-black/50 border border-white/5 rounded-lg p-2.5">
             <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between">
               <span>SIDE LEAD</span>
-              <span className={lead >= 22 && !isStaleOrOffline ? 'text-teal-400' : 'text-neutral-500'}>
-                {isStaleOrOffline ? `age ${ageLabel}` : '≥22%'}
+              <span className={lead >= requiredLead && !isStaleOrOffline ? 'text-teal-400' : 'text-neutral-500'}>
+                {isStaleOrOffline ? `age ${ageLabel}` : `≥${requiredLead}%`}
               </span>
             </div>
             <div
@@ -269,32 +318,44 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
             <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden mt-1.5 border border-white/5">
               <div
                 className={`h-full transition-all duration-300 ${
-                  lead >= 22 && !isStaleOrOffline ? 'bg-teal-400' : 'bg-neutral-600'
+                  lead >= requiredLead && !isStaleOrOffline ? 'bg-teal-400' : 'bg-neutral-600'
                 }`}
                 style={{ width: `${Math.min(100, (lead / 50) * 100)}%` }}
               />
             </div>
           </div>
 
-          {/* Cooldown */}
+          {/* Cooldown & Daily Limit */}
           <div className="bg-black/50 border border-white/5 rounded-lg p-2.5">
             <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between">
-              <span>COOLDOWN</span>
-              <Clock className="w-3 h-3 text-[#FFD97A]" />
+              <span>COOLDOWN · DAILY</span>
+              <span
+                className={
+                  dailyTradesCount >= maxDailyTrades
+                    ? 'text-rose-400 font-bold'
+                    : 'text-[#FFD97A] font-bold'
+                }
+              >
+                {dailyTradesCount}/{maxDailyTrades}
+              </span>
             </div>
-            <div className="text-xs sm:text-sm font-bold text-white mt-1.5">
-              {cooldownRemainingSec > 0 ? (
+            <div className="text-xs sm:text-sm font-bold text-white mt-1.5 flex items-center justify-between">
+              {dailyTradesCount >= maxDailyTrades ? (
+                <span className="text-rose-400">
+                  Daily limit ({dailyTradesCount}/{maxDailyTrades})
+                </span>
+              ) : cooldownRemainingSec > 0 ? (
                 <span className="text-amber-400">
                   {Math.floor(cooldownRemainingSec / 60)}m {cooldownRemainingSec % 60}s
                 </span>
               ) : (
                 <span className={isStaleOrOffline ? 'text-neutral-500' : 'text-teal-400'}>
-                  Ready (Clear)
+                  Ready ({dailyTradesCount}/{maxDailyTrades})
                 </span>
               )}
             </div>
             <div className="text-[10px] text-neutral-400 mt-1">
-              1H ATR Setup · 1.5h Cooldown
+              {trendStateLabel} · 60m CD · {dailyTradesCount}/{maxDailyTrades} Today
             </div>
           </div>
         </div>
@@ -335,7 +396,7 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
                 <div className="text-[10px] text-neutral-400 uppercase tracking-wider mb-2 font-bold">
                   SIGNAL FIRING GATES (ALL REQUIRED)
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-[11px]">
+                <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-2 text-[11px]">
                   <div className="flex items-center gap-1.5">
                     {isSpotDotGreen ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
@@ -359,46 +420,106 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
                   </div>
 
                   <div className="flex items-center gap-1.5">
-                    {confidence >= 68 && !isSilent ? (
+                    {confidence >= requiredConfidence && !isSilent ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
                     ) : (
                       <XCircle className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
                     )}
-                    <span className={confidence >= 68 && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
-                      Conf &ge; 68 ({confidence.toFixed(0)}%)
+                    <span className={confidence >= requiredConfidence && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
+                      Conf &ge; {requiredConfidence} ({confidence.toFixed(0)}%)
                     </span>
                   </div>
 
                   <div className="flex items-center gap-1.5">
-                    {lead >= 22 && !isSilent ? (
+                    {lead >= requiredLead && !isSilent ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
                     ) : (
                       <XCircle className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
                     )}
-                    <span className={lead >= 22 && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
-                      Lead &ge; 22 (+{lead.toFixed(0)}%)
+                    <span className={lead >= requiredLead && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
+                      Lead &ge; {requiredLead} (+{lead.toFixed(0)}%)
                     </span>
                   </div>
 
                   <div className="flex items-center gap-1.5">
-                    {absorbDriveAgrees && !isSilent ? (
+                    {absorbDriveAgrees && absorbDriveMagnitudeOk && !isSilent ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
                     ) : (
                       <XCircle className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
                     )}
-                    <span className={absorbDriveAgrees && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
-                      Absorb/Drive ({absorbDriveScore > 0 ? '+BUY' : absorbDriveScore < 0 ? '-SELL' : '0'})
+                    <span className={absorbDriveAgrees && absorbDriveMagnitudeOk && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
+                      Absorb/Drive &ge;20 ({absorbDriveScore > 0 ? `+${absorbDriveScore}` : absorbDriveScore})
                     </span>
                   </div>
 
                   <div className="flex items-center gap-1.5">
-                    {cooldownRemainingSec === 0 ? (
+                    {hasVolumeSpike && !isSilent ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
+                    )}
+                    <span className={hasVolumeSpike && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
+                      Vol Spike &gt;1.5x ({volumeSpikeRatio.toFixed(2)}x)
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    {!htfTrendBlocked && !isSilent ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    )}
+                    <span className={!htfTrendBlocked && !isSilent ? 'text-neutral-200' : 'text-rose-300'}>
+                      HTF Trend ({trendStateLabel})
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    {!flowConflictBlocked && !isSilent ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    )}
+                    <span className={!flowConflictBlocked && !isSilent ? 'text-neutral-200' : 'text-rose-300'}>
+                      60s Flow ({flowBuy60sPct.toFixed(0)}%B / {flowSell60sPct.toFixed(0)}%S)
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    {!keyLevelOppositeBlocked && !newsBlocked && !lowLiquidityBlocked && !isSilent ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    )}
+                    <span className={!keyLevelOppositeBlocked && !newsBlocked && !lowLiquidityBlocked && !isSilent ? 'text-neutral-200' : 'text-rose-300'}>
+                      {newsBlocked
+                        ? `News Lock (${newsBlockedTitle || 'USD'})`
+                        : lowLiquidityBlocked
+                        ? `Low Liq (${vol1mBtc} BTC)`
+                        : keyLevelOppositeBlocked
+                        ? 'Opposite Level (<0.5R)'
+                        : `Levels & Liq (${vol1mBtc} BTC/m)`}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    {cooldownRemainingSec === 0 && dailyTradesCount < maxDailyTrades ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
                     ) : (
                       <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                     )}
-                    <span className={cooldownRemainingSec === 0 ? 'text-neutral-200' : 'text-amber-400'}>
-                      Cooldown {cooldownRemainingSec === 0 ? 'Clear' : `(${cooldownRemainingSec}s)`}
+                    <span
+                      className={
+                        cooldownRemainingSec === 0 && dailyTradesCount < maxDailyTrades
+                          ? 'text-neutral-200'
+                          : 'text-amber-400'
+                      }
+                    >
+                      {dailyTradesCount >= maxDailyTrades
+                        ? `Daily (${dailyTradesCount}/${maxDailyTrades})`
+                        : cooldownRemainingSec === 0
+                        ? `Clear (${dailyTradesCount}/${maxDailyTrades})`
+                        : `CD (${cooldownRemainingSec}s) · ${dailyTradesCount}/${maxDailyTrades}`}
                     </span>
                   </div>
                 </div>

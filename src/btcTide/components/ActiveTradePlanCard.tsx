@@ -12,10 +12,12 @@ import {
   ArrowDownRight,
   CheckCircle2,
   Lock,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface ActiveTradePlanCardProps {
   trade: BtcTideTradeRecord | null;
+  lastClosedTrade?: BtcTideTradeRecord | null;
   currentPrice: number | null;
   status: BtcFeedStatus;
   isSpotStale?: boolean;
@@ -32,13 +34,16 @@ function formatPrice(val: number | null): string {
 
 function formatCountdown(targetMs: number): string {
   const diffSec = Math.max(0, Math.floor((targetMs - Date.now()) / 1000));
-  const mm = String(Math.floor(diffSec / 60)).padStart(2, '0');
+  const hh = Math.floor(diffSec / 3600);
+  const mm = String(Math.floor((diffSec % 3600) / 60)).padStart(2, '0');
   const ss = String(diffSec % 60).padStart(2, '0');
-  return `${mm}:${ss}`;
+  return hh > 0 ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
+const MAX_TRADE_LIFETIME_MS = 3 * 60 * 60 * 1000;
+
 export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.memo(
-  ({ trade, currentPrice, status, isSpotStale = false, spotAgeMs = 0 }) => {
+  ({ trade, lastClosedTrade = null, currentPrice, status, isSpotStale = false, spotAgeMs = 0 }) => {
     const isStaleOrOffline = isSpotStale || status === 'STALE' || status === 'OFFLINE';
     const ageLabel =
       spotAgeMs > 0 && spotAgeMs < 999999 ? `${(spotAgeMs / 1000).toFixed(1)}s` : '--';
@@ -47,16 +52,25 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
     useEffect(() => {
       if (!trade) return;
       const update = () => {
-        setExpiryCountdown(formatCountdown(trade.expiryTime));
+        const target = trade.tp1Hit
+          ? trade.entryTime + MAX_TRADE_LIFETIME_MS
+          : trade.expiryTime;
+        setExpiryCountdown(formatCountdown(target));
       };
       update();
       const interval = setInterval(update, 1000);
       return () => clearInterval(interval);
-    }, [trade?.expiryTime]);
+    }, [trade?.expiryTime, trade?.entryTime, trade?.tp1Hit]);
+
+    const expiredAlertTrade =
+      lastClosedTrade &&
+      (lastClosedTrade.outcome === 'EXPIRED' || lastClosedTrade.outcome === 'EXPIRED_AFTER_TP1')
+        ? lastClosedTrade
+        : null;
 
     if (!trade) {
       return (
-        <div className="bg-[#08080a] border border-[#E8B84A]/20 rounded-xl p-4 sm:p-5 backdrop-blur-md shadow-[0_4px_24px_rgba(0,0,0,0.5)] flex flex-col justify-between">
+        <div className="bg-[#08080a] border border-[#E8B84A]/20 rounded-xl p-4 sm:p-5 backdrop-blur-md shadow-[0_4px_24px_rgba(0,0,0,0.5)] flex flex-col justify-between space-y-3">
           <div className="flex items-center justify-between pb-3 border-b border-white/5">
             <div className="flex items-center gap-2">
               <Crosshair className="w-4 h-4 text-[#FFD97A]" />
@@ -74,6 +88,38 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             </span>
           </div>
 
+          {expiredAlertTrade && (
+            <div className="rounded-lg bg-amber-950/50 border border-amber-500/50 px-3.5 py-2.5 font-mono text-xs flex flex-wrap items-center justify-between gap-2 text-amber-200">
+              <div className="flex items-center gap-2 font-bold text-amber-300">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>
+                  {expiredAlertTrade.outcome === 'EXPIRED_AFTER_TP1'
+                    ? 'MAX 3H LIFETIME AFTER TP1 - CLOSE AT MARKET'
+                    : 'SIGNAL EXPIRED - CLOSE AT MARKET'}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-[11px]">
+                <span>
+                  Entry: <strong className="text-white">{formatPrice(expiredAlertTrade.entryPrice)}</strong>
+                </span>
+                <span>
+                  Close: <strong className="text-white">{formatPrice(expiredAlertTrade.closePrice)}</strong>
+                </span>
+                <span>
+                  Real Locked R:{' '}
+                  <strong
+                    className={
+                      (expiredAlertTrade.realizedR ?? 0) >= 0 ? 'text-teal-300' : 'text-rose-300'
+                    }
+                  >
+                    {(expiredAlertTrade.realizedR ?? 0) >= 0 ? '+' : ''}
+                    {(expiredAlertTrade.realizedR ?? 0).toFixed(2)}R
+                  </strong>
+                </span>
+              </div>
+            </div>
+          )}
+
           <div className="py-8 flex flex-col items-center justify-center text-center font-mono space-y-2">
             <div className="w-12 h-12 rounded-full border border-dashed border-[#E8B84A]/40 flex items-center justify-center text-[#FFD97A] animate-pulse">
               <Crosshair className="w-6 h-6" />
@@ -82,8 +128,8 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
               NO ACTIVE TRADE IN PROGRESS
             </div>
             <div className="text-neutral-400 text-[11px] max-w-sm">
-              Live signal engine running on 1-sec real ticks. Awaiting setup meeting &ge; 68% confidence,
-              &ge; 22% lead, and agreed Absorb/Drive flow.
+              Live signal engine running on 1-sec real ticks. Awaiting setup meeting &ge; 75% confidence,
+              &ge; 30% lead, HTF 1H/4H trend alignment, and 90s confirmation.
             </div>
           </div>
         </div>
@@ -92,6 +138,9 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
 
     const isLong = trade.side === 'LONG';
     const isProfitable = trade.currentR >= 0;
+    const slDistDollars = Math.round(
+      Math.abs(trade.entryPrice - trade.initialSlPrice) || trade.oneR
+    );
 
     // Progress through R targets
     const progressR = Math.max(-1.5, Math.min(3.5, trade.currentR));
@@ -135,7 +184,7 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
                 )}
 
                 <span className="text-[10px] text-neutral-400">
-                  TRIGGERED: {new Date(trade.entryTime).toTimeString().split(' ')[0]} UTC
+                  TRIGGERED: {new Date(trade.entryTime).toISOString().slice(11, 19)} UTC
                 </span>
               </div>
 
@@ -171,10 +220,10 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
               </div>
             </div>
 
-            {/* 15m Expiry Countdown */}
+            {/* 30m Expiry Countdown (or 3h Max Lifetime Countdown after TP1) */}
             <div className="px-2.5 py-1.5 rounded-lg bg-black/60 border border-white/10 text-neutral-300 flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5 text-[#FFD97A]" />
-              <span>EXP: {expiryCountdown}</span>
+              <span>{trade.tp1Hit ? `BE STOP (MAX 3H: ${expiryCountdown})` : `EXP: ${expiryCountdown}`}</span>
             </div>
           </div>
         </div>
@@ -190,7 +239,7 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             }`}
           >
             <div className="text-[10px] text-neutral-400 uppercase flex items-center justify-between">
-              <span>{trade.beMoved ? 'BE STOP (100%)' : 'STOP LOSS (1.5× ATR)'}</span>
+              <span>{trade.beMoved ? 'BE STOP (100%)' : `STOP LOSS $${slDistDollars} = 1R`}</span>
               {trade.beMoved && <Lock className="w-3 h-3 text-amber-400" />}
             </div>
             <div className="text-sm font-bold text-rose-300 mt-1">
@@ -199,7 +248,7 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             <div className="text-[10px] text-neutral-400 mt-0.5">
               {trade.beMoved
                 ? 'Moved to Entry'
-                : `-$${Math.abs(trade.entryPrice - trade.initialSlPrice).toFixed(0)} Loss`}
+                : `-$${slDistDollars} Loss (-1R)`}
             </div>
           </div>
 
@@ -210,11 +259,11 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
               {formatPrice(trade.entryPrice)}
             </div>
             <div className="text-[10px] text-neutral-400 mt-0.5">
-              1H ATR = ${trade.oneR.toFixed(0)}
+              1R = ${slDistDollars}
             </div>
           </div>
 
-          {/* TP1 (1x ATR) */}
+          {/* TP1 (1R) */}
           <div
             className={`border rounded-lg p-2.5 ${
               trade.tp1Hit
@@ -223,7 +272,7 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             }`}
           >
             <div className="text-[10px] text-teal-400 uppercase flex items-center justify-between">
-              <span>TP1 (1× ATR)</span>
+              <span>TP1 (1R)</span>
               {trade.tp1Hit && <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />}
             </div>
             <div className="text-sm font-bold text-teal-300 mt-1">
@@ -234,7 +283,7 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             </div>
           </div>
 
-          {/* TP2 (2x ATR) */}
+          {/* TP2 (2R) */}
           <div
             className={`border rounded-lg p-2.5 ${
               trade.tp2Hit
@@ -243,7 +292,7 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             }`}
           >
             <div className="text-[10px] text-teal-400 uppercase flex items-center justify-between">
-              <span>TP2 (2× ATR)</span>
+              <span>TP2 (2R)</span>
               {trade.tp2Hit && <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />}
             </div>
             <div className="text-sm font-bold text-teal-300 mt-1">
@@ -254,7 +303,7 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             </div>
           </div>
 
-          {/* TP3 (3x ATR) */}
+          {/* TP3 (3R) */}
           <div
             className={`border rounded-lg p-2.5 ${
               trade.tp3Hit
@@ -263,7 +312,7 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
             }`}
           >
             <div className="text-[10px] text-teal-400 uppercase flex items-center justify-between">
-              <span>TP3 (3× ATR)</span>
+              <span>TP3 (3R)</span>
               {trade.tp3Hit && <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />}
             </div>
             <div className="text-sm font-bold text-teal-300 mt-1">
@@ -278,11 +327,13 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
         {/* Live R Progress Track Bar */}
         <div className="bg-black/40 border border-white/5 rounded-lg p-3 font-mono text-xs">
           <div className="flex items-center justify-between text-[11px] mb-1.5">
-            <span className="text-rose-400 font-semibold">SL (-1.5× ATR)</span>
+            <span className="text-rose-400 font-semibold">
+              {trade.beMoved ? 'BE STOP (0R)' : `STOP LOSS $${slDistDollars} = 1R`}
+            </span>
             <span className="text-neutral-400">ENTRY</span>
-            <span className="text-teal-400 font-semibold">TP1 (1× ATR)</span>
-            <span className="text-teal-300 font-semibold">TP2 (2× ATR)</span>
-            <span className="text-[#FFD97A] font-bold">TP3 (3× ATR)</span>
+            <span className="text-teal-400 font-semibold">TP1 (1R)</span>
+            <span className="text-teal-300 font-semibold">TP2 (2R)</span>
+            <span className="text-[#FFD97A] font-bold">TP3 (3R)</span>
           </div>
 
           <div className="relative h-2.5 bg-neutral-900 rounded-full overflow-hidden border border-white/10">

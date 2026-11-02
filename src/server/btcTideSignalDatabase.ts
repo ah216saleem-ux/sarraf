@@ -22,7 +22,7 @@ export interface BtcTideTradeRecord {
   tp3Hit: boolean;
   beMoved: boolean;
   status: 'ACTIVE' | 'TP1_HIT_BE_ACTIVE' | 'TP2_HIT' | 'CLOSED';
-  outcome: 'SL' | 'TP1+BE' | 'TP2' | 'TP3' | 'EXPIRED' | null;
+  outcome: 'SL' | 'TP1+BE' | 'TP2' | 'TP3' | 'EXPIRED' | 'EXPIRED_AFTER_TP1' | 'VOID' | null;
   realizedR: number | null;
   closedAt: number | null;
   closePrice: number | null;
@@ -31,6 +31,11 @@ export interface BtcTideTradeRecord {
   lead: number;
   triggerReason: string;
   engine_version?: string;
+  componentScores?: Record<string, number> | null;
+  trendState?: string | null;
+  flowBuyPct?: number | null;
+  atrShort?: number | null;
+  atr1h?: number | null;
 }
 
 export interface BtcTideDatabaseState {
@@ -40,17 +45,88 @@ export interface BtcTideDatabaseState {
   updatedAt: number;
 }
 
+export interface WorstLosingComponentStat {
+  id: string;
+  name: string;
+  count: number;
+  totalLossesWithData: number;
+}
+
 export interface BtcTideStats {
   totalClosed: number;
   winsCount: number;
   lossesCount: number;
   winRate: number | null; // null if < 10 closed trades
   avgR: number | null; // null if < 10 closed trades
+  expectancy?: number | null;
+  slRate?: number | null;
+  expiredRate?: number | null;
+  worstLosingComponent?: WorstLosingComponentStat | null;
   tp1BeCount: number;
   tp2Count: number;
   tp3Count: number;
   slCount: number;
   expiredCount: number;
+}
+
+const COMPONENT_DISPLAY_NAMES: Record<string, string> = {
+  delta_flow: 'Delta Flow (60s)',
+  cvd_divergence: 'CVD Divergence (3m)',
+  absorb_drive: 'Absorb / Drive (60s)',
+  order_book_imbalance: 'Order Book Depth (L2)',
+  oi_price_direction: 'OI + Price Regime',
+  funding_rate: 'Perp Funding Rate',
+  liquidations: 'Forced Liquidations',
+  perp_basis: 'Perp vs Spot Basis',
+};
+
+export function computeWorstLosingComponent(
+  closedTrades: BtcTideTradeRecord[]
+): WorstLosingComponentStat | null {
+  const losingTrades = closedTrades.filter(
+    (t) =>
+      (t.outcome === 'SL' || (typeof t.realizedR === 'number' && t.realizedR < 0)) &&
+      t.componentScores &&
+      typeof t.componentScores === 'object'
+  );
+  if (losingTrades.length === 0) return null;
+
+  const counts: Record<string, { count: number; sumMag: number }> = {};
+
+  for (const t of losingTrades) {
+    const scores = t.componentScores!;
+    for (const [compId, rawVal] of Object.entries(scores)) {
+      const score = Number(rawVal);
+      if (!Number.isFinite(score) || score === 0) continue;
+      const agreedWithLosingSide =
+        (t.side === 'LONG' && score > 0) || (t.side === 'SHORT' && score < 0);
+      if (agreedWithLosingSide) {
+        if (!counts[compId]) counts[compId] = { count: 0, sumMag: 0 };
+        counts[compId].count += 1;
+        counts[compId].sumMag += Math.abs(score);
+      }
+    }
+  }
+
+  let bestId: string | null = null;
+  let bestCount = 0;
+  let bestMag = -1;
+
+  for (const [compId, stat] of Object.entries(counts)) {
+    if (stat.count > bestCount || (stat.count === bestCount && stat.sumMag > bestMag)) {
+      bestId = compId;
+      bestCount = stat.count;
+      bestMag = stat.sumMag;
+    }
+  }
+
+  if (!bestId || bestCount === 0) return null;
+  return {
+    id: bestId,
+    name: COMPONENT_DISPLAY_NAMES[bestId] || bestId,
+    count: bestCount,
+    totalLossesWithData: losingTrades.length,
+  };
 }
 
 let dbState: BtcTideDatabaseState = {
@@ -90,9 +166,9 @@ export function saveBtcTideDatabase(): void {
 }
 
 export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTideStats {
-  // Only consider trades from Phase 6 fixes (engine_version >= 'v6.0' or explicit v6.0)
+  // Only consider trades from Phase 6 fixes (engine_version >= 'v6.0' or explicit v6.0), and exclude VOID trades
   const validTrades = closedTrades.filter(
-    (t) => !t.engine_version || t.engine_version >= 'v6.0'
+    (t) => t.outcome !== 'VOID' && (!t.engine_version || t.engine_version >= 'v6.0')
   );
 
   if (validTrades.length === 0) {
@@ -102,6 +178,10 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
       lossesCount: 0,
       winRate: null,
       avgR: null,
+      expectancy: null,
+      slRate: null,
+      expiredRate: null,
+      worstLosingComponent: null,
       tp1BeCount: 0,
       tp2Count: 0,
       tp3Count: 0,
@@ -113,6 +193,8 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
   let winsCount = 0;
   let lossesCount = 0;
   let sumR = 0;
+  let sumWinR = 0;
+  let sumLossAbsR = 0;
   let tp1BeCount = 0;
   let tp2Count = 0;
   let tp3Count = 0;
@@ -123,25 +205,47 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
     const r = typeof t.realizedR === 'number' ? t.realizedR : 0;
     sumR += r;
 
-    // Strict win vs loss vs expired logic (EXPIRED is NOT a win)
-    if (t.outcome === 'TP1+BE' || t.outcome === 'TP2' || t.outcome === 'TP3') {
+    // Strict win vs loss vs expired logic (EXPIRED is NOT a win; EXPIRED_AFTER_TP1 locked >= +0.5R at TP1)
+    if (
+      t.outcome === 'TP1+BE' ||
+      t.outcome === 'TP2' ||
+      t.outcome === 'TP3' ||
+      (t.outcome === 'EXPIRED_AFTER_TP1' && r > 0)
+    ) {
       winsCount++;
+      sumWinR += Math.max(0, r);
     } else if (t.outcome === 'SL') {
       lossesCount++;
+      sumLossAbsR += Math.abs(r);
     } else if (t.outcome === 'EXPIRED') {
       expiredCount++;
     }
 
-    if (t.outcome === 'TP1+BE') tp1BeCount++;
+    if (t.outcome === 'EXPIRED_AFTER_TP1') {
+      expiredCount++;
+      tp1BeCount++;
+    } else if (t.outcome === 'TP1+BE') tp1BeCount++;
     else if (t.outcome === 'TP2') tp2Count++;
     else if (t.outcome === 'TP3') tp3Count++;
     else if (t.outcome === 'SL') slCount++;
   }
 
   const totalClosed = validTrades.length;
-  // Win rate and average R show "--" (null) until at least 10 real closed trades exist
-  const winRate = totalClosed >= 10 ? Number(((winsCount / totalClosed) * 100).toFixed(1)) : null;
-  const avgR = totalClosed >= 10 ? Number((sumR / totalClosed).toFixed(2)) : null;
+  const winRate = totalClosed > 0 ? Number(((winsCount / totalClosed) * 100).toFixed(1)) : null;
+  const avgR = totalClosed > 0 ? Number((sumR / totalClosed).toFixed(2)) : null;
+  const winProb = totalClosed > 0 ? winsCount / totalClosed : 0;
+  const lossProb = totalClosed > 0 ? lossesCount / totalClosed : 0;
+  const avgWinR = winsCount > 0 ? sumWinR / winsCount : 0;
+  const avgLossAbsR = lossesCount > 0 ? sumLossAbsR / lossesCount : 0;
+  const expectancy =
+    totalClosed > 0
+      ? Number((winProb * avgWinR - lossProb * avgLossAbsR).toFixed(2))
+      : null;
+  const slRate =
+    totalClosed > 0 ? Number(((slCount / totalClosed) * 100).toFixed(1)) : null;
+  const expiredRate =
+    totalClosed > 0 ? Number(((expiredCount / totalClosed) * 100).toFixed(1)) : null;
+  const worstLosingComponent = computeWorstLosingComponent(validTrades);
 
   return {
     totalClosed,
@@ -149,6 +253,10 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
     lossesCount,
     winRate,
     avgR,
+    expectancy,
+    slRate,
+    expiredRate,
+    worstLosingComponent,
     tp1BeCount,
     tp2Count,
     tp3Count,

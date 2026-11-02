@@ -715,7 +715,7 @@ export function useDojiFeed(
     ) => {
       if (!quote) return;
 
-      const stateStr = (quote.marketState || quote.status || '').toLowerCase();
+      const stateStr = String(quote.marketState || quote.status || '').toLowerCase();
       const closed =
         quote.marketOpen === false
           ? true

@@ -398,8 +398,8 @@ function computeEventGoldHistoryInput(
 
 export function isLowImpactEvent(evt: any): boolean {
   if (!evt) return false;
-  const imp = (evt.impact || '').toLowerCase();
-  const t = (evt.title || '').toLowerCase();
+  const imp = String(evt.impact || '').toLowerCase();
+  const t = String(evt.title || '').toLowerCase();
   return (
     imp === 'low' ||
     imp === 'holiday' ||

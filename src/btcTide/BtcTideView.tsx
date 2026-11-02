@@ -14,7 +14,7 @@ import { BtcTideDecisionCard } from './components/BtcTideDecisionCard';
 import { ActiveTradePlanCard } from './components/ActiveTradePlanCard';
 import { SignalLogTableCard } from './components/SignalLogTableCard';
 import { BtcTideDebugDrawer } from './components/BtcTideDebugDrawer';
-import { Waves, Clock, Activity, Layers, Zap, Target } from 'lucide-react';
+import { Waves, Clock, Activity, Layers, Zap, Target, AlertTriangle, ShieldCheck, ShieldAlert, Send } from 'lucide-react';
 
 export type BtcTideSubTab = 'FLOW' | 'BOOK' | 'PERPS' | 'SIGNALS';
 
@@ -46,7 +46,15 @@ export const BtcTideView: React.FC = () => {
     recentTrades,
     largePrints,
     heatmapHistory,
+    liveSelfCheck,
+    telegramTelemetry,
   } = store;
+
+  const telemetry = telegramTelemetry || liveSelfCheck?.telegramTelemetry;
+  const lastTelegramSentStr = useMemo(() => {
+    if (!telemetry?.lastMessageSentAt) return 'None yet';
+    return `${new Date(telemetry.lastMessageSentAt).toISOString().slice(11, 19)} UTC`;
+  }, [telemetry?.lastMessageSentAt]);
 
   const [activeSubTab, setActiveSubTab] = useState<BtcTideSubTab>('FLOW');
 
@@ -220,7 +228,127 @@ export const BtcTideView: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {/* 24/7 Live Dispatch Self-Check & Telegram Outbox Telemetry Row */}
+        <div className="mt-2.5 pt-2.5 border-t border-white/10 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px]">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Live Dispatch Badge */}
+            {liveSelfCheck?.liveDispatchActive ? (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 font-bold text-[10px]">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                24/7 AUTO ENGINE: ON · REAL TELEGRAM DISPATCH
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/15 border border-amber-500/40 text-amber-300 font-bold text-[10px]">
+                <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                24/7 ENGINE RUNNING · TELEGRAM QUEUING:{' '}
+                {liveSelfCheck?.blockingReasons?.length
+                  ? liveSelfCheck.blockingReasons.join(' · ')
+                  : 'Verifying Telegram...'}
+              </span>
+            )}
+
+            {/* 7-Point Startup & Live Self-Check Pills */}
+            {liveSelfCheck?.checks && (
+              <div className="flex flex-wrap items-center gap-1">
+                {liveSelfCheck.checks.map((chk) => (
+                  <span
+                    key={chk.id}
+                    title={`${chk.label}: ${chk.detail}`}
+                    className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border cursor-help ${
+                      chk.passed
+                        ? 'bg-emerald-950/50 border-emerald-500/30 text-emerald-300'
+                        : 'bg-rose-950/60 border-rose-500/50 text-rose-300'
+                    }`}
+                  >
+                    {chk.passed ? '✓' : '✗'} {chk.label}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Telegram Outbox Telemetry: Last Sent Time, Queue Size, Sent Today */}
+          <div className="flex flex-wrap items-center gap-2 px-2.5 py-1 rounded-lg bg-black/60 border border-white/10 text-[10px] text-neutral-300">
+            <span className="flex items-center gap-1 text-[#FFD97A] font-semibold">
+              <Send className="w-3 h-3" />
+              TELEGRAM
+            </span>
+            <span className="text-white/20">|</span>
+            <span>
+              Last Sent: <strong className="text-white">{lastTelegramSentStr}</strong>
+            </span>
+            <span className="text-white/20">|</span>
+            <span>
+              Queue:{' '}
+              <strong
+                className={
+                  (telemetry?.queueSize ?? 0) > 0 ? 'text-amber-300' : 'text-emerald-400'
+                }
+              >
+                {telemetry?.queueSize ?? 0}
+              </strong>
+            </span>
+            <span className="text-white/20">|</span>
+            <span>
+              Sent Today:{' '}
+              <strong className="text-teal-300">{telemetry?.totalMessagesSentToday ?? 0}</strong>
+            </span>
+          </div>
+        </div>
       </div>
+
+      {/* Dashboard Alert Banner when latest signal expired (30m pre-TP1 or 3h max lifetime after TP1) */}
+      {!activeTrade &&
+        (closedTrades[0]?.outcome === 'EXPIRED' ||
+          closedTrades[0]?.outcome === 'EXPIRED_AFTER_TP1') && (
+          <div className="bg-amber-950/60 border border-amber-500/50 rounded-xl px-3.5 py-2.5 font-mono text-xs flex flex-wrap items-center justify-between gap-2 text-amber-200 shadow-[0_4px_16px_rgba(0,0,0,0.4)]">
+            <div className="flex items-center gap-2 font-bold text-amber-300">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>
+                {closedTrades[0].outcome === 'EXPIRED_AFTER_TP1'
+                  ? `MAX 3H LIFETIME AFTER TP1 - CLOSE AT MARKET (${closedTrades[0].side})`
+                  : `SIGNAL EXPIRED - CLOSE AT MARKET (${closedTrades[0].side})`}
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 text-[11px]">
+              <span>
+                Entry:{' '}
+                <strong className="text-white">
+                  $
+                  {closedTrades[0].entryPrice.toLocaleString('en-US', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </strong>
+              </span>
+              <span>
+                Close Price:{' '}
+                <strong className="text-white">
+                  $
+                  {(closedTrades[0].closePrice ?? closedTrades[0].entryPrice).toLocaleString(
+                    'en-US',
+                    {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    }
+                  )}
+                </strong>
+              </span>
+              <span>
+                Real R:{' '}
+                <strong
+                  className={
+                    (closedTrades[0].realizedR ?? 0) >= 0 ? 'text-teal-300' : 'text-rose-300'
+                  }
+                >
+                  {(closedTrades[0].realizedR ?? 0) >= 0 ? '+' : ''}
+                  {(closedTrades[0].realizedR ?? 0).toFixed(2)}R
+                </strong>
+              </span>
+            </div>
+          </div>
+        )}
 
       {/* 2. Top Hero: LIQUIDITY TAPE Data-Literal Canvas */}
       <LiquidityTapeCanvas
@@ -368,6 +496,7 @@ export const BtcTideView: React.FC = () => {
           {/* Active Trade Card */}
           <ActiveTradePlanCard
             trade={activeTrade}
+            lastClosedTrade={closedTrades[0] || null}
             currentPrice={currentPrice}
             status={status}
             isSpotStale={feedStale?.spot}

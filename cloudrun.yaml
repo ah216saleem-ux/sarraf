@@ -26,6 +26,8 @@ spec:
               value: "production"
             - name: DATA_DIR
               value: "/app/data"
+            - name: BTC_TIDE_DRY_RUN
+              value: "false"
           resources:
             limits:
               cpu: "2"

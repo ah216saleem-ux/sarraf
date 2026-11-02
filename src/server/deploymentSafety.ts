@@ -7,10 +7,15 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export const DATA_DIR = "/app/data";
-try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+export const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : '/app/data';
+try {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+} catch {}
 
 const LEASE_FILE = path.resolve(DATA_DIR, 'instance_lease.json');
+const REPO_LEASE_FILE = path.resolve(process.cwd(), 'data', 'instance_lease.json');
 const BACKUPS_DIR = path.resolve(DATA_DIR, 'backups');
 const RESTART_LOG_FILE = path.resolve(DATA_DIR, 'restarts.json');
 const PERSISTENCE_MARKER_FILE = path.resolve(DATA_DIR, '.sarraf_persisted');
@@ -155,17 +160,75 @@ export function checkDataDirectory(): {
 }
 
 // -------------------------------------------------------------
-// 3. SINGLE-INSTANCE LEASE LOCK
 // -------------------------------------------------------------
+// 3. SINGLE-INSTANCE LEASE LOCK (10s Heartbeat, 45s Stale Auto-Takeover)
+// -------------------------------------------------------------
+const LEASE_HEARTBEAT_INTERVAL_MS = 10_000; // 10s heartbeat
+const LEASE_STALE_THRESHOLD_MS = 45_000; // 45s stale threshold
+
+function isLocalPidAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    return err?.code === 'EPERM';
+  }
+}
+
+function isExistingLeaseLiveAnotherInstance(
+  existingLease: InstanceLease | null,
+  nowMs: number
+): boolean {
+  if (!existingLease || !existingLease.instanceId) return false;
+  if (existingLease.instanceId === CURRENT_INSTANCE_ID) return false;
+
+  const lastHb = new Date(existingLease.heartbeatAt).getTime();
+  if (!Number.isFinite(lastHb)) return false;
+
+  const ageMs = nowMs - lastHb;
+  // Stale lease (> 45s old) or far-future clock skew -> take over immediately
+  if (ageMs > LEASE_STALE_THRESHOLD_MS || ageMs < -LEASE_STALE_THRESHOLD_MS) {
+    return false;
+  }
+
+  // If on the same host, verify the PID is actually alive
+  if (existingLease.hostname === os.hostname() && !isLocalPidAlive(existingLease.pid)) {
+    return false;
+  }
+
+  return true;
+}
+
+function writeCurrentInstanceLease(acquiredAtIso?: string): void {
+  const nowIso = new Date().toISOString();
+  const newLease: InstanceLease = {
+    instanceId: CURRENT_INSTANCE_ID,
+    pid: process.pid,
+    hostname: os.hostname(),
+    acquiredAt: acquiredAtIso || nowIso,
+    heartbeatAt: nowIso,
+    version: '6.4.0-PROD',
+  };
+  writeJsonAtomic(LEASE_FILE, newLease);
+  isLeaseHeld = true;
+}
+
 export function acquireInstanceLease(): boolean {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
 
-    const now = Date.now();
-    const LEASE_TTL_MS = 25000; // 25s expiration
+    // Remove any stale repo-shipped data/instance_lease.json if separate from LEASE_FILE
+    if (REPO_LEASE_FILE !== LEASE_FILE && fs.existsSync(REPO_LEASE_FILE)) {
+      try {
+        fs.unlinkSync(REPO_LEASE_FILE);
+      } catch {}
+    }
 
+    const now = Date.now();
     let existingLease: InstanceLease | null = null;
     if (fs.existsSync(LEASE_FILE)) {
       try {
@@ -175,39 +238,29 @@ export function acquireInstanceLease(): boolean {
       }
     }
 
-    if (existingLease) {
-      const lastHb = new Date(existingLease.heartbeatAt).getTime();
-      const isAlive = now - lastHb < LEASE_TTL_MS;
-
-      if (isAlive && existingLease.instanceId !== CURRENT_INSTANCE_ID) {
-        console.warn(
-          `[DEPLOYMENT SAFETY] Another active instance is holding the lease (Instance: ${existingLease.instanceId}, PID: ${existingLease.pid}, Last HB: ${existingLease.heartbeatAt}). Running in passive STANDBY mode.`
+    if (isExistingLeaseLiveAnotherInstance(existingLease, now)) {
+      console.warn(
+        `[DEPLOYMENT SAFETY] Another live instance holds a fresh lease (<=45s) (Instance: ${existingLease!.instanceId}, PID: ${existingLease!.pid}, Last HB: ${existingLease!.heartbeatAt}). Running in passive mode; will re-check every 10s.`
+      );
+      isLeaseHeld = false;
+    } else {
+      if (existingLease && existingLease.instanceId !== CURRENT_INSTANCE_ID) {
+        console.log(
+          `[DEPLOYMENT SAFETY] Taking over stale/dead instance lease from ${existingLease.instanceId} (PID: ${existingLease.pid}, Last HB: ${existingLease.heartbeatAt}).`
         );
-        isLeaseHeld = false;
-        return false;
       }
+      writeCurrentInstanceLease(
+        existingLease?.instanceId === CURRENT_INSTANCE_ID ? existingLease.acquiredAt : undefined
+      );
     }
 
-    // Acquire lease
-    const newLease: InstanceLease = {
-      instanceId: CURRENT_INSTANCE_ID,
-      pid: process.pid,
-      hostname: os.hostname(),
-      acquiredAt: new Date().toISOString(),
-      heartbeatAt: new Date().toISOString(),
-      version: '5.0.0-PROD',
-    };
-
-    writeJsonAtomic(LEASE_FILE, newLease);
-    isLeaseHeld = true;
-
-    // Start heartbeat timer
+    // Start 10s heartbeat & auto-takeover timer
     if (leaseHeartbeatTimer) clearInterval(leaseHeartbeatTimer);
     leaseHeartbeatTimer = setInterval(() => {
       renewLeaseHeartbeat();
-    }, 8000);
+    }, LEASE_HEARTBEAT_INTERVAL_MS);
 
-    return true;
+    return isLeaseHeld;
   } catch (err: any) {
     console.error('[DEPLOYMENT SAFETY] Error acquiring instance lease:', err.message);
     return false;
@@ -215,15 +268,31 @@ export function acquireInstanceLease(): boolean {
 }
 
 export function renewLeaseHeartbeat() {
-  if (!isLeaseHeld) return;
   try {
+    const now = Date.now();
+    let existingLease: InstanceLease | null = null;
     if (fs.existsSync(LEASE_FILE)) {
-      const leaseData: InstanceLease = JSON.parse(fs.readFileSync(LEASE_FILE, 'utf-8'));
-      if (leaseData.instanceId === CURRENT_INSTANCE_ID) {
-        leaseData.heartbeatAt = new Date().toISOString();
-        writeJsonAtomic(LEASE_FILE, leaseData);
+      try {
+        existingLease = JSON.parse(fs.readFileSync(LEASE_FILE, 'utf-8'));
+      } catch {
+        existingLease = null;
       }
     }
+
+    if (!existingLease || existingLease.instanceId === CURRENT_INSTANCE_ID) {
+      writeCurrentInstanceLease(existingLease?.acquiredAt);
+      return;
+    }
+
+    if (!isExistingLeaseLiveAnotherInstance(existingLease, now)) {
+      console.log(
+        `[DEPLOYMENT SAFETY] Taking over expired/stale lease from ${existingLease.instanceId} on heartbeat check.`
+      );
+      writeCurrentInstanceLease();
+      return;
+    }
+
+    isLeaseHeld = false;
   } catch (err: any) {
     console.warn('[DEPLOYMENT SAFETY] Lease heartbeat renewal failed:', err.message);
   }
@@ -250,8 +319,13 @@ export function releaseInstanceLease() {
 }
 
 export function isCurrentLeaseHolder(): boolean {
+  if (!isLeaseHeld) {
+    renewLeaseHeartbeat();
+  }
   return isLeaseHeld;
 }
+
+export const isCurrentInstanceLeaseHolder = isCurrentLeaseHolder;
 
 // -------------------------------------------------------------
 // 4. CLOCK DRIFT CHECK (Warns if server vs feed > 3 seconds)
@@ -547,7 +621,8 @@ export function triggerAdminTelegramAlert(alertType: string, message: string): b
   }
 
   // Prevent invalid or self-bot chat IDs
-  if (chatId && (chatId.toLowerCase() === '@sarraftelegrambot' || chatId.toLowerCase() === 'sarraftelegrambot' || chatId === '8737269513')) {
+  const chatIdStr = String(chatId || '').toLowerCase().trim();
+  if (chatIdStr && (chatIdStr === '@sarraftelegrambot' || chatIdStr === 'sarraftelegrambot' || chatIdStr === '8737269513')) {
     chatId = undefined;
   }
 

@@ -314,6 +314,11 @@ function connectBackendSse() {
           closedTrades: data.closedTrades || [],
           signalStats: data.signalStats || currentState.signalStats,
           activeSignal,
+          liveSelfCheck: data.liveSelfCheck || currentState.liveSelfCheck,
+          telegramTelemetry:
+            data.telegramTelemetry ||
+            data.liveSelfCheck?.telegramTelemetry ||
+            currentState.telegramTelemetry,
           heatmapHistory: updatedHeatmapHistory,
           latestHeatmap: data.latestHeatmap || currentState.latestHeatmap,
         };
@@ -397,6 +402,11 @@ async function fetchInitialBackendState() {
         closedTrades: json.closedTrades || [],
         signalStats: json.signalStats || currentState.signalStats,
         activeSignal,
+        liveSelfCheck: json.liveSelfCheck || currentState.liveSelfCheck,
+        telegramTelemetry:
+          json.telegramTelemetry ||
+          json.liveSelfCheck?.telegramTelemetry ||
+          currentState.telegramTelemetry,
         heatmapHistory: initialHeatmapHistory,
         latestHeatmap: json.latestHeatmap || initialHeatmapHistory[initialHeatmapHistory.length - 1],
       };

@@ -47,8 +47,6 @@ import {
 } from "./telegramSubscribers.ts";
 import {
   getBackendSnapshot,
-  isBtcTidePaused,
-  setBtcTidePaused,
   resetBtcTideCooldown,
   manualCloseBtcTideTrade,
   triggerLiveBtcTideSignalFromTelegram,
@@ -95,33 +93,48 @@ function savePollingOffset(offset: number) {
 
 let dynamicChatId: string | null = null;
 
+export function sanitizeTelegramEnvString(val?: string | number | null): string {
+  if (val === undefined || val === null) return '';
+  return String(val)
+    .trim()
+    .replace(/^['"\s]+|['"\s]+$/g, '')
+    .trim();
+}
+
+export function isNumericTelegramChatId(id?: string | number | null): boolean {
+  const clean = sanitizeTelegramEnvString(id);
+  if (!clean) return false;
+  return /^-?\d{5,20}$/.test(clean);
+}
+
 export function isInvalidTelegramChatId(id?: string | number | null): boolean {
-  if (!id) return true;
-  const str = String(id).trim().toLowerCase();
-  return (
-    str === '' ||
+  const str = sanitizeTelegramEnvString(id).toLowerCase();
+  if (!str) return true;
+  if (
     str === '@sarraftelegrambot' ||
     str === 'sarraftelegrambot' ||
-    str === '8737269513' ||
     str === 'my_telegram_chat_id' ||
     str === 'your_chat_id' ||
     str === 'undefined' ||
     str === 'null'
-  );
+  ) {
+    return true;
+  }
+  return !isNumericTelegramChatId(str);
 }
 
 export function getEffectiveTelegramChatId(): string | null {
-  const dyn = getDynamicTelegramChatId();
-  if (dyn && !isInvalidTelegramChatId(dyn)) {
-    return dyn;
-  }
-  const envChat = process.env.TELEGRAM_CHAT_ID;
+  const envChat = sanitizeTelegramEnvString(process.env.TELEGRAM_CHAT_ID);
   if (envChat && !isInvalidTelegramChatId(envChat)) {
     return envChat;
   }
+  const dyn = getDynamicTelegramChatId();
+  if (dyn && !isInvalidTelegramChatId(dyn)) {
+    return sanitizeTelegramEnvString(dyn);
+  }
   const admins = getAllAdmins();
   if (admins.length > 0 && !isInvalidTelegramChatId(admins[0].chatId)) {
-    return admins[0].chatId;
+    return sanitizeTelegramEnvString(admins[0].chatId);
   }
   return null;
 }
@@ -667,7 +680,6 @@ async function processOutboxItem(item: OutboxRecord): Promise<void> {
 export function getMainControlKeyboard() {
   const managerState = getFullManagerState();
   const goldPaused = managerState.isPaused;
-  const btcPaused = isBtcTidePaused();
   const subs = getAllSubscribersList();
   const pendingCount = subs.filter((s) => s.status === "PENDING").length;
 
@@ -702,10 +714,6 @@ export function getMainControlKeyboard() {
         {
           text: goldPaused ? "▶️ Resume XAU Scanner" : "⏸️ Pause XAU Scanner",
           callback_data: "cmd_toggle_pause",
-        },
-        {
-          text: btcPaused ? "▶️ Resume BTC Scanner" : "⏸️ Pause BTC Scanner",
-          callback_data: "cmd_toggle_btc_pause",
         },
       ],
       [
@@ -1083,7 +1091,7 @@ async function executeTelegramAction(
       "━━━━━━━━━━━━━━━━━━━━━━━━━",
       `✅ <b>Admin ID:</b> <code>${chatId}</code> | 🟢 <b>Mode:</b> LIVE AUTO-DISPATCH`,
       `🥇 <b>XAU/USD Scanner:</b> ${managerState.isPaused ? "⏸️ PAUSED" : `🟢 ACTIVE (${managerState.state})`}`,
-      `₿ <b>BTC/USD Scanner:</b> ${isBtcTidePaused() ? "⏸️ PAUSED" : `🟢 ACTIVE ($${btc.currentPrice ? btc.currentPrice.toFixed(2) : "--"})`}`,
+      `₿ <b>BTC/USD Scanner:</b> 🟢 ACTIVE 24/7 ($${btc.currentPrice ? btc.currentPrice.toFixed(2) : "--"})`,
       `👥 <b>Subscribers:</b> ${approvedSubs.length} Approved | ${pendingSubs.length} Pending`,
       "",
       "🚀 <b>Automatic Live Signal Broadcast:</b>",
@@ -1165,7 +1173,7 @@ async function executeTelegramAction(
     return;
   }
 
-  // 6. Send Live BTC/USD Signal (Same Trade to Admin + BTC/BOTH Users)
+  // 6. Send Live BTC/USD Signal (Same Trade to Admin + BTC/BOTH Users, respecting all engine gates)
   if (
     normAction === "test_btc" ||
     normAction === "btcsignal" ||
@@ -1180,7 +1188,10 @@ async function executeTelegramAction(
         : normAction === "btc_long" || normAction === "buybtc" || (rawArgs && rawArgs[0]?.toUpperCase() === "LONG")
         ? "LONG"
         : undefined;
-    const trade = triggerLiveBtcTideSignalFromTelegram(forcedSide);
+    const rawPhrase = rawArgs ? rawArgs.join(" ").replace(/^(LONG|SHORT)\s+/i, "").trim() : "";
+    const trade = triggerLiveBtcTideSignalFromTelegram(forcedSide, {
+      adminOverridePhrase: rawPhrase || undefined,
+    });
     await processCommandOutbox();
     if (trade) {
       const btcRecipients = getAllApprovedRecipients(idStr, "BTC");
@@ -1191,26 +1202,20 @@ async function executeTelegramAction(
         getMainControlKeyboard(),
         "HTML"
       );
+    } else {
+      const snap = getBackendSnapshot();
+      await sendTelegramHttpRequest(
+        `🛡️ <b>BTC/USD Trigger Gate Check:</b>\n• Status: <b>${snap.decision.waitReason}</b>\n• Daily Trades: ${snap.decision.dailyTradesCount || 0}/${snap.decision.maxDailyTrades || 5}\n• Active Trade: ${snap.activeTrade ? snap.activeTrade.id : "None"}`,
+        replyToMessageId,
+        chatId,
+        getMainControlKeyboard(),
+        "HTML"
+      );
     }
     return;
   }
 
-  // 7. Pause / Resume BTC Scanner
-  if (normAction === "toggle_btc_pause" || normAction === "pausebtc" || normAction === "resumebtc") {
-    const nextPaused =
-      normAction === "pausebtc" ? true : normAction === "resumebtc" ? false : !isBtcTidePaused();
-    setBtcTidePaused(nextPaused);
-    await sendTelegramHttpRequest(
-      nextPaused
-        ? "⏸️ <b>BTC/USD TIDE SCANNER PAUSED</b>\nAutomatic BTC signal firing is paused. Tap <b>Resume BTC Scanner</b> to re-enable."
-        : "▶️ <b>BTC/USD TIDE SCANNER RESUMED</b>\nAutomatic live BTC/USD trade signals are active!",
-      replyToMessageId,
-      chatId,
-      getMainControlKeyboard(),
-      "HTML"
-    );
-    return;
-  }
+  // 7. BTC Tide runs 24/7 automatically (Pause/Kill Switch removed)
 
   // 8. Close Active XAU Trade & Reset XAU Cooldown
   if (normAction === "reset_xau" || normAction === "closegold") {
@@ -1277,7 +1282,7 @@ async function executeTelegramAction(
       "₿ <b>BTC TIDE LIVE ORDERFLOW & SIGNAL</b>",
       "━━━━━━━━━━━━━━━━━━━━━━━━━",
       `💲 <b>BTC/USDT Live Price:</b> $${btc.currentPrice ? btc.currentPrice.toLocaleString("en-US", { minimumFractionDigits: 2 }) : "N/A"} (${btc.activeSource})`,
-      `📡 <b>Scanner State:</b> ${isBtcTidePaused() ? "⏸️ PAUSED" : "🟢 LIVE AUTO-FIRE"}`,
+      `📡 <b>Scanner State:</b> 🟢 24/7 LIVE AUTO-FIRE`,
       `⚖️ <b>Book Imbalance (±0.1% 5s):</b> ${imb}`,
       `📈 <b>Perp Funding Rate:</b> ${btc.perp.fundingRate !== null ? `${(btc.perp.fundingRate * 100).toFixed(4)}%` : "--"}`,
       `🏛️ <b>Open Interest:</b> ${btc.perp.openInterest ? `${Math.round(btc.perp.openInterest).toLocaleString()} BTC` : "--"} (1h Δ: ${btc.perp.oiChange1hPct !== null ? `${btc.perp.oiChange1hPct > 0 ? "+" : ""}${btc.perp.oiChange1hPct}%` : "--"})`,
@@ -1335,7 +1340,7 @@ async function executeTelegramAction(
       "━━━━━━━━━━━━━━━━━━━━━━━━━",
       "🟢 <b>Execution Mode:</b> <b>LIVE AUTO-DISPATCH (Always On @ Live Price)</b>",
       `💰 <b>XAU/USD Gold Live:</b> $${currentPrice} (${managerState.isPaused ? "⏸️ PAUSED" : managerState.state})`,
-      `₿ <b>BTC/USDT Spot Live:</b> $${btc.currentPrice ? btc.currentPrice.toFixed(2) : "N/A"} (${isBtcTidePaused() ? "⏸️ PAUSED" : "🟢 ACTIVE"})`,
+      `₿ <b>BTC/USDT Spot Live:</b> $${btc.currentPrice ? btc.currentPrice.toFixed(2) : "N/A"} (🟢 24/7 ACTIVE)`,
       `🔥 <b>Active BTC Signal:</b> ${btc.activeTrade ? `${btc.activeTrade.side} @ $${btc.activeTrade.entryPrice.toFixed(2)} (${btc.activeTrade.currentR}R)` : "Scanning..."}`,
       `📰 <b>USD News Lock:</b> ${newsStatus.isLockActive ? `🔴 LOCKED (${newsStatus.activeLockEvent?.title})` : "🟢 Unlocked"}`,
       `👥 <b>Active Recipients:</b> ${xauRecipients} on XAU/USD | ${btcRecipients} on BTC/USD`,

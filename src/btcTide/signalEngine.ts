@@ -36,6 +36,48 @@ export interface ExcludedSignalComponent {
   reason: string;
 }
 
+export interface HtfTrendContext {
+  ema21_1h: number | null;
+  ema50_1h: number | null;
+  ema21_4h: number | null;
+  ema50_4h: number | null;
+  atr1h?: number | null;
+}
+
+export interface KeyLevelsContext {
+  prevDayHigh: number | null;
+  prevDayLow: number | null;
+  sessionHigh: number | null;
+  sessionLow: number | null;
+  heatmapSupportPrice?: number | null;
+  heatmapResistancePrice?: number | null;
+}
+
+export interface NewsLockContext {
+  isBlocked: boolean;
+  eventTitle?: string | null;
+  minutesFromRelease?: number | null;
+}
+
+export interface PendingConfirmationInfo {
+  side: 'LONG' | 'SHORT';
+  startedAt: number;
+  expiresAt: number;
+  elapsedSec: number;
+  remainingSec: number;
+  initialPrice: number;
+  atrShort: number;
+  adverseMove: number;
+  maxAdverseAllowed: number;
+}
+
+export interface BtcSignalFilterContext {
+  htf?: HtfTrendContext;
+  keyLevels?: KeyLevelsContext;
+  newsLock?: NewsLockContext;
+  pendingConfirmation?: PendingConfirmationInfo | null;
+}
+
 export interface DecisionEngineResult {
   isSilent: boolean;
   isSpotDotGreen?: boolean;
@@ -56,18 +98,125 @@ export interface DecisionEngineResult {
   renormalisedFactor?: number;
   absorbDriveScore: number;
   absorbDriveAgrees: boolean;
+  absorbDriveMagnitudeOk?: boolean;
+  volumeSpikeRatio?: number;
+  hasVolumeSpike?: boolean;
+  flowBuy60sPct?: number;
+  flowSell60sPct?: number;
+  flowConflictBlocked?: boolean;
+  vol1mBtc?: number;
+  lowLiquidityBlocked?: boolean;
+  newsBlocked?: boolean;
+  newsBlockedTitle?: string | null;
+  trend1h?: 'BULL' | 'BEAR' | 'NEUTRAL' | 'UNKNOWN';
+  trend4h?: 'BULL' | 'BEAR' | 'NEUTRAL' | 'UNKNOWN';
+  trendStateLabel?: string;
+  htfTrendBlocked?: boolean;
+  keyLevelBonusApplied?: number;
+  keyLevelBonusNote?: string | null;
+  keyLevelOppositeBlocked?: boolean;
+  keyLevelBlockNote?: string | null;
+  keyLevels?: KeyLevelsContext;
+  pendingConfirmation?: PendingConfirmationInfo | null;
+  atrShort?: number;
+  atr1h?: number;
+  requiredConfidence?: number;
+  requiredLead?: number;
   canFire: boolean;
   cooldownRemainingSec: number;
+  dailyTradesCount?: number;
+  maxDailyTrades?: number;
   waitReason: string;
 }
 
 const REQUIRED_SILENCE_SECONDS = 180; // 3 minutes of live data
 const SPOT_GREEN_MAX_AGE_MS = 3000; // SPOT dot is green only when fresh (<3s)
-export const COOLDOWN_DURATION_MS = 90 * 60 * 1000; // 1.5 hours (1h-2h BTC setup cooldown)
-export const TRADE_EXPIRY_MS = 4 * 60 * 60 * 1000; // 4 hours expiry for 1H ATR targets
+export const COOLDOWN_DURATION_MS = 60 * 60 * 1000; // 60 minutes cooldown after trade fully closes
+export const TRADE_EXPIRY_MS = 30 * 60 * 1000; // 30 minutes expiry (only applies if TP1 has NOT been hit)
+export const MAX_TRADE_LIFETIME_MS = 3 * 60 * 60 * 1000; // 3 hours hard maximum trade lifetime after TP1 is hit
+export const MAX_TRADES_PER_DAY = 5; // Max 5 trades per UTC day
+
+// ============================================================================
+// PHASE 2 SIGNAL-QUALITY UPGRADE CONSTANTS & CONFIG TOGGLES
+// Each upgrade is a separate constant/config so it can be turned on or off.
+// ============================================================================
+export const ENABLE_HTF_TREND_FILTER = true;
+
+export const ENABLE_FLOW_CONFLICT_BLOCK = true;
+export const FLOW_CONFLICT_MAX_OPPOSITE_PCT = 65;
+
+export const ENABLE_ENTRY_CONFIRMATION = true;
+export const ENTRY_CONFIRM_DURATION_MS = 90 * 1000; // Hold signal as PENDING for up to 90s
+export const ENTRY_CONFIRM_MAX_ADVERSE_ATR = 0.3; // Max 0.3 * atrShort move against signal
+export const ENABLE_PULLBACK_EARLY_ENTRY = false; // Optional early entry on small pullback
+export const PULLBACK_MIN_ATR_FACTOR = 0.08;
+export const PULLBACK_MAX_ATR_FACTOR = 0.25;
+
+export const ENABLE_STRONGER_THRESHOLDS = true;
+export const MIN_CONFIDENCE_TO_FIRE = 75;
+export const LEGACY_MIN_CONFIDENCE_TO_FIRE = 68;
+export const MIN_LEAD_TO_FIRE = 30;
+export const LEGACY_MIN_LEAD_TO_FIRE = 22;
+export const ENABLE_ABSORB_DRIVE_MAGNITUDE_FILTER = true;
+export const MIN_ABSORB_DRIVE_MAGNITUDE = 20;
+export const ENABLE_VOLUME_SPIKE_FILTER = true;
+export const VOLUME_SPIKE_MULTIPLIER = 1.5;
+
+export const ENABLE_KEY_LEVELS_FILTER = true;
+export const KEY_LEVEL_SCORE_BONUS = 5;
+export const KEY_LEVEL_NEAR_ATR1H_FACTOR = 0.15;
+export const KEY_LEVEL_OPPOSITE_BLOCK_R = 0.5;
+
+export const ENABLE_NEWS_FILTER = true;
+export const NEWS_BLOCK_WINDOW_MINUTES = 15;
+
+export const ENABLE_LOW_LIQUIDITY_FILTER = true;
+export const MIN_1M_VOLUME_BTC = 1.5;
+
+export const BTC_TIDE_UPGRADE_CONFIG = {
+  ENABLE_HTF_TREND_FILTER,
+  ENABLE_FLOW_CONFLICT_BLOCK,
+  FLOW_CONFLICT_MAX_OPPOSITE_PCT,
+  ENABLE_ENTRY_CONFIRMATION,
+  ENTRY_CONFIRM_DURATION_MS,
+  ENTRY_CONFIRM_MAX_ADVERSE_ATR,
+  ENABLE_PULLBACK_EARLY_ENTRY,
+  ENABLE_STRONGER_THRESHOLDS,
+  MIN_CONFIDENCE_TO_FIRE,
+  MIN_LEAD_TO_FIRE,
+  ENABLE_ABSORB_DRIVE_MAGNITUDE_FILTER,
+  MIN_ABSORB_DRIVE_MAGNITUDE,
+  ENABLE_VOLUME_SPIKE_FILTER,
+  VOLUME_SPIKE_MULTIPLIER,
+  ENABLE_KEY_LEVELS_FILTER,
+  KEY_LEVEL_SCORE_BONUS,
+  KEY_LEVEL_NEAR_ATR1H_FACTOR,
+  KEY_LEVEL_OPPOSITE_BLOCK_R,
+  ENABLE_NEWS_FILTER,
+  NEWS_BLOCK_WINDOW_MINUTES,
+  ENABLE_LOW_LIQUIDITY_FILTER,
+  MIN_1M_VOLUME_BTC,
+};
 
 function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
+}
+
+/**
+ * Computes standard Exponential Moving Average (EMA) for a series of close prices.
+ */
+export function computeEma(closes: number[], period: number): number | null {
+  if (!Array.isArray(closes) || closes.length < period || period <= 0) return null;
+  const k = 2 / (period + 1);
+  let ema = 0;
+  for (let i = 0; i < period; i++) {
+    ema += closes[i];
+  }
+  ema /= period;
+  for (let i = period; i < closes.length; i++) {
+    ema = closes[i] * k + ema * (1 - k);
+  }
+  return Number.isFinite(ema) ? Number(ema.toFixed(2)) : null;
 }
 
 /**
@@ -170,7 +319,9 @@ export function evaluateDecisionEngine(
   lastSignalTime: number | null,
   hasActiveTrade: boolean,
   spotAgeMs: number = 0,
-  spotReconcileMismatch: boolean = false
+  spotReconcileMismatch: boolean = false,
+  dailyTradesCount: number = 0,
+  filterContext?: BtcSignalFilterContext
 ): DecisionEngineResult {
   const secondsCollected = secondBins.length;
   const isWarmupSilent = secondsCollected < REQUIRED_SILENCE_SECONDS;
@@ -189,21 +340,38 @@ export function evaluateDecisionEngine(
   const { events: waveEvents } = continuous.length >= 6 ? detectWaveformEvents(continuous) : { events: [] };
 
   // -------------------------------------------------------------
-  // 1. Delta Flow (Base Weight: 20) - 60s Net Delta Flow
+  // 1. Delta Flow (Base Weight: 20) - 60s Net Delta Flow & Volume
   // -------------------------------------------------------------
   const start60s = latestSec - 59;
+  const start10s = latestSec - 9;
+  const start180s = latestSec - 179;
   let buy60 = 0;
   let sell60 = 0;
+  let buy10s = 0;
+  let sell10s = 0;
+  let total180s = 0;
   for (let i = secondBins.length - 1; i >= 0; i--) {
     const b = secondBins[i];
-    if (b.sec < start60s) break;
-    buy60 += b.buyVol;
-    sell60 += b.sellVol;
+    if (b.sec < start180s) break;
+    total180s += b.buyVol + b.sellVol;
+    if (b.sec >= start60s) {
+      buy60 += b.buyVol;
+      sell60 += b.sellVol;
+    }
+    if (b.sec >= start10s) {
+      buy10s += b.buyVol;
+      sell10s += b.sellVol;
+    }
   }
   const total60 = buy60 + sell60;
   const netDelta60 = buy60 - sell60;
   const deltaRatio = total60 > 0 ? netDelta60 / total60 : 0;
   const deltaRawScore = Number(clamp(deltaRatio * 20, -20, 20).toFixed(1));
+  const flowBuy60sPct = total60 > 0 ? Number(((buy60 / total60) * 100).toFixed(1)) : 50;
+  const flowSell60sPct = total60 > 0 ? Number(((sell60 / total60) * 100).toFixed(1)) : 50;
+  const total10s = buy10s + sell10s;
+  const avg10sVol3m = total180s / 18;
+  const volumeSpikeRatio = avg10sVol3m > 0 ? Number((total10s / avg10sVol3m).toFixed(2)) : 0;
 
   const compDelta: SignalComponentScore = {
     id: 'delta_flow',
@@ -603,10 +771,45 @@ export function evaluateDecisionEngine(
     };
   });
 
+  // Pre-compute HTF Trend State even if silent so UI can display it
+  const htf = filterContext?.htf;
+  const ema21_1h = htf?.ema21_1h ?? null;
+  const ema50_1h = htf?.ema50_1h ?? null;
+  const ema21_4h = htf?.ema21_4h ?? null;
+  const ema50_4h = htf?.ema50_4h ?? null;
+
+  let trend1h: 'BULL' | 'BEAR' | 'NEUTRAL' | 'UNKNOWN' = 'UNKNOWN';
+  if (currentPrice !== null && ema21_1h !== null && ema50_1h !== null) {
+    if (currentPrice > ema21_1h && ema21_1h > ema50_1h) trend1h = 'BULL';
+    else if (currentPrice < ema21_1h && ema21_1h < ema50_1h) trend1h = 'BEAR';
+    else trend1h = 'NEUTRAL';
+  }
+
+  let trend4h: 'BULL' | 'BEAR' | 'NEUTRAL' | 'UNKNOWN' = 'UNKNOWN';
+  if (currentPrice !== null && ema21_4h !== null && ema50_4h !== null) {
+    if (currentPrice > ema21_4h && ema21_4h > ema50_4h) trend4h = 'BULL';
+    else if (currentPrice < ema21_4h && ema21_4h < ema50_4h) trend4h = 'BEAR';
+    else if (ema21_4h > ema50_4h) trend4h = 'BULL';
+    else if (ema21_4h < ema50_4h) trend4h = 'BEAR';
+    else trend4h = 'NEUTRAL';
+  }
+
+  const trendStateLabel =
+    trend1h === 'UNKNOWN' && trend4h === 'UNKNOWN'
+      ? 'HTF Building...'
+      : `1H ${trend1h} · 4H ${trend4h}`;
+
+  const reqConfidence = ENABLE_STRONGER_THRESHOLDS
+    ? MIN_CONFIDENCE_TO_FIRE
+    : LEGACY_MIN_CONFIDENCE_TO_FIRE;
+  const reqLead = ENABLE_STRONGER_THRESHOLDS ? MIN_LEAD_TO_FIRE : LEGACY_MIN_LEAD_TO_FIRE;
+
   // If engine is silent (first 3 min of live data OR SPOT dot is not green), keep scores silent & canFire = false
   if (isSilent) {
     let waitMsg = `Silent: Collecting live data (${secondsCollected}/${REQUIRED_SILENCE_SECONDS}s)`;
-    if (spotReconcileMismatch) {
+    if (dailyTradesCount >= MAX_TRADES_PER_DAY && !hasActiveTrade) {
+      waitMsg = `Daily limit reached (${dailyTradesCount}/${MAX_TRADES_PER_DAY})`;
+    } else if (spotReconcileMismatch) {
       waitMsg = `SPOT dot red (Reconcile mismatch > 0.1%) · Engine silent`;
     } else if (status !== 'LIVE') {
       waitMsg = `SPOT dot not green (Feed ${status}) · Engine silent`;
@@ -634,8 +837,32 @@ export function evaluateDecisionEngine(
       renormalisedFactor: Number(renormalisedFactor.toFixed(3)),
       absorbDriveScore: 0,
       absorbDriveAgrees: false,
+      absorbDriveMagnitudeOk: false,
+      volumeSpikeRatio,
+      hasVolumeSpike: false,
+      flowBuy60sPct,
+      flowSell60sPct,
+      flowConflictBlocked: false,
+      vol1mBtc: Number(total60.toFixed(2)),
+      lowLiquidityBlocked: false,
+      newsBlocked: Boolean(filterContext?.newsLock?.isBlocked),
+      newsBlockedTitle: filterContext?.newsLock?.eventTitle || null,
+      trend1h,
+      trend4h,
+      trendStateLabel,
+      htfTrendBlocked: false,
+      keyLevelBonusApplied: 0,
+      keyLevelBonusNote: null,
+      keyLevelOppositeBlocked: false,
+      keyLevelBlockNote: null,
+      keyLevels: filterContext?.keyLevels,
+      pendingConfirmation: filterContext?.pendingConfirmation || null,
+      requiredConfidence: reqConfidence,
+      requiredLead: reqLead,
       canFire: false,
       cooldownRemainingSec,
+      dailyTradesCount,
+      maxDailyTrades: MAX_TRADES_PER_DAY,
       waitReason: waitMsg,
     };
   }
@@ -649,6 +876,76 @@ export function evaluateDecisionEngine(
     totalScore += c.score;
     if (c.score > 0) bullishScore += c.score;
     else if (c.score < 0) bearishScore += Math.abs(c.score);
+  }
+
+  const atrShort = computeAtr90s(secondBins, currentPrice);
+  const atr1h = computeAtr1h(secondBins, currentPrice, htf?.atr1h ?? null);
+
+  // -------------------------------------------------------------
+  // Key Levels Bonus (+5 within 0.15 x 1H ATR) & Opposite Block (< 0.5R)
+  // -------------------------------------------------------------
+  let keyLevelBonusApplied = 0;
+  let keyLevelBonusNote: string | null = null;
+  let keyLevelOppositeBlocked = false;
+  let keyLevelBlockNote: string | null = null;
+
+  const kl = filterContext?.keyLevels;
+  const supportLevels: Array<{ name: string; price: number }> = [];
+  const resistanceLevels: Array<{ name: string; price: number }> = [];
+
+  if (kl) {
+    if (kl.prevDayLow && Number.isFinite(kl.prevDayLow) && kl.prevDayLow > 0) {
+      supportLevels.push({ name: 'Prev Day Low', price: kl.prevDayLow });
+    }
+    if (kl.sessionLow && Number.isFinite(kl.sessionLow) && kl.sessionLow > 0) {
+      supportLevels.push({ name: 'Session Low', price: kl.sessionLow });
+    }
+    if (
+      kl.heatmapSupportPrice &&
+      Number.isFinite(kl.heatmapSupportPrice) &&
+      kl.heatmapSupportPrice > 0
+    ) {
+      supportLevels.push({ name: 'Heatmap Liq/Bid Cluster', price: kl.heatmapSupportPrice });
+    }
+
+    if (kl.prevDayHigh && Number.isFinite(kl.prevDayHigh) && kl.prevDayHigh > 0) {
+      resistanceLevels.push({ name: 'Prev Day High', price: kl.prevDayHigh });
+    }
+    if (kl.sessionHigh && Number.isFinite(kl.sessionHigh) && kl.sessionHigh > 0) {
+      resistanceLevels.push({ name: 'Session High', price: kl.sessionHigh });
+    }
+    if (
+      kl.heatmapResistancePrice &&
+      Number.isFinite(kl.heatmapResistancePrice) &&
+      kl.heatmapResistancePrice > 0
+    ) {
+      resistanceLevels.push({ name: 'Heatmap Liq/Ask Cluster', price: kl.heatmapResistancePrice });
+    }
+  }
+
+  if (ENABLE_KEY_LEVELS_FILTER && currentPrice !== null) {
+    const nearDist = KEY_LEVEL_NEAR_ATR1H_FACTOR * atr1h;
+    if (totalScore > 0) {
+      const nearSup = supportLevels.find(
+        (lvl) => Math.abs(currentPrice - lvl.price) <= nearDist
+      );
+      if (nearSup) {
+        bullishScore += KEY_LEVEL_SCORE_BONUS;
+        totalScore += KEY_LEVEL_SCORE_BONUS;
+        keyLevelBonusApplied = KEY_LEVEL_SCORE_BONUS;
+        keyLevelBonusNote = `+${KEY_LEVEL_SCORE_BONUS} near ${nearSup.name} ($${nearSup.price.toFixed(0)})`;
+      }
+    } else if (totalScore < 0) {
+      const nearRes = resistanceLevels.find(
+        (lvl) => Math.abs(currentPrice - lvl.price) <= nearDist
+      );
+      if (nearRes) {
+        bearishScore += KEY_LEVEL_SCORE_BONUS;
+        totalScore -= KEY_LEVEL_SCORE_BONUS;
+        keyLevelBonusApplied = -KEY_LEVEL_SCORE_BONUS;
+        keyLevelBonusNote = `+${KEY_LEVEL_SCORE_BONUS} near ${nearRes.name} ($${nearRes.price.toFixed(0)})`;
+      }
+    }
   }
 
   totalScore = Number(clamp(totalScore, -100, 100).toFixed(1));
@@ -667,33 +964,165 @@ export function evaluateDecisionEngine(
       ? Math.max(0, Number((bearishScore - bullishScore).toFixed(1)))
       : 0;
 
+  // Prospective 1R distance to check opposite key level within 0.5R
+  if (ENABLE_KEY_LEVELS_FILTER && currentPrice !== null && favoredSide !== 'NEUTRAL') {
+    let swingLow = currentPrice;
+    let swingHigh = currentPrice;
+    if (secondBins.length > 0) {
+      const startWindow = latestSec - 89;
+      const recent = secondBins.filter((b) => b.sec >= startWindow);
+      if (recent.length > 0) {
+        swingLow = Math.min(...recent.map((b) => b.lowPrice));
+        swingHigh = Math.max(...recent.map((b) => b.highPrice));
+      }
+    }
+    const minSlFloor = currentPrice * 0.0008;
+    const minClamp = Math.max(1.2 * atrShort, minSlFloor);
+    const maxClamp = Math.max(minClamp, 3.2 * atrShort);
+    const unclampedOneR =
+      favoredSide === 'LONG'
+        ? currentPrice - swingLow + 0.4 * atrShort
+        : swingHigh - currentPrice + 0.4 * atrShort;
+    const prospectiveOneR = clamp(unclampedOneR, minClamp, maxClamp);
+    const maxOppositeDist = KEY_LEVEL_OPPOSITE_BLOCK_R * prospectiveOneR;
+
+    if (favoredSide === 'LONG') {
+      const blockingRes = resistanceLevels.find((lvl) => {
+        const distAbove = lvl.price - currentPrice;
+        const minGap = lvl.name === 'Session High' ? Math.max(2, 0.05 * prospectiveOneR) : 0.01;
+        return distAbove >= minGap && distAbove <= maxOppositeDist;
+      });
+      if (blockingRes) {
+        keyLevelOppositeBlocked = true;
+        keyLevelBlockNote = `Blocked: firing into ${blockingRes.name} ($${blockingRes.price.toFixed(0)}, <0.5R)`;
+      }
+    } else if (favoredSide === 'SHORT') {
+      const blockingSup = supportLevels.find((lvl) => {
+        const distBelow = currentPrice - lvl.price;
+        const minGap = lvl.name === 'Session Low' ? Math.max(2, 0.05 * prospectiveOneR) : 0.01;
+        return distBelow >= minGap && distBelow <= maxOppositeDist;
+      });
+      if (blockingSup) {
+        keyLevelOppositeBlocked = true;
+        keyLevelBlockNote = `Blocked: firing into ${blockingSup.name} ($${blockingSup.price.toFixed(0)}, <0.5R)`;
+      }
+    }
+  }
+
   const absorbDriveComp = components.find((c) => c.id === 'absorb_drive');
   const absorbDriveScore = absorbDriveComp ? absorbDriveComp.score : 0;
+  const absorbDriveRawMag = Math.abs(absorbDriveComp ? absorbDriveComp.rawScore : 0);
 
-  // Absorb / Drive component MUST agree with the side:
+  // Absorb / Drive component MUST agree with the side and meet magnitude >= 20:
   const absorbDriveAgrees =
     (favoredSide === 'LONG' && absorbDriveScore > 0) ||
     (favoredSide === 'SHORT' && absorbDriveScore < 0);
+  const absorbDriveMagnitudeOk =
+    !ENABLE_ABSORB_DRIVE_MAGNITUDE_FILTER ||
+    Math.max(Math.abs(absorbDriveScore), absorbDriveRawMag) >= MIN_ABSORB_DRIVE_MAGNITUDE;
 
-  // Firing rule:
-  // !isLimitedData AND confidence >= 68 AND lead >= 22 AND absorbDriveAgrees AND cooldown expired AND no active trade AND SPOT dot green
-  const meetsCriteria = !isLimitedData && confidence >= 68 && lead >= 22 && absorbDriveAgrees;
+  // Volume spike: last 10s volume > 1.5x 3-minute average 10s volume in signal direction
+  const volumeSpikeInDir =
+    (favoredSide === 'LONG' && buy10s > sell10s) ||
+    (favoredSide === 'SHORT' && sell10s > buy10s);
+  const hasVolumeSpike =
+    volumeSpikeRatio > VOLUME_SPIKE_MULTIPLIER && volumeSpikeInDir;
+  const volumeSpikeOk = !ENABLE_VOLUME_SPIKE_FILTER || hasVolumeSpike;
+
+  // Flow Conflict Block: last 60s taker flow > 65% against signal side
+  const flowConflictBlocked =
+    ENABLE_FLOW_CONFLICT_BLOCK &&
+    ((favoredSide === 'LONG' && flowSell60sPct > FLOW_CONFLICT_MAX_OPPOSITE_PCT) ||
+      (favoredSide === 'SHORT' && flowBuy60sPct > FLOW_CONFLICT_MAX_OPPOSITE_PCT));
+
+  // HTF Trend Filter (1H EMA21/EMA50 + 4H agreement)
+  let htfTrendBlocked = false;
+  let htfTrendBlockReason: string | null = null;
+  if (ENABLE_HTF_TREND_FILTER && favoredSide !== 'NEUTRAL' && trend1h !== 'UNKNOWN') {
+    if (favoredSide === 'LONG') {
+      if (trend1h !== 'BULL') {
+        htfTrendBlocked = true;
+        htfTrendBlockReason = 'Blocked: against 1H trend';
+      } else if (trend4h !== 'UNKNOWN' && trend4h !== 'BULL') {
+        htfTrendBlocked = true;
+        htfTrendBlockReason = 'Blocked: 1H/4H trend disagree';
+      }
+    } else if (favoredSide === 'SHORT') {
+      if (trend1h !== 'BEAR') {
+        htfTrendBlocked = true;
+        htfTrendBlockReason = 'Blocked: against 1H trend';
+      } else if (trend4h !== 'UNKNOWN' && trend4h !== 'BEAR') {
+        htfTrendBlocked = true;
+        htfTrendBlockReason = 'Blocked: 1H/4H trend disagree';
+      }
+    }
+  }
+
+  // News & Session / Low-Liquidity Filters
+  const newsBlocked = ENABLE_NEWS_FILTER && Boolean(filterContext?.newsLock?.isBlocked);
+  const newsBlockedTitle = filterContext?.newsLock?.eventTitle || null;
+  const lowLiquidityBlocked =
+    ENABLE_LOW_LIQUIDITY_FILTER && total60 < MIN_1M_VOLUME_BTC;
+
+  const dailyLimitReached = dailyTradesCount >= MAX_TRADES_PER_DAY;
+  const meetsCriteria =
+    !isLimitedData &&
+    confidence >= reqConfidence &&
+    lead >= reqLead &&
+    absorbDriveAgrees &&
+    absorbDriveMagnitudeOk &&
+    volumeSpikeOk &&
+    !flowConflictBlocked &&
+    !htfTrendBlocked &&
+    !keyLevelOppositeBlocked &&
+    !newsBlocked &&
+    !lowLiquidityBlocked;
+
   const canFire =
-    meetsCriteria && cooldownRemainingSec === 0 && !hasActiveTrade && isSpotDotGreen;
+    meetsCriteria &&
+    !dailyLimitReached &&
+    cooldownRemainingSec === 0 &&
+    !hasActiveTrade &&
+    isSpotDotGreen;
 
   let waitReason = 'Awaiting high-probability setup';
   if (isLimitedData) {
     waitReason = `LIMITED DATA (${activeComponentsCount}/8 active, excluded weight ${excludedWeightSum})`;
   } else if (hasActiveTrade) {
     waitReason = 'Active trade in progress (One trade at a time)';
+  } else if (dailyLimitReached) {
+    waitReason = `Daily limit reached (${dailyTradesCount}/${MAX_TRADES_PER_DAY})`;
   } else if (cooldownRemainingSec > 0) {
     waitReason = `Cooldown active (${Math.floor(cooldownRemainingSec / 60)}m ${
       cooldownRemainingSec % 60
     }s remaining)`;
+  } else if (newsBlocked) {
+    waitReason = newsBlockedTitle
+      ? `Blocked: USD news window (${newsBlockedTitle})`
+      : 'Blocked: high-impact USD news window';
+  } else if (lowLiquidityBlocked) {
+    waitReason = 'Blocked: low liquidity';
+  } else if (htfTrendBlocked && htfTrendBlockReason) {
+    waitReason = htfTrendBlockReason;
+  } else if (flowConflictBlocked) {
+    waitReason = 'Blocked: live flow against signal';
+  } else if (keyLevelOppositeBlocked && keyLevelBlockNote) {
+    waitReason = keyLevelBlockNote;
   } else if (!meetsCriteria) {
-    if (confidence < 68) waitReason = `Confidence ${confidence.toFixed(0)} < 68 required`;
-    else if (lead < 22) waitReason = `Lead ${lead.toFixed(0)} < 22 required`;
-    else if (!absorbDriveAgrees) waitReason = 'Absorb/Drive component must agree with side';
+    if (confidence < reqConfidence) {
+      waitReason = `Confidence ${confidence.toFixed(0)} < ${reqConfidence} required`;
+    } else if (lead < reqLead) {
+      waitReason = `Lead ${lead.toFixed(0)} < ${reqLead} required`;
+    } else if (!absorbDriveAgrees) {
+      waitReason = 'Absorb/Drive component must agree with side';
+    } else if (!absorbDriveMagnitudeOk) {
+      waitReason = `Absorb/Drive magnitude ${Math.abs(absorbDriveScore).toFixed(0)} < ${MIN_ABSORB_DRIVE_MAGNITUDE} required`;
+    } else if (!volumeSpikeOk) {
+      waitReason = `Volume spike required (10s vol ${volumeSpikeRatio.toFixed(2)}x <= ${VOLUME_SPIKE_MULTIPLIER}x 3m avg)`;
+    }
+  } else if (filterContext?.pendingConfirmation) {
+    const p = filterContext.pendingConfirmation;
+    waitReason = `PENDING CONFIRMATION: ${p.side} (${p.remainingSec}s left · adverse $${p.adverseMove.toFixed(1)}/$${p.maxAdverseAllowed.toFixed(1)})`;
   } else {
     waitReason = `READY TO FIRE ${favoredSide} (Confidence: ${confidence.toFixed(0)}%, Lead: ${lead.toFixed(0)}%)`;
   }
@@ -718,15 +1147,48 @@ export function evaluateDecisionEngine(
     renormalisedFactor: Number(renormalisedFactor.toFixed(3)),
     absorbDriveScore,
     absorbDriveAgrees,
+    absorbDriveMagnitudeOk,
+    volumeSpikeRatio,
+    hasVolumeSpike,
+    flowBuy60sPct,
+    flowSell60sPct,
+    flowConflictBlocked,
+    vol1mBtc: Number(total60.toFixed(2)),
+    lowLiquidityBlocked,
+    newsBlocked,
+    newsBlockedTitle,
+    trend1h,
+    trend4h,
+    trendStateLabel,
+    htfTrendBlocked,
+    keyLevelBonusApplied,
+    keyLevelBonusNote,
+    keyLevelOppositeBlocked,
+    keyLevelBlockNote,
+    keyLevels: filterContext?.keyLevels,
+    pendingConfirmation: filterContext?.pendingConfirmation || null,
+    atrShort,
+    atr1h,
+    requiredConfidence: reqConfidence,
+    requiredLead: reqLead,
     canFire,
     cooldownRemainingSec,
+    dailyTradesCount,
+    maxDailyTrades: MAX_TRADES_PER_DAY,
     waitReason,
   };
 }
 
-/**
- * Creates a new Trade Plan computed strictly from real prices and 1H ATR:
- * - SL: 1.5 × ATR
+export interface TradeAnalyticsMetadata {
+  componentScores?: Record<string, number> | null;
+  trendState?: string | null;
+  flowBuyPct?: number | null;
+  atrShort?: number | null;
+  atr1h?: number | null;
+}
+
+export const BTC_TIDE_ENGINE_VERSION = 'v6.4';
+
 /**
  * Creates a new Trade Plan strictly according to the specification:
  * - ATR: 90s short-term ATR (computeAtr90s)
@@ -742,7 +1204,8 @@ export function createTradePlan(
   confidence: number,
   lead: number,
   triggerReason: string,
-  explicitAtrShort?: number | null
+  explicitAtrShort?: number | null,
+  analyticsMeta?: TradeAnalyticsMetadata
 ): BtcTideTradeRecord {
   const atrShort = computeAtr90s(secondBins, entryPrice, explicitAtrShort);
 
@@ -787,6 +1250,10 @@ export function createTradePlan(
 
   const oneR = slDist; // 1R is the exact SL distance
 
+  console.log(
+    `[BTC TIDE TRADE PLAN] Created ${side} trade @ $${entryPrice.toFixed(2)} | atrShort=$${atrShort.toFixed(2)}, slDist=$${slDist.toFixed(2)}, oneR=$${oneR.toFixed(2)}`
+  );
+
   const now = Date.now();
   const trade: BtcTideTradeRecord = {
     id: `btctide_${now}_${side.toLowerCase()}`,
@@ -814,7 +1281,12 @@ export function createTradePlan(
     confidence,
     lead,
     triggerReason,
-    engine_version: 'v6.0',
+    engine_version: BTC_TIDE_ENGINE_VERSION,
+    componentScores: analyticsMeta?.componentScores ?? null,
+    trendState: analyticsMeta?.trendState ?? null,
+    flowBuyPct: analyticsMeta?.flowBuyPct ?? null,
+    atrShort: analyticsMeta?.atrShort ?? atrShort,
+    atr1h: analyticsMeta?.atr1h ?? null,
   };
 
   return trade;
@@ -850,17 +1322,11 @@ export function evaluateActiveTradeTick(
     pnlPercent,
   };
 
-  // 1. Check Expiry (15 minutes)
-  if (now >= trade.expiryTime) {
-    let realizedR = currentR;
-    if (trade.tp2Hit) {
-      realizedR = Number((0.5 * 1.0 + 0.25 * 2.0 + 0.25 * currentR).toFixed(2));
-    } else if (trade.tp1Hit) {
-      realizedR = Number((0.5 * 1.0 + 0.5 * Math.max(0, currentR)).toFixed(2));
-    }
+  // 1. Check Expiry (30 minutes — only applies if TP1 has NOT been hit)
+  if (!trade.tp1Hit && now >= trade.expiryTime) {
     updated.status = 'CLOSED';
     updated.outcome = 'EXPIRED';
-    updated.realizedR = realizedR;
+    updated.realizedR = currentR;
     updated.closedAt = now;
     updated.closePrice = currentPrice;
     return { updatedTrade: updated, closed: true };
@@ -960,5 +1426,21 @@ export function evaluateActiveTradeTick(
     }
   }
 
+  // 4. Hard Maximum Trade Lifetime (3 hours) after TP1 is hit:
+  // If reached after TP1 without hitting TP3 or BE stop, close at market with outcome 'EXPIRED_AFTER_TP1'
+  // and realizedR = real locked R (including the 0.5R already taken at TP1, plus 0.5R if TP2 was hit, plus runner fraction * currentR).
+  if (updated.tp1Hit && now - trade.entryTime >= MAX_TRADE_LIFETIME_MS) {
+    updated.status = 'CLOSED';
+    updated.outcome = 'EXPIRED_AFTER_TP1';
+    const lockedRunnerR = updated.tp2Hit
+      ? 0.5 * 1.0 + 0.25 * 2.0 + 0.25 * currentR
+      : 0.5 * 1.0 + 0.5 * currentR;
+    updated.realizedR = Number(lockedRunnerR.toFixed(2));
+    updated.closedAt = now;
+    updated.closePrice = currentPrice;
+    return { updatedTrade: updated, closed: true };
+  }
+
   return { updatedTrade: updated, closed: false };
 }
+

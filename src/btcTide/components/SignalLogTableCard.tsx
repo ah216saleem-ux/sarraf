@@ -25,11 +25,26 @@ function formatDuration(startMs: number, endMs: number | null): string {
 
 export const SignalLogTableCard: React.FC<SignalLogTableCardProps> = React.memo(
   ({ closedTrades, stats }) => {
-    const { totalClosed, winRate, avgR, winsCount, lossesCount, expiredCount = 0 } = stats;
+    const visibleClosedTrades = React.useMemo(
+      () => closedTrades.filter((t) => t.outcome !== 'VOID'),
+      [closedTrades]
+    );
+    const {
+      totalClosed,
+      winRate,
+      avgR,
+      expectancy = null,
+      slRate = null,
+      expiredRate = null,
+      worstLosingComponent = null,
+      winsCount,
+      lossesCount,
+      expiredCount = 0,
+    } = stats;
 
     return (
       <div className="bg-[#08080a] border border-[#E8B84A]/20 rounded-xl p-4 sm:p-5 backdrop-blur-md shadow-[0_4px_24px_rgba(0,0,0,0.5)] space-y-4">
-        {/* Card Header & Global Stats */}
+        {/* Card Header */}
         <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-white/5">
           <div className="flex items-center gap-2.5">
             <div className="w-7 h-7 rounded-lg bg-teal-500/10 border border-teal-500/30 flex items-center justify-center text-teal-400">
@@ -38,72 +53,125 @@ export const SignalLogTableCard: React.FC<SignalLogTableCardProps> = React.memo(
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-mono text-xs font-bold uppercase tracking-wider text-white">
-                  SIGNAL OUTCOME LOG &amp; PERFORMANCE
+                  SIGNAL ANALYTICS, BACKTEST STATS &amp; OUTCOME LOG
                 </span>
                 <span className="font-mono text-[10px] px-2 py-0.2 rounded bg-white/5 border border-white/10 text-emerald-400 flex items-center gap-1">
                   <Database className="w-2.5 h-2.5" />
-                  PERSISTED TO DISK DATABASE
+                  SQLITE PERSISTED
                 </span>
               </div>
               <div className="font-mono text-[11px] text-neutral-400">
-                Tracked to real exchange execution (SL, TP1+BE, TP2, TP3, EXPIRED)
+                Real closed trades only (8 component scores, HTF trend, 60s flow %, 90s ATR, outcome &amp; R)
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* BTC Signal Analytics & Backtest Stats Panel */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5 font-mono text-xs">
+          {/* 1. Total Trades */}
+          <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-2">
+            <div className="text-[9px] text-neutral-400 uppercase">TOTAL TRADES</div>
+            <div className="text-sm font-black text-white mt-0.5">
+              {totalClosed}{' '}
+              <span className="text-[10px] font-normal text-neutral-400">
+                ({winsCount}W/{lossesCount}L/{expiredCount}E)
+              </span>
+            </div>
+          </div>
+
+          {/* 2. Win Rate */}
+          <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-2 flex items-center gap-2">
+            <Award className="w-4 h-4 text-[#FFD97A] shrink-0" />
+            <div>
+              <div className="text-[9px] text-neutral-400 uppercase">WIN RATE</div>
+              <div
+                className={`text-sm font-black mt-0.5 ${
+                  winRate === null
+                    ? 'text-neutral-500'
+                    : winRate >= 50
+                    ? 'text-teal-400'
+                    : 'text-rose-400'
+                }`}
+              >
+                {winRate !== null ? `${winRate}%` : '--'}
               </div>
             </div>
           </div>
 
-          {/* Win Rate & Avg R Badges */}
-          <div className="flex flex-wrap items-center gap-3 font-mono text-xs">
-            {/* Win Rate */}
-            <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-1.5 flex items-center gap-2">
-              <Award className="w-4 h-4 text-[#FFD97A]" />
-              <div>
-                <div className="text-[9px] text-neutral-400 uppercase">WIN RATE</div>
-                <div
-                  className={`text-sm font-black ${
-                    winRate === null
-                      ? 'text-neutral-500'
-                      : winRate >= 50
-                      ? 'text-teal-400'
-                      : 'text-rose-400'
-                  }`}
-                >
-                  {winRate !== null ? `${winRate}%` : '--'}
-                </div>
+          {/* 3. Average R */}
+          <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-2 flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-teal-400 shrink-0" />
+            <div>
+              <div className="text-[9px] text-neutral-400 uppercase">AVERAGE R</div>
+              <div
+                className={`text-sm font-black mt-0.5 ${
+                  avgR === null
+                    ? 'text-neutral-500'
+                    : avgR >= 0
+                    ? 'text-teal-400'
+                    : 'text-rose-400'
+                }`}
+              >
+                {avgR !== null ? `${avgR > 0 ? '+' : ''}${avgR} R` : '--'}
               </div>
             </div>
+          </div>
 
-            {/* Average R */}
-            <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-1.5 flex items-center gap-2">
-              <TrendingUp className="w-4 h-4 text-teal-400" />
-              <div>
-                <div className="text-[9px] text-neutral-400 uppercase">AVERAGE R</div>
-                <div
-                  className={`text-sm font-black ${
-                    avgR === null
-                      ? 'text-neutral-500'
-                      : avgR >= 0
-                      ? 'text-teal-400'
-                      : 'text-rose-400'
-                  }`}
-                >
-                  {avgR !== null ? `${avgR > 0 ? '+' : ''}${avgR} R` : '--'}
-                </div>
-              </div>
+          {/* 4. Expectancy */}
+          <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-2">
+            <div className="text-[9px] text-neutral-400 uppercase">EXPECTANCY</div>
+            <div
+              className={`text-sm font-black mt-0.5 ${
+                expectancy === null
+                  ? 'text-neutral-500'
+                  : expectancy >= 0
+                  ? 'text-teal-400'
+                  : 'text-rose-400'
+              }`}
+            >
+              {expectancy !== null ? `${expectancy > 0 ? '+' : ''}${expectancy} R` : '--'}
             </div>
+          </div>
 
-            {/* Total Closed Trades */}
-            <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-1.5">
-              <div className="text-[9px] text-neutral-400 uppercase">CLOSED TRADES</div>
-              <div className="text-sm font-black text-white">
-                {totalClosed} ({winsCount}W / {lossesCount}L / {expiredCount} Exp)
-              </div>
+          {/* 5. SL Rate */}
+          <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-2">
+            <div className="text-[9px] text-neutral-400 uppercase">SL RATE</div>
+            <div
+              className={`text-sm font-black mt-0.5 ${
+                slRate === null ? 'text-neutral-500' : 'text-rose-300'
+              }`}
+            >
+              {slRate !== null ? `${slRate}% (${lossesCount})` : '--'}
             </div>
-            {/* Expired Trades - Explicitly Not Wins */}
-            <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-1.5">
-              <div className="text-[9px] text-neutral-400 uppercase">EXPIRED (NOT WINS)</div>
-              <div className="text-sm font-black text-amber-300">
-                {expiredCount}
-              </div>
+          </div>
+
+          {/* 6. EXPIRED Rate */}
+          <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-2">
+            <div className="text-[9px] text-neutral-400 uppercase">EXPIRED RATE</div>
+            <div
+              className={`text-sm font-black mt-0.5 ${
+                expiredRate === null ? 'text-neutral-500' : 'text-amber-300'
+              }`}
+            >
+              {expiredRate !== null ? `${expiredRate}% (${expiredCount})` : '--'}
+            </div>
+          </div>
+
+          {/* 7. Worst Component in Losing Trades */}
+          <div className="bg-black/60 border border-white/10 rounded-lg px-3 py-2 col-span-2 sm:col-span-1">
+            <div className="text-[9px] text-neutral-400 uppercase">TOP LOSING COMP</div>
+            <div
+              className="text-xs font-bold text-rose-300 mt-0.5 truncate"
+              title={
+                worstLosingComponent
+                  ? `${worstLosingComponent.name} aligned in ${worstLosingComponent.count}/${worstLosingComponent.totalLossesWithData} losing trades`
+                  : 'No losing trades with component breakdown yet'
+              }
+            >
+              {worstLosingComponent
+                ? `${worstLosingComponent.name} (${worstLosingComponent.count}/${worstLosingComponent.totalLossesWithData})`
+                : '--'}
             </div>
           </div>
         </div>
@@ -115,7 +183,7 @@ export const SignalLogTableCard: React.FC<SignalLogTableCardProps> = React.memo(
               <tr className="text-[10px] text-neutral-400 uppercase border-b border-white/5">
                 <th className="py-2 px-2">TIME (UTC)</th>
                 <th className="py-2 px-2">SIDE</th>
-                <th className="py-2 px-2 text-center">VERSION</th>
+                <th className="py-2 px-2">TREND · FLOW · ATR</th>
                 <th className="py-2 px-2 text-right">ENTRY</th>
                 <th className="py-2 px-2 text-right">SL</th>
                 <th className="py-2 px-2 text-right">TP1 / TP2 / TP3</th>
@@ -125,15 +193,15 @@ export const SignalLogTableCard: React.FC<SignalLogTableCardProps> = React.memo(
               </tr>
             </thead>
             <tbody className="divide-y divide-white/[0.03]">
-              {closedTrades.length === 0 ? (
+              {visibleClosedTrades.length === 0 ? (
                 <tr>
                   <td colSpan={9} className="py-8 text-center text-neutral-500 text-xs">
-                    No closed signals yet. Signals fire only after &ge; 3 min of live data, &ge; 68%
-                    confidence, and &ge; 22% lead over opposite side.
+                    No closed signals yet. Signals fire only after &ge; 3 min of live data, &ge; 75%
+                    confidence, &ge; 30% lead, HTF trend alignment, and 90s confirmation.
                   </td>
                 </tr>
               ) : (
-                closedTrades.map((t) => {
+                visibleClosedTrades.map((t) => {
                   const isLong = t.side === 'LONG';
                   const isWin = typeof t.realizedR === 'number' && t.realizedR > 0;
                   const isLoss = typeof t.realizedR === 'number' && t.realizedR < 0;
@@ -154,6 +222,14 @@ export const SignalLogTableCard: React.FC<SignalLogTableCardProps> = React.memo(
                         >
                           {t.side}
                         </span>
+                      </td>
+
+                      <td className="py-2.5 px-2 text-[10px] text-neutral-300">
+                        <div>{t.trendState || t.engine_version || 'v6.0'}</div>
+                        <div className="text-neutral-500">
+                          {typeof t.flowBuyPct === 'number' ? `${t.flowBuyPct.toFixed(0)}% Buy` : '--'}
+                          {typeof t.atrShort === 'number' ? ` · ATR $${t.atrShort.toFixed(1)}` : ''}
+                        </div>
                       </td>
 
                       <td className="py-2.5 px-2 text-right font-bold text-white">
@@ -177,7 +253,7 @@ export const SignalLogTableCard: React.FC<SignalLogTableCardProps> = React.memo(
                               ? 'bg-teal-900/80 text-teal-200 border border-teal-400'
                               : t.outcome === 'TP2'
                               ? 'bg-teal-950/80 text-teal-300 border border-teal-500/40'
-                              : t.outcome === 'TP1+BE'
+                              : t.outcome === 'TP1+BE' || t.outcome === 'EXPIRED_AFTER_TP1'
                               ? 'bg-[#FFD97A]/20 text-[#FFD97A] border border-[#FFD97A]/40'
                               : t.outcome === 'SL'
                               ? 'bg-rose-950/80 text-rose-300 border border-rose-500/40'

@@ -233,6 +233,36 @@ import type { BtcTideTradeRecord, BtcTideStats } from '../server/btcTideSignalDa
 export type { BtcTideTradeRecord, BtcTideStats };
 import type { DecisionEngineResult } from './signalEngine';
 
+export interface BtcTideSelfCheckItem {
+  id:
+    | 'telegram_bot'
+    | 'chat_id'
+    | 'spot_feed'
+    | 'htf_ema'
+    | 'news_data'
+    | 'sqlite_writable'
+    | 'single_instance_lease';
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface BtcTideTelegramTelemetry {
+  lastMessageSentAt: number | null;
+  queueSize: number;
+  totalMessagesSentToday: number;
+}
+
+export interface BtcTideLiveSelfCheck {
+  checkedAt: number;
+  allPassed: boolean;
+  dryRun: boolean;
+  liveDispatchActive: boolean;
+  blockingReasons: string[];
+  checks: BtcTideSelfCheckItem[];
+  telegramTelemetry?: BtcTideTelegramTelemetry;
+}
+
 export interface FeedDotItem {
   id: 'SPOT' | 'BOOK' | 'PERPS' | 'VENUES';
   label: string;
@@ -281,6 +311,8 @@ export interface BtcTideStoreState {
   };
   reconcile?: ReconcileResult;
   geoBlockedNotice: string | null;
+  liveSelfCheck?: BtcTideLiveSelfCheck;
+  telegramTelemetry?: BtcTideTelegramTelemetry;
   // Rolling store: last 30 minutes in per-second bins (1800 bins max)
   secondBins: SecondBin[];
   // Recent trades for the order tape (newest first)
@@ -305,4 +337,5 @@ export interface HeatmapColumn {
 }
 
 export type TapeTimeframe = '1m' | '3m' | '10m';
+
 

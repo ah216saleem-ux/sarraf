@@ -15,6 +15,34 @@ SARRAF tracks live prices second-by-second, builds rolling candle history, manag
 
 ---
 
+## ⚡ BTC Tide 24/7 Autonomous Engine & Live Telegram Dispatch
+
+The **BTC Tide** module (`v6.4`) runs 24/7 in the background without any manual pause switch or auto-pause interruption. It enforces strict institutional safety rules automatically:
+- **One active trade at a time** (persisted in SQLite `DATA_DIR/btc_tide.db` and resumed automatically across restarts).
+- **60-minute cooldown** after a trade fully closes (`SL`, `TP3`, `TP2`, `TP1+BE`, `EXPIRED`, `EXPIRED_AFTER_TP1`).
+- **Max 5 trades per UTC day** (incremented only when a trade actually enters `ACTIVE` status after the 90s confirmation window).
+- **Hard 3-hour max trade lifetime** (`MAX_TRADE_LIFETIME_MS`) after `TP1` is hit.
+- **Resilient Telegram Outbox**: If Telegram is temporarily unreachable, signal generation and SQLite trade tracking continue uninterrupted while messages queue in `DATA_DIR/command_outbox.json` and flush in chronological order with exponential backoff (up to 24h, deduplicated by idempotency keys, marking messages delayed $>60$s with `(delayed)`).
+
+### Exact Environment Variables for BTC Tide 24/7:
+```env
+NODE_ENV=production
+PORT=3000
+DATA_DIR=/app/data
+TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+TELEGRAM_CHAT_ID=-1001234567890
+BTC_TIDE_DRY_RUN=false
+ADMIN_TOKEN=YourStrongAdminTokenHere
+# Optional: self-ping URL every 4 minutes for hosts that idle-sleep
+KEEPALIVE_URL=https://your-production-domain.up.railway.app/api/btc-tide/health
+```
+
+### Health & Verification Endpoints:
+- **`GET /api/btc-tide/health`**: Returns `uptime`, `lastTickAge`, `feedStatus`, `engineLoopAge`, `telegramStatus`, `queueSize`, `activeTradeId`, `dailyCount`, and `leaseHeld`.
+- **`POST /api/btc-tide/admin/telegram-test`** (Header `x-admin-token: <ADMIN_TOKEN>`): Sends a live verification message to `TELEGRAM_CHAT_ID` and returns the Telegram `messageId`.
+
+---
+
 ## 🚀 Recommended Deployment Option A: Railway (with Persistent Volume)
 
 Railway provides continuous always-on execution and high-performance persistent NVMe disk mounts.

@@ -24,6 +24,7 @@ RUN mkdir -p /app/data
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV DATA_DIR=/app/data
+ENV BTC_TIDE_DRY_RUN=false
 
 # Expose default port
 EXPOSE 3000

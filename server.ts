@@ -235,6 +235,7 @@ import {
   getBackendHealthReport,
   getHeatmapHistory,
   registerSseClient,
+  evaluateBtcTideLiveSelfCheck,
 } from './src/server/btcTideBackendEngine.ts';
 import {
   initBtcTideSqlite,
@@ -540,32 +541,36 @@ let currentUpstreamAbortController: AbortController | null = null;
 let isUpstreamConnecting = false;
 
 function categorizeUpstreamError(err: any): 'dns' | 'timeout' | 'http 401' | 'http 403' | 'http 429' | 'http 5xx' | 'closed' | 'silent' | 'error' {
-  const code = (err?.code || '').toLowerCase();
-  const name = (err?.name || '').toLowerCase();
-  const msg = (err?.message || '').toLowerCase();
+  try {
+    const code = String(err?.code ?? '').toLowerCase();
+    const name = String(err?.name ?? '').toLowerCase();
+    const msg = String(err?.message ?? err ?? '').toLowerCase();
 
-  if (code === 'enotfound' || code === 'eai_again' || msg.includes('getaddrinfo') || msg.includes('dns')) {
-    return 'dns';
+    if (code === 'enotfound' || code === 'eai_again' || msg.includes('getaddrinfo') || msg.includes('dns')) {
+      return 'dns';
+    }
+    if (name === 'aborterror' || code === 'etimedout' || msg.includes('timeout') || msg.includes('timed out')) {
+      return 'timeout';
+    }
+    if (msg.includes('http_401') || msg.includes(' 401') || code === '401') {
+      return 'http 401';
+    }
+    if (msg.includes('http_403') || msg.includes(' 403') || code === '403') {
+      return 'http 403';
+    }
+    if (msg.includes('http_429') || msg.includes(' 429') || code === '429') {
+      return 'http 429';
+    }
+    if (msg.includes('http_5') || msg.includes(' 500') || msg.includes(' 502') || msg.includes(' 503') || msg.includes(' 504') || code.startsWith('5')) {
+      return 'http 5xx';
+    }
+    if (code === 'econnreset' || code === 'econnrefused' || msg.includes('econnreset') || msg.includes('closed') || msg.includes('socket')) {
+      return 'closed';
+    }
+    return 'error';
+  } catch {
+    return 'error';
   }
-  if (name === 'aborterror' || code === 'etimedout' || msg.includes('timeout') || msg.includes('timed out')) {
-    return 'timeout';
-  }
-  if (msg.includes('http_401') || msg.includes(' 401')) {
-    return 'http 401';
-  }
-  if (msg.includes('http_403') || msg.includes(' 403')) {
-    return 'http 403';
-  }
-  if (msg.includes('http_429') || msg.includes(' 429')) {
-    return 'http 429';
-  }
-  if (msg.includes('http_5') || msg.includes(' 500') || msg.includes(' 502') || msg.includes(' 503') || msg.includes(' 504')) {
-    return 'http 5xx';
-  }
-  if (code === 'econnreset' || code === 'econnrefused' || msg.includes('econnreset') || msg.includes('closed') || msg.includes('socket')) {
-    return 'closed';
-  }
-  return 'error';
 }
 
 function logReconnectReason(category: 'dns' | 'timeout' | 'http 401' | 'http 403' | 'http 429' | 'http 5xx' | 'closed' | 'silent' | 'error') {
@@ -588,7 +593,9 @@ function scheduleNextBiquoteTick(delayMs: number) {
   nextRetryAt = Date.now() + safeDelay;
   upstreamFetchTimeoutId = setTimeout(() => {
     upstreamFetchTimeoutId = null;
-    fetchBiquoteTick();
+    fetchBiquoteTick().catch((err) => {
+      console.warn('[FEED TICK REJECTION CAUGHT]', err?.message || err);
+    });
   }, safeDelay);
 }
 
@@ -2245,7 +2252,7 @@ app.get('/api/btc-tide/heatmap', btcTideRateLimiter, (req, res) => {
 // 4. Signals and Outcomes from SQLite Database
 app.get('/api/btc-tide/signals', btcTideRateLimiter, (_req, res) => {
   const activeTrade = getActiveTradeFromSqlite();
-  const closedTrades = getClosedTradesFromSqlite(300);
+  const closedTrades = getClosedTradesFromSqlite(300).filter((t) => t.outcome !== 'VOID');
   const stats = computeSqliteStats();
   return res.json({
     success: true,
@@ -2253,6 +2260,16 @@ app.get('/api/btc-tide/signals', btcTideRateLimiter, (_req, res) => {
     closedTrades,
     stats,
     databaseType: 'SQLite (sql.js / data/btc_tide.db)',
+  });
+});
+
+// 4B. Live Self-Check Endpoint for BTC Tide Real Live Dispatch (Non-Blocking for Signal Engine)
+app.get('/api/btc-tide/self-check', btcTideRateLimiter, (_req, res) => {
+  const selfCheck = evaluateBtcTideLiveSelfCheck();
+  return res.json({
+    success: true,
+    liveSelfCheck: selfCheck,
+    telegramTelemetry: selfCheck.telegramTelemetry,
   });
 });
 
@@ -4161,12 +4178,12 @@ function handleGracefulShutdown(signal: string) {
 process.on('uncaughtException', (err: any) => {
   const cat = err?.name || 'Error';
   const code = err?.code || 'UNCAUGHT';
-  console.warn(`[PROCESS EXCEPTION CAUGHT] category=${cat} code=${code}`, err?.message || err);
+  console.warn(`[PROCESS EXCEPTION CAUGHT] category=${cat} code=${code}`, err?.stack || err?.message || err);
 });
 
 process.on('unhandledRejection', (reason: any) => {
   const cat = reason?.name || (typeof reason === 'string' ? reason.slice(0, 30) : 'UnhandledRejection');
-  console.warn(`[PROCESS REJECTION CAUGHT] category=${cat}`, reason?.message || reason);
+  console.warn(`[PROCESS REJECTION CAUGHT] category=${cat}`, reason?.stack || reason?.message || reason);
 });
 
 process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));
