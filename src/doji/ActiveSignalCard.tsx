@@ -9,6 +9,7 @@ import {
 import { DojiTrade, computeLivePnl } from './dojiSignalEngine';
 import {
   DojiTimeframe,
+  ALL_DOJI_TIMEFRAMES,
   DojiZone,
   ActiveDojiSignal,
   calculateRealRiskReward,
@@ -18,7 +19,7 @@ import {
   getNearestValidZone,
 } from './dojiEngine';
 
-const ALL_TIMEFRAMES: DojiTimeframe[] = ['15m', '30m', '1h', '4h'];
+const ALL_TIMEFRAMES: DojiTimeframe[] = ALL_DOJI_TIMEFRAMES;
 
 interface ActiveSignalCardProps {
   trade: DojiTrade | null;
@@ -88,7 +89,7 @@ export const ActiveSignalCard: React.FC<ActiveSignalCardProps> = ({
         )}
       </div>
 
-      <div className="flex items-center gap-1.5 text-[11px]">
+      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
         {ALL_TIMEFRAMES.map((tf) => {
           const count = activeTradesMap?.[tf]?.status === 'OPEN' ? 1 : 0;
           const isCurrent = tf === timeframe;
@@ -97,7 +98,7 @@ export const ActiveSignalCard: React.FC<ActiveSignalCardProps> = ({
               key={tf}
               type="button"
               onClick={() => onSelectTimeframe?.(tf)}
-              className={`px-1.5 py-0.5 rounded border cursor-pointer transition-colors ${
+              className={`px-1.5 py-0.5 rounded border cursor-pointer transition-colors shrink-0 ${
                 count > 0
                   ? 'bg-[#12100c] border-[#d9b25a] text-[#f2d78f] font-bold'
                   : isCurrent

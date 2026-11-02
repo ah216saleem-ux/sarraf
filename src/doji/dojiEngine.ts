@@ -1,6 +1,103 @@
 // src/doji/dojiEngine.ts
 
-export type DojiTimeframe = '15m' | '30m' | '1h' | '4h';
+export type DojiTimeframe = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d';
+
+export interface DojiTimeframeConfig {
+  intervalMs: number;
+  minutes: number;
+  label: string;
+  htf: DojiTimeframe | null;
+  oandaGranularity: 'M1' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D' | null;
+  storeKey: 'M1' | 'M3' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D1';
+  redSniperTf: DojiTimeframe;
+}
+
+export const ALL_DOJI_TIMEFRAMES: DojiTimeframe[] = [
+  '1m',
+  '3m',
+  '5m',
+  '15m',
+  '30m',
+  '1h',
+  '4h',
+  '1d',
+];
+
+export const DOJI_TF_CONFIG: Record<DojiTimeframe, DojiTimeframeConfig> = {
+  '1m': {
+    intervalMs: 1 * 60 * 1000,
+    minutes: 1,
+    label: '1m',
+    htf: '15m',
+    oandaGranularity: 'M1',
+    storeKey: 'M1',
+    redSniperTf: '1m',
+  },
+  '3m': {
+    intervalMs: 3 * 60 * 1000,
+    minutes: 3,
+    label: '3m',
+    htf: '15m',
+    oandaGranularity: null,
+    storeKey: 'M3',
+    redSniperTf: '3m',
+  },
+  '5m': {
+    intervalMs: 5 * 60 * 1000,
+    minutes: 5,
+    label: '5m',
+    htf: '15m',
+    oandaGranularity: 'M5',
+    storeKey: 'M5',
+    redSniperTf: '5m',
+  },
+  '15m': {
+    intervalMs: 15 * 60 * 1000,
+    minutes: 15,
+    label: '15m',
+    htf: '1h',
+    oandaGranularity: 'M15',
+    storeKey: 'M15',
+    redSniperTf: '15m',
+  },
+  '30m': {
+    intervalMs: 30 * 60 * 1000,
+    minutes: 30,
+    label: '30m',
+    htf: '1h',
+    oandaGranularity: 'M30',
+    storeKey: 'M30',
+    redSniperTf: '30m',
+  },
+  '1h': {
+    intervalMs: 60 * 60 * 1000,
+    minutes: 60,
+    label: '1h',
+    htf: '4h',
+    oandaGranularity: 'H1',
+    storeKey: 'H1',
+    redSniperTf: '1h',
+  },
+  '4h': {
+    intervalMs: 4 * 60 * 60 * 1000,
+    minutes: 240,
+    label: '4h',
+    htf: null,
+    oandaGranularity: 'H4',
+    storeKey: 'H4',
+    redSniperTf: '4h',
+  },
+  '1d': {
+    intervalMs: 24 * 60 * 60 * 1000,
+    minutes: 1440,
+    label: '1d',
+    htf: null,
+    oandaGranularity: 'D',
+    storeKey: 'D1',
+    redSniperTf: '1d',
+  },
+};
+
 export type DojiZoneState = 'waiting' | 'armed' | 'used';
 export type DojiMode = 'indicator' | 'strict' | 'loose';
 export type DojiZoneLifetime = 'untilBroken' | 'armed';
@@ -158,16 +255,7 @@ function clamp(val: number, min: number, max: number): number {
 }
 
 export function getTimeframeIntervalMs(tf: DojiTimeframe): number {
-  switch (tf) {
-    case '15m':
-      return 15 * 60 * 1000;
-    case '30m':
-      return 30 * 60 * 1000;
-    case '1h':
-      return 60 * 60 * 1000;
-    case '4h':
-      return 4 * 60 * 60 * 1000;
-  }
+  return DOJI_TF_CONFIG[tf].intervalMs;
 }
 
 /**
@@ -224,7 +312,7 @@ export function formatDubaiHourMin(msOrDate: number | string | Date): string {
  * Compute current signal bar close time in Dubai HH:mm format (e.g. "11:00")
  */
 export function getSignalBarCloseTimeDubai(bars: RawBar[], timeframe: DojiTimeframe): string {
-  const intervalMs = getTimeframeIntervalMs(timeframe);
+  const intervalMs = DOJI_TF_CONFIG[timeframe].intervalMs;
   if (bars && bars.length > 0) {
     const lastBar = bars[bars.length - 1];
     const openMs = new Date(lastBar.openTime).getTime();
@@ -319,9 +407,14 @@ export function formatOpenedTime(isoOrDate: string | Date): string {
  * Format held duration in hours and minutes ("2h 15m", "45m", "4h") instead of bars
  */
 export function formatHeldDuration(barsHeld: number, timeframe: DojiTimeframe): string {
-  const tfMins =
-    timeframe === '15m' ? 15 : timeframe === '30m' ? 30 : timeframe === '1h' ? 60 : 240;
+  const tfMins = DOJI_TF_CONFIG[timeframe].minutes;
   const totalMins = Math.max(1, barsHeld) * tfMins;
+  if (timeframe === '1d') {
+    const days = Math.floor(totalMins / 1440);
+    const remHours = Math.floor((totalMins % 1440) / 60);
+    if (days > 0 && remHours > 0) return `${days}d ${remHours}h`;
+    if (days > 0) return `${days}d`;
+  }
   const hours = Math.floor(totalMins / 60);
   const mins = totalMins % 60;
   if (hours > 0 && mins > 0) return `${hours}h ${mins}m`;
@@ -596,9 +689,7 @@ export interface HtfEma21Point {
 }
 
 export function getHtfTimeframe(tf: DojiTimeframe): DojiTimeframe | null {
-  if (tf === '15m' || tf === '30m') return '1h';
-  if (tf === '1h') return '4h';
-  return null;
+  return DOJI_TF_CONFIG[tf].htf;
 }
 
 /**
@@ -640,9 +731,10 @@ export function buildHtfEma21Series(htfBars?: RawBar[]): HtfEma21Point[] {
 
 /**
  * Check higher-timeframe trend filter:
+ * - For 1m, 3m, 5m: 15m trend (price above/below 15m EMA21 and EMA21 slope)
  * - For 15m and 30m: 1h trend (price above/below 1h EMA21 and EMA21 slope)
  * - For 1h: 4h trend (price above/below 4h EMA21 and EMA21 slope)
- * - For 4h: no filter (always returns true)
+ * - For 4h and 1d: no filter (always returns true)
  */
 export function checkHtfTrendAtTime(
   side: 'BUY' | 'SELL',
@@ -651,7 +743,7 @@ export function checkHtfTrendAtTime(
   currentPrice: number,
   htfSeries?: HtfEma21Point[]
 ): boolean {
-  if (timeframe === '4h') return true;
+  if (DOJI_TF_CONFIG[timeframe].htf === null) return true;
   if (!htfSeries || htfSeries.length === 0) return true;
 
   // Find latest HTF closed candle at or before barTimeMs

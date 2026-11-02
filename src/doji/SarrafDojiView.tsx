@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import {
   DojiTimeframe,
+  ALL_DOJI_TIMEFRAMES,
   DojiZone,
   formatSignedDollar,
   formatRoundedSignedDollar,
@@ -22,7 +23,7 @@ import { DojiChart } from './DojiChart';
 import { ActiveSignalCard } from './ActiveSignalCard';
 import { TradeLogSection } from './TradeLogSection';
 
-const ALL_TIMEFRAMES: DojiTimeframe[] = ['15m', '30m', '1h', '4h'];
+const ALL_TIMEFRAMES: DojiTimeframe[] = ALL_DOJI_TIMEFRAMES;
 
 export const SarrafDojiView: React.FC = () => {
   const [selectedTf, setSelectedTf] = useState<DojiTimeframe>('15m');
@@ -205,8 +206,8 @@ export const SarrafDojiView: React.FC = () => {
       <div className="p-3.5 sm:p-4 rounded-[12px] bg-[#12100c] border border-[#2b261b] space-y-3">
         {/* Controls Row (flex-wrap so all buttons remain visible without clipping) */}
         <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#2b261b]">
-          {/* Timeframe Buttons: 15m, 30m, 1h, 4h with active zone count on that timeframe */}
-          <div className="flex items-center gap-1 bg-[#1a1711] p-1 rounded-[8px] border border-[#2b261b] font-['JetBrains_Mono',monospace] text-xs">
+          {/* Timeframe Buttons: 1m, 3m, 5m, 15m, 30m, 1h, 4h, 1d with active zone count on that timeframe */}
+          <div className="flex items-center gap-1 bg-[#1a1711] p-1 rounded-[8px] border border-[#2b261b] font-['JetBrains_Mono',monospace] text-xs overflow-x-auto max-w-full">
             {ALL_TIMEFRAMES.map((tf) => {
               const activeZonesCount = zonesMap[tf]?.length ?? 0;
               const isSelected = selectedTf === tf;
@@ -214,7 +215,7 @@ export const SarrafDojiView: React.FC = () => {
                 <button
                   key={tf}
                   onClick={() => setSelectedTf(tf)}
-                  className={`px-2.5 py-1 rounded-[6px] transition-colors font-bold cursor-pointer flex items-center gap-1.5 ${
+                  className={`px-2 py-1 rounded-[6px] transition-colors font-bold cursor-pointer flex items-center gap-1 shrink-0 ${
                     isSelected
                       ? 'bg-[#d9b25a] text-[#0a0907]'
                       : 'text-[#9d947e] hover:text-[#f0eadb]'
@@ -272,7 +273,7 @@ export const SarrafDojiView: React.FC = () => {
                   ? 'bg-[#1a1711] text-[#f2d78f] border-[#d9b25a]'
                   : 'bg-[#1a1711] text-[#9d947e] border-[#2b261b] hover:text-[#f0eadb]'
               }`}
-              title="Trend filter: 15m/30m use 1h EMA21 + slope, 1h uses 4h EMA21 + slope, 4h no filter"
+              title="Trend filter: 1m/3m/5m use 15m EMA21 + slope, 15m/30m use 1h EMA21 + slope, 1h uses 4h EMA21 + slope, 4h/1d no filter"
             >
               <span>Trend filter</span>
             </button>

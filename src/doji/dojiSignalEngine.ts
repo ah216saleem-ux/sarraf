@@ -3,6 +3,7 @@ import {
   RawBar,
   DojiTimeframe,
   DojiMode,
+  DOJI_TF_CONFIG,
   computeEma,
   computeAtr14,
   checkIsDoji,
@@ -199,7 +200,7 @@ export function simulateTradesForTimeframe(
   }
 
   const htfEma21Series =
-    trendFilter && timeframe !== '4h' ? buildHtfEma21Series(htfBars) : [];
+    trendFilter && DOJI_TF_CONFIG[timeframe].htf !== null ? buildHtfEma21Series(htfBars) : [];
 
   interface CandidateZone {
     id: string;

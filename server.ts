@@ -15,6 +15,8 @@ import {
   getCandleStore,
   getClosedCandles,
   getRedSniperCandlesForApi,
+  buildM3FromM1,
+  buildHigherTfFromStoredM1,
   loadRedSniperBotLogFromDisk,
   appendRedSniperBotLogToDisk,
   clearRedSniperBotLogOnDisk,
@@ -257,6 +259,7 @@ import {
 } from './server/spy/index.ts';
 import {
   DojiTimeframe,
+  DOJI_TF_CONFIG,
   DojiMode,
   RawBar,
   deduplicateBars,
@@ -867,15 +870,57 @@ app.get('/api/candles', (_req, res) => {
 const dojiOhlcCache = new Map<string, { time: number; data: any }>();
 
 const OANDA_GRANULARITY_MAP: Record<string, string> = {
+  '1m': 'M1',
+  '5m': 'M5',
   '15m': 'M15',
   '30m': 'M30',
   '1h': 'H1',
   '4h': 'H4',
+  '1d': 'D',
+  m1: 'M1',
+  m5: 'M5',
+  m15: 'M15',
+  m30: 'M30',
+  h1: 'H1',
+  h4: 'H4',
+  d1: 'D',
+  d: 'D',
+  M1: 'M1',
+  M5: 'M5',
   M15: 'M15',
   M30: 'M30',
   H1: 'H1',
   H4: 'H4',
+  D: 'D',
+  D1: 'D',
 };
+
+function aggregateRawM1BarsTo3m(m1BarsChronological: RawBar[], maxCount: number = 1000): RawBar[] {
+  const unique = deduplicateBars(m1BarsChronological);
+  if (unique.length === 0) return [];
+  const storedInput = unique.map((b) => ({
+    time: Math.floor(new Date(b.openTime).getTime() / 1000),
+    open: Number(b.open),
+    high: Number(b.high),
+    low: Number(b.low),
+    close: Number(b.close),
+    tickVolume: Number(b.tickVolume ?? b.volume ?? 1),
+    buyVol: 0,
+    sellVol: 0,
+    isClosed: !b.isOpen,
+  }));
+  const built3m = buildHigherTfFromStoredM1(storedInput, '3m', maxCount);
+  return built3m.map((c, idx) => ({
+    openTime: new Date(c.time * 1000).toISOString(),
+    open: c.open,
+    high: c.high,
+    low: c.low,
+    close: c.close,
+    volume: c.tickVolume,
+    tickVolume: c.tickVolume,
+    isOpen: idx === built3m.length - 1 && !c.isClosed,
+  }));
+}
 
 async function fetchOandaOhlc(interval: string, limit: string, to?: string): Promise<{ bars: any[]; data: { bars: any[] } }> {
   const apiKey = (process.env.OANDA_API_KEY || '').trim();
@@ -887,14 +932,18 @@ async function fetchOandaOhlc(interval: string, limit: string, to?: string): Pro
     accountEnv === 'live'
       ? 'https://api-fxtrade.oanda.com'
       : 'https://api-fxpractice.oanda.com';
-  const granularity = OANDA_GRANULARITY_MAP[interval] || 'M15';
+
+  const normInterval = interval.toLowerCase().trim();
+  const is3m = normInterval === '3m' || normInterval === 'm3';
+  const granularity = is3m ? 'M1' : OANDA_GRANULARITY_MAP[interval] || OANDA_GRANULARITY_MAP[normInterval] || 'M15';
   const parsedCount = parseInt(limit, 10);
-  const count = Number.isFinite(parsedCount) && parsedCount > 0 ? Math.min(5000, parsedCount) : 1000;
+  const requestedCount = Number.isFinite(parsedCount) && parsedCount > 0 ? Math.min(5000, parsedCount) : 1000;
+  const fetchCount = is3m ? Math.min(5000, requestedCount * 3) : requestedCount;
 
   const params = new URLSearchParams({
     price: 'M',
     granularity,
-    count: String(count),
+    count: String(fetchCount),
   });
   if (to) {
     params.set('to', to);
@@ -918,9 +967,8 @@ async function fetchOandaOhlc(interval: string, limit: string, to?: string): Pro
     throw new Error('Invalid OANDA candles payload');
   }
 
-  // OANDA returns chronological (oldest -> newest). Convert to biquote bar shape and reverse to newest-first
-  // so the frontend's existing [...rawBars].reverse() receives the exact same ordering and schema.
-  const bars = json.candles
+  // OANDA returns chronological (oldest -> newest).
+  const chronologicalBars: RawBar[] = json.candles
     .filter((c: any) => c && c.time && c.mid)
     .map((c: any) => {
       const vol = Number(c.volume ?? 0);
@@ -934,13 +982,61 @@ async function fetchOandaOhlc(interval: string, limit: string, to?: string): Pro
         tickVolume: vol,
         isOpen: !Boolean(c.complete),
       };
-    })
-    .reverse();
+    });
 
+  if (is3m) {
+    const aggregated3m = aggregateRawM1BarsTo3m(chronologicalBars, requestedCount);
+    const barsNewestFirst = [...aggregated3m].reverse();
+    return { bars: barsNewestFirst, data: { bars: barsNewestFirst } };
+  }
+
+  const bars = [...chronologicalBars].reverse();
   return { bars, data: { bars } };
 }
 
 async function fetchBiquoteOhlc(interval: string, limit: string, from?: string, to?: string): Promise<any> {
+  const normInterval = interval.toLowerCase().trim();
+  const is3m = normInterval === '3m' || normInterval === 'm3';
+
+  if (is3m) {
+    const parsedCount = parseInt(limit, 10);
+    const requestedCount = Number.isFinite(parsedCount) && parsedCount > 0 ? Math.min(5000, parsedCount) : 1000;
+
+    // Combine local stored M1 candles with upstream 1m candles from biquote.io and aggregate into 3m
+    const store = getCandleStore();
+    const localM1: RawBar[] = (store.M1 || []).map((c) => ({
+      openTime: c.openTime,
+      open: Number(c.open),
+      high: Number(c.high),
+      low: Number(c.low),
+      close: Number(c.close),
+      volume: Number(c.volume || 1),
+      tickVolume: Number(c.volume || 1),
+      isOpen: c.isClosed === false,
+    }));
+
+    let upstreamM1Chrono: RawBar[] = [];
+    try {
+      const m1Res = await fetchBiquoteOhlc('1m', String(Math.min(5000, requestedCount * 3)), from, to);
+      const rawM1 = m1Res?.data?.bars || m1Res?.bars || [];
+      if (Array.isArray(rawM1) && rawM1.length > 0) {
+        upstreamM1Chrono = [...rawM1].reverse();
+      }
+    } catch {}
+
+    let combinedM1 = deduplicateBars([...localM1, ...upstreamM1Chrono]);
+    if (to) {
+      const toMs = new Date(to).getTime();
+      if (Number.isFinite(toMs)) {
+        combinedM1 = combinedM1.filter((b) => new Date(b.openTime).getTime() < toMs);
+      }
+    }
+
+    const aggregated3m = aggregateRawM1BarsTo3m(combinedM1, requestedCount);
+    const barsNewestFirst = [...aggregated3m].reverse();
+    return { bars: barsNewestFirst, data: { bars: barsNewestFirst } };
+  }
+
   const params = new URLSearchParams({
     interval,
     limit,
@@ -1003,16 +1099,7 @@ app.get('/api/doji/ohlc', async (req, res) => {
 const dojiBacktestCandlesCache = new Map<DojiTimeframe, { time: number; bars: RawBar[] }>();
 
 function getDojiIntervalMs(tf: DojiTimeframe): number {
-  switch (tf) {
-    case '15m':
-      return 15 * 60 * 1000;
-    case '30m':
-      return 30 * 60 * 1000;
-    case '1h':
-      return 60 * 60 * 1000;
-    case '4h':
-      return 4 * 60 * 60 * 1000;
-  }
+  return DOJI_TF_CONFIG[tf].intervalMs;
 }
 
 async function fetchDojiOhlcPageOnServer(
@@ -1047,8 +1134,9 @@ async function getLast1000DojiCandles(tf: DojiTimeframe, nocache: boolean = fals
   }
 
   const store = getCandleStore();
-  const storeKey = tf === '15m' ? 'M15' : tf === '30m' ? 'M30' : tf === '1h' ? 'H1' : 'H4';
-  const rawLocalCandles = (store as any)?.[storeKey] || [];
+  const storeKey = DOJI_TF_CONFIG[tf].storeKey;
+  const rawLocalCandles =
+    tf === '3m' ? buildM3FromM1(store.M1 || []) : (store as any)?.[storeKey] || [];
   const localBars: RawBar[] = Array.isArray(rawLocalCandles)
     ? rawLocalCandles
         .filter((c: any) => c && (c.openTime || c.time))
@@ -1070,8 +1158,9 @@ async function getLast1000DojiCandles(tf: DojiTimeframe, nocache: boolean = fals
     ]);
     let pageAttempt = 0;
     const intervalMs = getDojiIntervalMs(tf);
+    const maxPageAttempts = DOJI_TF_CONFIG[tf].minutes <= 5 ? 10 : 5;
 
-    while (collected.length > 0 && collected.length < 1000 && pageAttempt < 5) {
+    while (collected.length > 0 && collected.length < 1000 && pageAttempt < maxPageAttempts) {
       pageAttempt += 1;
       const oldestOpenTime = collected[0]?.openTime;
       if (!oldestOpenTime) break;
@@ -1204,11 +1293,17 @@ function computeDojiBacktestBucketStats(
   };
 }
 
-// GET /api/doji/backtest?tf=15m|30m|1h|4h&mode=indicator|strict|loose&trend=0|1&merge=0|1&confirm=0|1
+// GET /api/doji/backtest?tf=1m|3m|5m|15m|30m|1h|4h|1d&mode=indicator|strict|loose&trend=0|1&merge=0|1&confirm=0|1
 app.get('/api/doji/backtest', async (req, res) => {
   try {
     const rawTf = String(req.query.tf || req.query.timeframe || '15m').toLowerCase().trim();
     const tfMap: Record<string, DojiTimeframe> = {
+      '1m': '1m',
+      m1: '1m',
+      '3m': '3m',
+      m3: '3m',
+      '5m': '5m',
+      m5: '5m',
       '15m': '15m',
       m15: '15m',
       '30m': '30m',
@@ -1217,6 +1312,9 @@ app.get('/api/doji/backtest', async (req, res) => {
       h1: '1h',
       '4h': '4h',
       h4: '4h',
+      '1d': '1d',
+      d1: '1d',
+      d: '1d',
     };
     const tf: DojiTimeframe = tfMap[rawTf] || '15m';
 

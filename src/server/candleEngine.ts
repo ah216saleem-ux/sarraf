@@ -141,6 +141,42 @@ export function runGapDetectionAudit() {
   return { m1Gaps, m5Gaps, m15Gaps, m30Gaps, h1Gaps, h4Gaps, d1Gaps };
 }
 
+// Aggregate M3 candles from M1 candles
+export function buildM3FromM1(m1Candles: Candle[]): Candle[] {
+  if (!m1Candles || m1Candles.length === 0) return [];
+  const periodMs = 3 * 60 * 1000;
+  const sorted = [...m1Candles].sort(
+    (a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime()
+  );
+  const map = new Map<number, Candle[]>();
+  for (const bar of sorted) {
+    const t = new Date(bar.openTime).getTime();
+    if (Number.isNaN(t)) continue;
+    const floored = Math.floor(t / periodMs) * periodMs;
+    const list = map.get(floored);
+    if (list) list.push(bar);
+    else map.set(floored, [bar]);
+  }
+  const keys = Array.from(map.keys()).sort((a, b) => a - b);
+  const result: Candle[] = [];
+  for (let idx = 0; idx < keys.length; idx++) {
+    const bucketMs = keys[idx];
+    const bars = map.get(bucketMs)!;
+    const isLast = idx === keys.length - 1;
+    result.push({
+      openTime: new Date(bucketMs).toISOString(),
+      open: bars[0].open,
+      high: Math.max(...bars.map((b) => b.high)),
+      low: Math.min(...bars.map((b) => b.low)),
+      close: bars[bars.length - 1].close,
+      volume: bars.reduce((sum, b) => sum + (b.volume || 1), 0),
+      isClosed: !isLast || bars.length >= 3,
+      usableForZones: true,
+    });
+  }
+  return result;
+}
+
 // Aggregate M5 candles from M1 candles
 export function buildM5FromM1(m1Candles: Candle[]): Candle[] {
   if (!m1Candles || m1Candles.length === 0) return [];

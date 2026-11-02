@@ -1,6 +1,6 @@
 // src/doji/DojiBacktestPage.tsx
 import React, { useState, useEffect, useCallback } from 'react';
-import { DojiTimeframe, DojiMode } from './dojiEngine';
+import { DojiTimeframe, ALL_DOJI_TIMEFRAMES, DojiMode } from './dojiEngine';
 import { DojiTrade } from './dojiSignalEngine';
 
 interface BacktestBucketStats {
@@ -61,7 +61,7 @@ interface BacktestApiResponse {
   trades: BacktestTradeItem[];
 }
 
-const TIMEFRAMES: DojiTimeframe[] = ['15m', '30m', '1h', '4h'];
+const TIMEFRAMES: DojiTimeframe[] = ALL_DOJI_TIMEFRAMES;
 const MODES: { value: DojiMode; label: string }[] = [
   { value: 'indicator', label: 'Indicator' },
   { value: 'strict', label: 'Strict' },
@@ -72,8 +72,8 @@ export const DojiBacktestPage: React.FC = () => {
   const [tf, setTf] = useState<DojiTimeframe>(() => {
     if (typeof window === 'undefined') return '15m';
     const param = new URLSearchParams(window.location.search).get('tf');
-    if (param === '15m' || param === '30m' || param === '1h' || param === '4h') {
-      return param;
+    if (param && (TIMEFRAMES as string[]).includes(param)) {
+      return param as DojiTimeframe;
     }
     return '15m';
   });
@@ -171,14 +171,14 @@ export const DojiBacktestPage: React.FC = () => {
 
           <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#1E2630]">
             {/* Timeframe Selector */}
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-[11px] font-mono text-[#8B949E] mr-1">TF:</span>
               {TIMEFRAMES.map((itemTf) => (
                 <button
                   key={itemTf}
                   type="button"
                   onClick={() => setTf(itemTf)}
-                  className={`px-2.5 py-1 rounded text-xs font-mono font-semibold border transition-colors ${
+                  className={`px-2 py-1 rounded text-xs font-mono font-semibold border transition-colors shrink-0 ${
                     tf === itemTf
                       ? 'bg-[#F59E0B]/15 text-[#F59E0B] border-[#F59E0B]/40'
                       : 'bg-[#161B22] text-[#8B949E] border-[#262C36] hover:text-white'

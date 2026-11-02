@@ -4,6 +4,7 @@ import { Clock, Activity } from 'lucide-react';
 import { DojiTrade, computeLivePnl } from './dojiSignalEngine';
 import {
   DojiTimeframe,
+  ALL_DOJI_TIMEFRAMES,
   formatSignedDollar,
   formatHeldDuration,
 } from './dojiEngine';
@@ -183,12 +184,12 @@ export const TradeLogSection: React.FC<TradeLogSectionProps> = ({
 
       {/* Filters: Timeframe & Result */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex items-center gap-1 bg-[#1a1711] p-1 rounded-[8px] border border-[#2b261b] font-['JetBrains_Mono',monospace]">
-          {(['All', '15m', '30m', '1h', '4h'] as const).map((tf) => (
+        <div className="flex items-center gap-1 bg-[#1a1711] p-1 rounded-[8px] border border-[#2b261b] font-['JetBrains_Mono',monospace] overflow-x-auto max-w-full">
+          {(['All', ...ALL_DOJI_TIMEFRAMES] as const).map((tf) => (
             <button
               key={tf}
               onClick={() => setSelectedTfFilter(tf)}
-              className={`px-2.5 py-1 rounded-[6px] transition-colors font-semibold cursor-pointer ${
+              className={`px-2 py-1 rounded-[6px] transition-colors font-semibold cursor-pointer shrink-0 ${
                 selectedTfFilter === tf
                   ? 'bg-[#12100c] text-[#f2d78f] border border-[#d9b25a]'
                   : 'text-[#9d947e] hover:text-[#f0eadb] border border-transparent'

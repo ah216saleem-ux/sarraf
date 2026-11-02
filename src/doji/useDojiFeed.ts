@@ -4,6 +4,8 @@ import * as signalR from '@microsoft/signalr';
 import { commandStore } from '../command/data/commandFeedStore';
 import {
   DojiTimeframe,
+  ALL_DOJI_TIMEFRAMES,
+  DOJI_TF_CONFIG,
   DojiZoneState,
   DojiMode,
   DojiZoneLifetime,
@@ -26,19 +28,56 @@ import {
   saveTradesToStorage,
 } from './dojiSignalEngine';
 
-const TIMEFRAMES: DojiTimeframe[] = ['15m', '30m', '1h', '4h'];
+const TIMEFRAMES: DojiTimeframe[] = ALL_DOJI_TIMEFRAMES;
+
+function createTfRecord<T>(factory: (tf: DojiTimeframe) => T): Record<DojiTimeframe, T> {
+  const record = {} as Record<DojiTimeframe, T>;
+  for (const tf of TIMEFRAMES) {
+    record[tf] = factory(tf);
+  }
+  return record;
+}
 
 function getIntervalMs(tf: DojiTimeframe): number {
-  switch (tf) {
-    case '15m':
-      return 15 * 60 * 1000;
-    case '30m':
-      return 30 * 60 * 1000;
-    case '1h':
-      return 60 * 60 * 1000;
-    case '4h':
-      return 4 * 60 * 60 * 1000;
+  return DOJI_TF_CONFIG[tf].intervalMs;
+}
+
+function aggregate1mBarsTo3mClient(m1Bars: RawBar[]): RawBar[] {
+  const unique = deduplicateBars(m1Bars);
+  if (unique.length === 0) return [];
+  const periodMs = 3 * 60 * 1000;
+  const buckets = new Map<number, RawBar[]>();
+  for (const b of unique) {
+    const ms = new Date(b.openTime).getTime();
+    if (!Number.isFinite(ms)) continue;
+    const bucketMs = Math.floor(ms / periodMs) * periodMs;
+    const list = buckets.get(bucketMs);
+    if (list) list.push(b);
+    else buckets.set(bucketMs, [b]);
   }
+  const keys = Array.from(buckets.keys()).sort((a, b) => a - b);
+  return keys.map((bucketMs, idx) => {
+    const group = buckets.get(bucketMs)!;
+    const isLast = idx === keys.length - 1;
+    let high = group[0].high;
+    let low = group[0].low;
+    let vol = 0;
+    for (const g of group) {
+      if (g.high > high) high = g.high;
+      if (g.low < low) low = g.low;
+      vol += g.tickVolume ?? g.volume ?? 0;
+    }
+    return {
+      openTime: new Date(bucketMs).toISOString(),
+      open: group[0].open,
+      high,
+      low,
+      close: group[group.length - 1].close,
+      volume: vol,
+      tickVolume: vol,
+      isOpen: isLast && (group.some((g) => g.isOpen) || group.length < 3),
+    };
+  });
 }
 
 export function useDojiFeed(
@@ -53,12 +92,9 @@ export function useDojiFeed(
   slAtrMultiplierParam: number = 0.25,
   initialZoneLifetime: DojiZoneLifetime = 'untilBroken'
 ) {
-  const [barsMap, setBarsMap] = useState<Record<DojiTimeframe, RawBar[]>>({
-    '15m': [],
-    '30m': [],
-    '1h': [],
-    '4h': [],
-  });
+  const [barsMap, setBarsMap] = useState<Record<DojiTimeframe, RawBar[]>>(() =>
+    createTfRecord(() => [])
+  );
 
   const [livePrice, setLivePrice] = useState<number>(() =>
     commandStore.currentPrice > 0 ? commandStore.currentPrice : 0
@@ -96,36 +132,28 @@ export function useDojiFeed(
   const effectiveMaxDistanceAtr = maxDistanceAtr;
   const effectiveSlAtrMultiplier = slAtrMultiplierParam ?? 0.25;
 
-  const [zonesMap, setZonesMap] = useState<Record<DojiTimeframe, DojiZone[]>>({
-    '15m': [],
-    '30m': [],
-    '1h': [],
-    '4h': [],
-  });
-  const [tfStatsMap, setTfStatsMap] = useState<Record<DojiTimeframe, DojiTimeframeStats>>({
-    '15m': { timeframe: '15m', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-    '30m': { timeframe: '30m', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-    '1h': { timeframe: '1h', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-    '4h': { timeframe: '4h', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-  });
+  const [zonesMap, setZonesMap] = useState<Record<DojiTimeframe, DojiZone[]>>(() =>
+    createTfRecord(() => [])
+  );
+  const [tfStatsMap, setTfStatsMap] = useState<Record<DojiTimeframe, DojiTimeframeStats>>(() =>
+    createTfRecord((tf) => ({
+      timeframe: tf,
+      barsCount: 0,
+      requestedBars: 1000,
+      dojisCount: 0,
+      validCount: 0,
+    }))
+  );
   const [allValidZones, setAllValidZones] = useState<DojiZone[]>([]);
   const [activeSignal, setActiveSignal] = useState<ActiveDojiSignal | null>(null);
 
   // Always rebuild trades freshly from loaded candles on page load (never trust stale localStorage)
   const [allTrades, setAllTrades] = useState<DojiTrade[]>([]);
-  const [activeTradesMap, setActiveTradesMap] = useState<Record<DojiTimeframe, DojiTrade | null>>({
-    '15m': null,
-    '30m': null,
-    '1h': null,
-    '4h': null,
-  });
+  const [activeTradesMap, setActiveTradesMap] = useState<Record<DojiTimeframe, DojiTrade | null>>(
+    () => createTfRecord(() => null)
+  );
 
-  const barsRef = useRef<Record<DojiTimeframe, RawBar[]>>({
-    '15m': [],
-    '30m': [],
-    '1h': [],
-    '4h': [],
-  });
+  const barsRef = useRef<Record<DojiTimeframe, RawBar[]>>(createTfRecord(() => []));
   const livePriceRef = useRef<number>(
     commandStore.currentPrice > 0 ? commandStore.currentPrice : 0
   );
@@ -169,21 +197,17 @@ export function useDojiFeed(
   slAtrMultiplierRef.current = effectiveSlAtrMultiplier;
   const tfStatsMapRef = useRef<Record<DojiTimeframe, DojiTimeframeStats>>(tfStatsMap);
   tfStatsMapRef.current = tfStatsMap;
-  const zonesMapRef = useRef<Record<DojiTimeframe, DojiZone[]>>({
-    '15m': [],
-    '30m': [],
-    '1h': [],
-    '4h': [],
-  });
-  const activeTradesMapRef = useRef<Record<DojiTimeframe, DojiTrade | null>>({
-    '15m': null,
-    '30m': null,
-    '1h': null,
-    '4h': null,
-  });
+  const zonesMapRef = useRef<Record<DojiTimeframe, DojiZone[]>>(createTfRecord(() => []));
+  const activeTradesMapRef = useRef<Record<DojiTimeframe, DojiTrade | null>>(
+    createTfRecord(() => null)
+  );
+  const tradesByTfRef = useRef<Record<DojiTimeframe, DojiTrade[]>>(createTfRecord(() => []));
+  const tfClosedMetricsRef = useRef<
+    Record<DojiTimeframe, { atr: number; ema9: number; closedBarsCount: number }>
+  >(createTfRecord(() => ({ atr: 3.5, ema9: 0, closedBarsCount: 0 })));
   const isSyncingToCommandStoreRef = useRef<boolean>(false);
 
-  // Re-extract zones and run trade simulation from closed bars across all 4 timeframes
+  // Re-extract zones and run trade simulation from closed bars across timeframes
   const reExtractAllZones = useCallback(
     (
       currentP: number,
@@ -199,7 +223,8 @@ export function useDojiFeed(
       zoneLifetimeOverride?: DojiZoneLifetime,
       trendFilterOverride?: boolean,
       zoneMergeOverride?: boolean,
-      retestConfirmOverride?: boolean
+      retestConfirmOverride?: boolean,
+      onlyTimeframes?: DojiTimeframe[]
     ) => {
       const useRedOnly = typeof redOnlyOverride === 'boolean' ? redOnlyOverride : redOnlyRef.current;
       const useMode = modeOverride ?? dojiModeRef.current;
@@ -239,38 +264,56 @@ export function useDojiFeed(
           ? slAtrMultiplierOverride
           : slAtrMultiplierRef.current;
 
+      // Determine which timeframes need recalculation (if onlyTimeframes is passed, include any timeframe whose HTF is in onlyTimeframes)
+      const targetTfSet = new Set<DojiTimeframe>(onlyTimeframes ?? TIMEFRAMES);
+      if (onlyTimeframes) {
+        for (const tf of TIMEFRAMES) {
+          const htf = DOJI_TF_CONFIG[tf].htf;
+          if (htf && targetTfSet.has(htf)) {
+            targetTfSet.add(tf);
+          }
+        }
+      }
+
       const currentBars = barsRef.current;
-      const newZonesMap: Record<DojiTimeframe, DojiZone[]> = {
-        '15m': [],
-        '30m': [],
-        '1h': [],
-        '4h': [],
-      };
-      const newStatsMap: Record<DojiTimeframe, DojiTimeframeStats> = {
-        '15m': { timeframe: '15m', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-        '30m': { timeframe: '30m', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-        '1h': { timeframe: '1h', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-        '4h': { timeframe: '4h', barsCount: 0, requestedBars: 1000, dojisCount: 0, validCount: 0 },
-      };
-      const combinedZones: DojiZone[] = [];
-      const newActiveTrades: Record<DojiTimeframe, DojiTrade | null> = {
-        '15m': null,
-        '30m': null,
-        '1h': null,
-        '4h': null,
-      };
-      const combinedTrades: DojiTrade[] = [];
+      const newZonesMap: Record<DojiTimeframe, DojiZone[]> = createTfRecord(
+        (tf) => zonesMapRef.current[tf] || []
+      );
+      const newStatsMap: Record<DojiTimeframe, DojiTimeframeStats> = createTfRecord(
+        (tf) =>
+          tfStatsMapRef.current[tf] || {
+            timeframe: tf,
+            barsCount: 0,
+            requestedBars: 1000,
+            dojisCount: 0,
+            validCount: 0,
+          }
+      );
+      const newActiveTrades: Record<DojiTimeframe, DojiTrade | null> = createTfRecord(
+        (tf) => activeTradesMapRef.current[tf] ?? null
+      );
+      const newTradesByTf: Record<DojiTimeframe, DojiTrade[]> = createTfRecord(
+        (tf) => tradesByTfRef.current[tf] || []
+      );
 
       for (const tf of TIMEFRAMES) {
+        if (!targetTfSet.has(tf)) continue;
+
         const tfBars = currentBars[tf];
         if (tfBars && tfBars.length > 0) {
           const refPrice = currentP > 0 ? currentP : tfBars[tfBars.length - 1].close;
-          const htfBars =
-            tf === '15m' || tf === '30m'
-              ? currentBars['1h']
-              : tf === '1h'
-              ? currentBars['4h']
-              : undefined;
+          const htf = DOJI_TF_CONFIG[tf].htf;
+          const htfBars = htf ? currentBars[htf] : undefined;
+
+          const closedBars = tfBars.filter((b) => !b.isOpen);
+          const cachedAtr = computeAtr14(closedBars);
+          const emaList = computeEma(closedBars, 9);
+          const cachedEma9 = emaList.length > 0 ? emaList[emaList.length - 1].value : refPrice;
+          tfClosedMetricsRef.current[tf] = {
+            atr: cachedAtr,
+            ema9: cachedEma9,
+            closedBarsCount: closedBars.length,
+          };
 
           // 1. Run deterministic signal engine per timeframe (strictly separate break and retest bars)
           const { trades, activeTrade, consumedOpenTimes, filterStats } =
@@ -294,10 +337,7 @@ export function useDojiFeed(
               tp3RRef.current
             );
           newActiveTrades[tf] = activeTrade;
-          combinedTrades.push(...trades);
-          if (activeTrade) {
-            combinedTrades.push(activeTrade);
-          }
+          newTradesByTf[tf] = activeTrade ? [...trades, activeTrade] : trades;
 
           // 2. Extract up to useMaxZonesPerTf valid zones per timeframe (default 50, maxDistanceAtr default 0)
           const { zones: tfZones, stats } = extractValidDojiZonesWithStats(
@@ -370,7 +410,21 @@ export function useDojiFeed(
             zoneMerge: useZoneMerge,
             retestConfirm: useRetestConfirm,
           };
-          combinedZones.push(...verifiedTfZones);
+        } else {
+          newZonesMap[tf] = [];
+          newTradesByTf[tf] = [];
+          newActiveTrades[tf] = null;
+        }
+      }
+
+      const combinedZones: DojiZone[] = [];
+      const combinedTrades: DojiTrade[] = [];
+      for (const tf of TIMEFRAMES) {
+        if (newZonesMap[tf]?.length) {
+          combinedZones.push(...newZonesMap[tf]);
+        }
+        if (newTradesByTf[tf]?.length) {
+          combinedTrades.push(...newTradesByTf[tf]);
         }
       }
 
@@ -378,6 +432,7 @@ export function useDojiFeed(
 
       zonesMapRef.current = newZonesMap;
       tfStatsMapRef.current = newStatsMap;
+      tradesByTfRef.current = newTradesByTf;
       setZonesMap(newZonesMap);
       setTfStatsMap(newStatsMap);
       setAllValidZones(combinedZones);
@@ -407,6 +462,7 @@ export function useDojiFeed(
   );
 
   // Live strength, live retest heads-up & open trade P/L update on each tick
+  // Uses cached closed-bar metrics (atr, ema9, closedBarsCount) so it never loops over 1000 bars per timeframe on live ticks
   const updateLiveStrengths = useCallback((currentP: number) => {
     if (currentP <= 0) return;
 
@@ -421,10 +477,11 @@ export function useDojiFeed(
       const bars = currentBars[tf];
       if (!zones || zones.length === 0 || !bars || bars.length === 0) continue;
 
-      const closedBars = bars.filter((b) => !b.isOpen);
-      const atr = computeAtr14(closedBars);
-      const emaList = computeEma(closedBars, 9);
-      const ema9 = emaList.length > 0 ? emaList[emaList.length - 1].value : currentP;
+      const cachedMetrics = tfClosedMetricsRef.current[tf];
+      const atr = cachedMetrics?.atr || tfStatsMapRef.current[tf]?.atr || 3.5;
+      const ema9 = cachedMetrics?.ema9 > 0 ? cachedMetrics.ema9 : currentP;
+      const closedBarsCount =
+        cachedMetrics?.closedBarsCount > 0 ? cachedMetrics.closedBarsCount : Math.max(0, bars.length - 1);
 
       const updatedZones = zones.map((z) => {
         const s = calculateZoneStrength(
@@ -442,7 +499,7 @@ export function useDojiFeed(
           currentP,
           ema9,
           atr,
-          closedBars.length
+          closedBarsCount
         );
 
         const distPts = Number((((z.high + z.low) / 2) - currentP).toFixed(2));
@@ -544,10 +601,13 @@ export function useDojiFeed(
   }, []);
 
   const fetchOhlcPage = useCallback(async (query: string): Promise<RawBar[]> => {
-    const urls = [
-      `/api/doji/ohlc?${query}`,
-      `https://biquote.io/api/XAUUSD/ohlc?${query}`,
-    ];
+    const is3m = /(?:^|&)interval=3m(?:&|$)/.test(query);
+    const urls = is3m
+      ? [`/api/doji/ohlc?${query}`]
+      : [
+          `/api/doji/ohlc?${query}`,
+          `https://biquote.io/api/XAUUSD/ohlc?${query}`,
+        ];
 
     for (const url of urls) {
       try {
@@ -557,6 +617,23 @@ export function useDojiFeed(
           const rawBars = data?.data?.bars || data?.bars;
           if (Array.isArray(rawBars) && rawBars.length > 0) {
             return [...rawBars].reverse();
+          }
+        }
+      } catch {}
+    }
+
+    // Fallback for 3m if /api/doji/ohlc was unreachable: fetch 1m from biquote.io and aggregate into 3m
+    if (is3m) {
+      try {
+        const m1Query = query.replace('interval=3m', 'interval=1m');
+        const res = await fetch(`https://biquote.io/api/XAUUSD/ohlc?${m1Query}`, {
+          headers: { Accept: 'application/json' },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const rawBars = data?.data?.bars || data?.bars;
+          if (Array.isArray(rawBars) && rawBars.length > 0) {
+            return aggregate1mBarsTo3mClient([...rawBars].reverse());
           }
         }
       } catch {}
@@ -596,7 +673,23 @@ export function useDojiFeed(
         };
         barsRef.current = updatedMap;
         setBarsMap(updatedMap);
-        reExtractAllZones(livePriceRef.current);
+        reExtractAllZones(
+          livePriceRef.current,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          [tf]
+        );
       } catch {}
     },
     [fetchOhlcPage, reExtractAllZones]
@@ -733,7 +826,23 @@ export function useDojiFeed(
       setBarsMap(updatedMap);
 
       if (closedTimeframes.length > 0) {
-        reExtractAllZones(p);
+        reExtractAllZones(
+          p,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          closedTimeframes
+        );
         for (const tf of closedTimeframes) {
           void refetchClosedTimeframe(tf);
         }
@@ -809,7 +918,7 @@ export function useDojiFeed(
     }
   }, [applyIncomingQuote]);
 
-  // 1. Initial Load: Fetch candles for all 4 timeframes and rebuild trades from candles
+  // 1. Initial Load: Fetch candles for all 8 timeframes and rebuild trades from candles
   useEffect(() => {
     let isCancelled = false;
 
@@ -820,7 +929,8 @@ export function useDojiFeed(
       // If fewer than 1000 candles returned, request older candles using from= until 1000 or data ends
       let pageAttempt = 0;
       const intervalMs = getIntervalMs(tf);
-      while (collected.length < 1000 && pageAttempt < 5) {
+      const maxAttempts = DOJI_TF_CONFIG[tf].minutes <= 5 ? 10 : 5;
+      while (collected.length < 1000 && pageAttempt < maxAttempts) {
         pageAttempt += 1;
         const oldestOpenTime = collected[0]?.openTime;
         if (!oldestOpenTime) break;
@@ -852,27 +962,20 @@ export function useDojiFeed(
 
     async function loadAllTimeframes() {
       setIsLoadingCandles(true);
-      const results = await Promise.all([
-        fetchTimeframeCandles('15m'),
-        fetchTimeframeCandles('30m'),
-        fetchTimeframeCandles('1h'),
-        fetchTimeframeCandles('4h'),
-      ]);
+      const results = await Promise.all(TIMEFRAMES.map((tf) => fetchTimeframeCandles(tf)));
 
       if (isCancelled) return;
 
-      const newBarsMap: Record<DojiTimeframe, RawBar[]> = {
-        '15m': results[0],
-        '30m': results[1],
-        '1h': results[2],
-        '4h': results[3],
-      };
+      const newBarsMap: Record<DojiTimeframe, RawBar[]> = createTfRecord(
+        (tf) => results[TIMEFRAMES.indexOf(tf)] || []
+      );
 
       barsRef.current = newBarsMap;
       setBarsMap(newBarsMap);
 
-      const latest15m = results[0][results[0].length - 1];
-      const prev15m = results[0].length > 1 ? results[0][0] : latest15m;
+      const refTfBars = newBarsMap['15m']?.length ? newBarsMap['15m'] : newBarsMap[selectedTfRef.current] || [];
+      const latest15m = refTfBars[refTfBars.length - 1];
+      const prev15m = refTfBars.length > 1 ? refTfBars[0] : latest15m;
       const storeP = commandStore.currentPrice;
       const initialP = storeP > 0 ? storeP : latest15m ? latest15m.close : 0;
 
