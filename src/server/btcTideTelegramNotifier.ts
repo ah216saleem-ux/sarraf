@@ -8,10 +8,15 @@ import {
   hasDispatchedEventKeyInSqlite,
   recordDispatchedEventKeyInSqlite,
 } from "./btcTideSqliteDatabase.ts";
-import { DecisionEngineResult } from "../btcTide/signalEngine.ts";
+import {
+  DecisionEngineResult,
+  SlTpPlanPreview,
+  TP1_PROFIT_LOCK_TPBASE_MULT,
+} from "../btcTide/signalEngine.ts";
+import { resolveClosedTradePnlUsdPerBtc } from "./btcTideSignalDatabase.ts";
 
 // ============================================================================
-// PHASE 3 LIVE DISPATCH & SAFETY CONFIGURATION
+// PHASE 3–6 LIVE DISPATCH & SAFETY CONFIGURATION
 // Confirmed: BTC Tide ONLY sends Telegram signal messages and NEVER places
 // any real exchange orders anywhere.
 // ============================================================================
@@ -68,16 +73,127 @@ function markBtcTideEventKeyDispatched(key: string): void {
   recordDispatchedEventKeyInSqlite(key);
 }
 
-function ensureMandatoryDisclaimer(msg: string): string {
-  const trimmed = msg.trimEnd();
-  if (trimmed.endsWith(MANDATORY_RISK_DISCLAIMER)) {
-    return trimmed;
-  }
-  return `${trimmed}\n\n${MANDATORY_RISK_DISCLAIMER}`;
-}
-
 function formatPrice(p: number): string {
   return `$${p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function formatSignalPrice(p: number): string {
+  return p.toFixed(2);
+}
+
+function resolveTradeTrueRMetrics(trade: BtcTideTradeRecord) {
+  const slDist =
+    typeof trade.slDist === "number" && Number.isFinite(trade.slDist) && trade.slDist > 0
+      ? trade.slDist
+      : trade.oneR > 0
+      ? trade.oneR
+      : Math.max(1, Math.abs(trade.entryPrice - trade.initialSlPrice));
+  const oneR = slDist;
+  const slPct =
+    typeof trade.slPct === "number" && Number.isFinite(trade.slPct) && trade.slPct > 0
+      ? trade.slPct
+      : trade.entryPrice > 0
+      ? Number(((slDist / trade.entryPrice) * 100).toFixed(2))
+      : 0;
+  const tp1Dist = Math.abs(trade.tp1Price - trade.entryPrice);
+  const tp2Dist = Math.abs(trade.tp2Price - trade.entryPrice);
+  const tp3Dist = Math.abs(trade.tp3Price - trade.entryPrice);
+  const tpBase =
+    typeof trade.tpBase === "number" && Number.isFinite(trade.tpBase) && trade.tpBase > 0
+      ? trade.tpBase
+      : tp1Dist;
+  const tp1R =
+    typeof trade.tp1R === "number" && Number.isFinite(trade.tp1R)
+      ? trade.tp1R
+      : Number((tp1Dist / oneR).toFixed(2));
+  const tp2R =
+    typeof trade.tp2R === "number" && Number.isFinite(trade.tp2R)
+      ? trade.tp2R
+      : Number((tp2Dist / oneR).toFixed(2));
+  const tp3R =
+    typeof trade.tp3R === "number" && Number.isFinite(trade.tp3R)
+      ? trade.tp3R
+      : Number((tp3Dist / oneR).toFixed(2));
+  const beLockDist = Number((TP1_PROFIT_LOCK_TPBASE_MULT * tpBase).toFixed(2));
+  const beLockR = Number((beLockDist / oneR).toFixed(2));
+  const bePlusStopPrice =
+    trade.side === "LONG"
+      ? Number((trade.entryPrice + beLockDist).toFixed(2))
+      : Number((trade.entryPrice - beLockDist).toFixed(2));
+
+  return {
+    slDist,
+    oneR,
+    slPct,
+    tp1Dist,
+    tp2Dist,
+    tp3Dist,
+    tpBase,
+    tp1R,
+    tp2R,
+    tp3R,
+    beLockDist,
+    beLockR,
+    bePlusStopPrice,
+  };
+}
+
+export function formatBtcTideNewSignalMessage(params: {
+  side: "LONG" | "SHORT";
+  entryPrice: number;
+  slPrice: number;
+  tp1Price: number;
+  tp2Price: number;
+  tp3Price: number;
+}): string {
+  const actionLabel = params.side === "LONG" ? "BUY" : "SELL";
+  return [
+    `BTC/USD SIGNAL — ${actionLabel}`,
+    ``,
+    `Entry: ${formatSignalPrice(params.entryPrice)}`,
+    ``,
+    `Stop Loss (SL): ${formatSignalPrice(params.slPrice)}`,
+    ``,
+    `Take Profit Targets:`,
+    ``,
+    `* TP1: ${formatSignalPrice(params.tp1Price)}`,
+    `* TP2: ${formatSignalPrice(params.tp2Price)}`,
+    `* TP3: ${formatSignalPrice(params.tp3Price)}`,
+  ].join("\n");
+}
+
+export function formatBtcTideTpHitMessage(tpLevel: 1 | 2 | 3): string {
+  if (tpLevel === 1) {
+    return [
+      `BTC/USD — TP1 HIT`,
+      ``,
+      `First target successfully achieved.`,
+      `Trade remains active.`,
+    ].join("\n");
+  }
+  if (tpLevel === 2) {
+    return [
+      `BTC/USD — TP2 HIT`,
+      ``,
+      `Second target successfully achieved.`,
+      `Trade remains active.`,
+    ].join("\n");
+  }
+  return [
+    `BTC/USD — TP3 HIT`,
+    ``,
+    `Third target successfully achieved.`,
+    `Trade closed.`,
+  ].join("\n");
+}
+
+export function formatBtcTideSlHitMessage(): string {
+  return [
+    `BTC/USD — STOP LOSS HIT`,
+    ``,
+    `Stop loss level reached.`,
+    `Trade closed.`,
+  ].join("\n");
 }
 
 async function dispatchNonBlocking(
@@ -87,7 +203,7 @@ async function dispatchNonBlocking(
   options?: TelegramNotifyOptions
 ): Promise<void> {
   try {
-    const msg = ensureMandatoryDisclaimer(rawMsg);
+    const msg = rawMsg.trim();
 
     if (options?.simulateFailure) {
       await Promise.reject(new Error(`Simulated Telegram network failure for ${label}`));
@@ -113,7 +229,7 @@ async function dispatchNonBlocking(
       const gate = liveDispatchGateEvaluator();
       if (!gate.allowed) {
         console.warn(
-          `[BTC TIDE OUTBOX QUEUE] Self-check notice (${gate.reason || 'degraded'}) — queuing ${key} (${label}) in command_outbox.json for automatic retry.`
+          `[BTC TIDE OUTBOX QUEUE] Self-check notice (${gate.reason || "degraded"}) — queuing ${key} (${label}) in command_outbox.json for automatic retry.`
         );
       }
     }
@@ -121,10 +237,21 @@ async function dispatchNonBlocking(
     // Mark key dispatched immediately to prevent duplicate queueing across ticks
     markBtcTideEventKeyDispatched(key);
 
+    const startMs = Date.now();
     enqueueCommandOutbox(msg, key);
-    sendTelegramMessageWithRetry(msg, 3, key).catch((err) => {
-      console.warn(`[BTC TIDE TELEGRAM] Non-blocking send error (${label}):`, err?.message || err);
-    });
+    sendTelegramMessageWithRetry(msg, 3, key)
+      .then((res) => {
+        const elapsedMs = Date.now() - startMs;
+        console.log(
+          `[BTC TIDE TELEGRAM SEND RESULT] key=${key} label=${label} success=${res.success} messageId=${res.messageId || "none"} elapsedMs=${elapsedMs}ms${res.error ? ` detail=${res.error}` : ""}`
+        );
+      })
+      .catch((err) => {
+        const elapsedMs = Date.now() - startMs;
+        console.warn(
+          `[BTC TIDE TELEGRAM SEND RESULT] key=${key} label=${label} success=false elapsedMs=${elapsedMs}ms detail=${err?.message || err}`
+        );
+      });
   } catch (err: any) {
     console.warn(`[BTC TIDE TELEGRAM] Non-blocking dispatch error (${label}):`, err?.message || err);
   }
@@ -132,29 +259,28 @@ async function dispatchNonBlocking(
 
 export async function notifyNewBtcTideSignal(
   trade: BtcTideTradeRecord,
-  _decision?: DecisionEngineResult,
+  decision?: DecisionEngineResult,
   options?: TelegramNotifyOptions
 ): Promise<void> {
   try {
-    const dirIcon = trade.side === "LONG" ? "🟢" : "🔴";
-    const msg = [
-      `${dirIcon} BTC/USD LIVE TRADE SIGNAL — ${trade.side}`,
-      `━━━━━━━━━━━━━━`,
-      `📍 Entry: ${formatPrice(trade.entryPrice)}`,
-      `🛑 Stop Loss: ${formatPrice(trade.initialSlPrice)} (1R = $${trade.oneR.toFixed(2)})`,
-      ``,
-      `🎯 Take Profit 1 (1R): ${formatPrice(trade.tp1Price)}`,
-      `🎯 Take Profit 2 (2R): ${formatPrice(trade.tp2Price)}`,
-      `🏆 Take Profit 3 (3R): ${formatPrice(trade.tp3Price)}`,
-      `━━━━━━━━━━━━━━`,
-      `⚡ Confidence: ${Math.round(trade.confidence)}% | Lead: +${Math.round(trade.lead)}% | Mode: LIVE`,
-      MANDATORY_RISK_DISCLAIMER,
-    ].join("\n");
+    const grade = trade.grade || decision?.setupGrade || "A";
+    const m = resolveTradeTrueRMetrics(trade);
+
+    const msg = formatBtcTideNewSignalMessage({
+      side: trade.side,
+      entryPrice: trade.entryPrice,
+      slPrice: trade.initialSlPrice,
+      tp1Price: trade.tp1Price,
+      tp2Price: trade.tp2Price,
+      tp3Price: trade.tp3Price,
+    });
 
     const effectiveDryRun =
       options?.dryRun !== undefined ? options.dryRun : BTC_TIDE_DRY_RUN;
     if (!effectiveDryRun) {
-      console.log(`[BTC TIDE TELEGRAM] Dispatching LIVE SIGNAL: ${trade.side} @ ${trade.entryPrice}`);
+      console.log(
+        `[BTC TIDE TELEGRAM] Dispatching LIVE SIGNAL: ${trade.side} Grade ${grade} @ ${trade.entryPrice} (SL=$${m.slDist.toFixed(2)} / ${m.slPct.toFixed(2)}%, TP1=+${m.tp1R.toFixed(2)}R)`
+      );
     }
 
     const key = `tide_new_${trade.id}`;
@@ -167,18 +293,11 @@ export async function notifyNewBtcTideSignal(
 export async function notifyBtcTideTpHit(
   trade: BtcTideTradeRecord,
   tpLevel: 1 | 2 | 3,
-  price: number,
+  _price: number,
   options?: TelegramNotifyOptions
 ): Promise<void> {
   try {
-    const headline =
-      tpLevel === 1
-        ? `✅ BTC/USD TP1 HIT (${formatPrice(price)}) — Stop Loss moved to Breakeven (${formatPrice(trade.entryPrice)})`
-        : tpLevel === 2
-        ? `✅ BTC/USD TP2 HIT (${formatPrice(price)}) — +2.0R Locked`
-        : `🏆 BTC/USD TP3 HIT (${formatPrice(price)}) — +3.0R Full Target Completed!`;
-
-    const msg = [headline, MANDATORY_RISK_DISCLAIMER].join("\n\n");
+    const msg = formatBtcTideTpHitMessage(tpLevel);
 
     const effectiveDryRun =
       options?.dryRun !== undefined ? options.dryRun : BTC_TIDE_DRY_RUN;
@@ -198,10 +317,8 @@ export async function notifyBtcTideBreakevenMove(
   options?: TelegramNotifyOptions
 ): Promise<void> {
   try {
-    const msg = [
-      `🛡️ BTC/USD Stop Loss Moved to Breakeven (${formatPrice(trade.entryPrice)})`,
-      MANDATORY_RISK_DISCLAIMER,
-    ].join("\n\n");
+    const m = resolveTradeTrueRMetrics(trade);
+    const msg = `BTC/USD — Stop Loss Moved to ${formatSignalPrice(m.bePlusStopPrice)}`;
     const key = `tide_be_${trade.id}`;
     await dispatchNonBlocking(msg, key, "be", options);
   } catch (err: any) {
@@ -211,19 +328,26 @@ export async function notifyBtcTideBreakevenMove(
 
 export async function notifyBtcTideBreakevenClose(
   trade: BtcTideTradeRecord,
-  price: number,
+  _price: number,
   options?: TelegramNotifyOptions
 ): Promise<void> {
   try {
+    const m = resolveTradeTrueRMetrics(trade);
+    const lockedR =
+      typeof trade.realizedR === "number"
+        ? trade.realizedR
+        : Number((0.5 * m.tp1R + 0.5 * m.beLockR).toFixed(2));
     const msg = [
-      `🛡️ BTC/USD (${formatPrice(price)}) — Closed at breakeven after TP1 (+0.5R)`,
-      MANDATORY_RISK_DISCLAIMER,
-    ].join("\n\n");
+      `BTC/USD — BREAKEVEN STOP HIT`,
+      ``,
+      `Protected stop level reached after TP1.`,
+      `Trade closed.`,
+    ].join("\n");
     const effectiveDryRun =
       options?.dryRun !== undefined ? options.dryRun : BTC_TIDE_DRY_RUN;
     if (!effectiveDryRun) {
       console.log(
-        `[BTC TIDE TELEGRAM] Dispatching BREAKEVEN CLOSE for ${trade.id}: Closed at breakeven after TP1 (+0.5R)`
+        `[BTC TIDE TELEGRAM] Dispatching BREAKEVEN+ CLOSE for ${trade.id}: Closed at protected stop after TP1 (+${lockedR.toFixed(2)}R)`
       );
     }
     const key = `tide_be_close_${trade.id}`;
@@ -241,15 +365,12 @@ export async function notifyBtcTideSlHit(
   try {
     const isBe =
       trade.outcome === "TP1+BE" ||
-      (trade.beMoved && Math.abs(trade.slPrice - trade.entryPrice) < 1);
+      (trade.beMoved && Math.abs(trade.slPrice - trade.entryPrice) <= 0.25 * trade.oneR);
     if (isBe) {
       await notifyBtcTideBreakevenClose(trade, price, options);
       return;
     }
-    const msg = [
-      `🛑 BTC/USD STOP LOSS HIT (${formatPrice(price)}) — Trade Closed (-1.00R)`,
-      MANDATORY_RISK_DISCLAIMER,
-    ].join("\n\n");
+    const msg = formatBtcTideSlHitMessage();
     const effectiveDryRun =
       options?.dryRun !== undefined ? options.dryRun : BTC_TIDE_DRY_RUN;
     if (!effectiveDryRun) {
@@ -268,27 +389,26 @@ export async function notifyBtcTideExpiry(
   options?: TelegramNotifyOptions
 ): Promise<void> {
   try {
+    const m = resolveTradeTrueRMetrics(trade);
     const realRVal = typeof trade.realizedR === "number" ? trade.realizedR : trade.currentR;
+    const pnlUsd = resolveClosedTradePnlUsdPerBtc(trade);
     const r = `${realRVal >= 0 ? "+" : ""}${realRVal.toFixed(2)}R`;
+    const pnlStr = `${pnlUsd >= 0 ? "+" : "-"}$${Math.abs(pnlUsd).toFixed(2)} per 1 BTC`;
     const isAfterTp1 = trade.outcome === "EXPIRED_AFTER_TP1";
     const headerLine = isAfterTp1
-      ? `⏱️ MAX 3H LIFETIME AFTER TP1 - CLOSE AT MARKET`
-      : `⏱️ SIGNAL EXPIRED - CLOSE AT MARKET`;
+      ? `BTC/USD — MAX 3H LIFETIME AFTER TP1`
+      : `BTC/USD — SIGNAL EXPIRED`;
     const msg = [
       headerLine,
-      `Direction: BTC/USD ${trade.side}`,
-      `Outcome: ${trade.outcome || "EXPIRED"}`,
-      `Entry: ${formatPrice(trade.entryPrice)}`,
-      `Close Price: ${formatPrice(price)}`,
-      `Real Locked R: ${r}${isAfterTp1 ? " (includes +0.50R banked at TP1)" : ""}`,
       ``,
-      MANDATORY_RISK_DISCLAIMER,
+      `Time limit reached at ${formatSignalPrice(price)}.`,
+      `Trade closed.`,
     ].join("\n");
     const effectiveDryRun =
       options?.dryRun !== undefined ? options.dryRun : BTC_TIDE_DRY_RUN;
     if (!effectiveDryRun) {
       console.log(
-        `[BTC TIDE TELEGRAM] Dispatching ${headerLine} for ${trade.id} | Entry: ${formatPrice(trade.entryPrice)} | Close: ${formatPrice(price)} | Real R: ${r}`
+        `[BTC TIDE TELEGRAM] Dispatching ${headerLine} for ${trade.id} | Entry: ${formatPrice(trade.entryPrice)} | Close: ${formatPrice(price)} | Real R: ${r} (${pnlStr}) | TP1R: ${m.tp1R}`
       );
     }
     const key = isAfterTp1 ? `tide_exp_tp1_${trade.id}` : `tide_exp_${trade.id}`;
@@ -297,5 +417,102 @@ export async function notifyBtcTideExpiry(
     console.warn("[BTC TIDE TELEGRAM] Non-blocking notifier error (Expiry):", err?.message || err);
   }
 }
+
+export interface WatchSetupAlertPayload {
+  side: "LONG" | "SHORT";
+  confidence: number;
+  lead: number;
+  price: number;
+  missingReason: string;
+  trendStateLabel?: string;
+  adaptiveModeActive?: boolean;
+}
+
+export async function notifyBtcTideWatchSetup(
+  payload: WatchSetupAlertPayload,
+  options?: TelegramNotifyOptions
+): Promise<void> {
+  try {
+    const dirIcon = payload.side === "LONG" ? "🟢" : "🔴";
+    const hourBucket = Math.floor(Date.now() / (60 * 60 * 1000));
+    const key = `tide_watch_${payload.side.toLowerCase()}_${hourBucket}`;
+
+    const msg = [
+      `👀 BTC TIDE SETUP WATCH — ${dirIcon} ${payload.side}`,
+      `━━━━━━━━━━━━━━`,
+      `⚠️ Not a trade, wait for signal`,
+      `📍 Live BTC Price: ${formatPrice(payload.price)}`,
+      `⚡ Confidence: ${Math.round(payload.confidence)}% | Lead: +${Math.round(payload.lead)}%${payload.adaptiveModeActive ? " | Adaptive mode ON" : ""}`,
+      payload.trendStateLabel ? `📈 HTF Trend: ${payload.trendStateLabel}` : null,
+      `🔒 Still Missing / Blocked By: ${payload.missingReason}`,
+      `━━━━━━━━━━━━━━`,
+      `Not a trade, wait for signal.`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    console.log(
+      `[BTC TIDE TELEGRAM] Dispatching WATCH alert (${payload.side}, conf=${Math.round(payload.confidence)}%, lead=${Math.round(payload.lead)}%, missing=${payload.missingReason})`
+    );
+    await dispatchNonBlocking(msg, key, "watch_setup", options);
+  } catch (err: any) {
+    console.warn("[BTC TIDE TELEGRAM] Non-blocking notifier error (WATCH):", err?.message || err);
+  }
+}
+
+export interface TestSetupDispatchResult {
+  success: boolean;
+  telegram_message_id: number | null;
+  outboxId: string;
+  sentAt: number;
+  elapsedMs: number;
+  messagePreview: string;
+  plan: SlTpPlanPreview;
+  error?: string;
+}
+
+export async function sendBtcTideTestSetupMessage(params: {
+  plan: SlTpPlanPreview;
+  confidence: number;
+  lead: number;
+  grade: "A+" | "A" | "B";
+  isCounterTrend: boolean;
+  adaptiveModeActive: boolean;
+  trendStateLabel: string;
+}): Promise<TestSetupDispatchResult> {
+  const { plan } = params;
+
+  const msg = formatBtcTideNewSignalMessage({
+    side: plan.side,
+    entryPrice: plan.entryPrice,
+    slPrice: plan.slPrice,
+    tp1Price: plan.tp1Price,
+    tp2Price: plan.tp2Price,
+    tp3Price: plan.tp3Price,
+  });
+
+  const startMs = Date.now();
+  const key = `tide_test_setup_${startMs}`;
+
+  const outboxItem = enqueueCommandOutbox(msg, key);
+  const sendRes = await sendTelegramMessageWithRetry(msg, 2, key);
+  const elapsedMs = Date.now() - startMs;
+
+  console.log(
+    `[BTC TIDE TELEGRAM SEND RESULT] key=${key} label=test_setup success=${sendRes.success} messageId=${sendRes.messageId || "none"} elapsedMs=${elapsedMs}ms${sendRes.error ? ` detail=${sendRes.error}` : ""}`
+  );
+
+  return {
+    success: sendRes.success,
+    telegram_message_id: sendRes.messageId ?? null,
+    outboxId: outboxItem.id,
+    sentAt: Date.now(),
+    elapsedMs,
+    messagePreview: msg,
+    plan,
+    error: sendRes.error,
+  };
+}
+
 
 

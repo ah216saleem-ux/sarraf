@@ -48,6 +48,7 @@ export const BtcTideView: React.FC = () => {
     heatmapHistory,
     liveSelfCheck,
     telegramTelemetry,
+    funnelDiagnostics,
   } = store;
 
   const telemetry = telegramTelemetry || liveSelfCheck?.telegramTelemetry;
@@ -55,6 +56,52 @@ export const BtcTideView: React.FC = () => {
     if (!telemetry?.lastMessageSentAt) return 'None yet';
     return `${new Date(telemetry.lastMessageSentAt).toISOString().slice(11, 19)} UTC`;
   }, [telemetry?.lastMessageSentAt]);
+
+  const isTelegramIdle12h = useMemo(() => {
+    if (!telemetry?.lastMessageSentAt) return true;
+    return Date.now() - telemetry.lastMessageSentAt > 12 * 3600 * 1000;
+  }, [telemetry?.lastMessageSentAt]);
+
+  const [testSetupSending, setTestSetupSending] = useState(false);
+  const [testSetupStatus, setTestSetupStatus] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
+
+  const handleSendTestSetup = async () => {
+    if (testSetupSending) return;
+    setTestSetupSending(true);
+    setTestSetupStatus(null);
+    try {
+      const res = await fetch('/api/btc-tide/test-setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.success) {
+        const msgId = data.telegram_message_id || data.messageId;
+        setTestSetupStatus({
+          ok: true,
+          message: msgId
+            ? `TEST setup sent to Telegram (msg #${msgId}, ${data.elapsedMs ?? 0}ms)`
+            : 'TEST setup queued/sent to Telegram',
+        });
+      } else {
+        setTestSetupStatus({
+          ok: false,
+          message: data?.error || `Telegram test setup queued (${res.status})`,
+        });
+      }
+    } catch (err: any) {
+      setTestSetupStatus({
+        ok: false,
+        message: err?.message || 'Network error sending test setup',
+      });
+    } finally {
+      setTestSetupSending(false);
+    }
+  };
 
   const [activeSubTab, setActiveSubTab] = useState<BtcTideSubTab>('FLOW');
 
@@ -266,9 +313,26 @@ export const BtcTideView: React.FC = () => {
                 ))}
               </div>
             )}
+            {/* Adaptive Quiet-Market Mode Badge */}
+            {decision.adaptiveModeActive && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-cyan-950/70 border border-cyan-500/50 text-cyan-300 font-bold text-[10px]">
+                ⚡ Adaptive mode ON (Conf &ge;{decision.requiredConfidence ?? 65}% · Lead &ge;{decision.requiredLead ?? 18}%)
+              </span>
+            )}
+
+            {/* 12h Telegram Idle Warning */}
+            {isTelegramIdle12h && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-950/70 border border-amber-500/50 text-amber-300 font-semibold text-[10px]"
+                title="Nothing was sent to Telegram in the last 12 hours"
+              >
+                <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
+                No Telegram dispatch in 12h
+              </span>
+            )}
           </div>
 
-          {/* Telegram Outbox Telemetry: Last Sent Time, Queue Size, Sent Today */}
+          {/* Telegram Outbox Telemetry: Last Sent Time, Queue Size, Sent Today + Send Test Setup Button */}
           <div className="flex flex-wrap items-center gap-2 px-2.5 py-1 rounded-lg bg-black/60 border border-white/10 text-[10px] text-neutral-300">
             <span className="flex items-center gap-1 text-[#FFD97A] font-semibold">
               <Send className="w-3 h-3" />
@@ -294,8 +358,36 @@ export const BtcTideView: React.FC = () => {
               Sent Today:{' '}
               <strong className="text-teal-300">{telemetry?.totalMessagesSentToday ?? 0}</strong>
             </span>
+            <span className="text-white/20">|</span>
+            <button
+              type="button"
+              onClick={handleSendTestSetup}
+              disabled={testSetupSending}
+              className="px-2 py-0.5 rounded bg-[#E8B84A]/20 hover:bg-[#E8B84A]/35 border border-[#E8B84A]/50 text-[#FFD97A] font-bold text-[10px] transition-colors cursor-pointer disabled:opacity-50"
+              title="Send a clearly marked TEST setup message to Telegram right now"
+            >
+              {testSetupSending ? 'Sending...' : 'Send test setup'}
+            </button>
           </div>
         </div>
+        {testSetupStatus && (
+          <div
+            className={`mt-2 px-2.5 py-1.5 rounded-lg border font-mono text-[11px] flex items-center justify-between ${
+              testSetupStatus.ok
+                ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300'
+                : 'bg-amber-950/50 border-amber-500/40 text-amber-300'
+            }`}
+          >
+            <span>{testSetupStatus.message}</span>
+            <button
+              type="button"
+              onClick={() => setTestSetupStatus(null)}
+              className="text-[10px] underline opacity-80 hover:opacity-100 cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Dashboard Alert Banner when latest signal expired (30m pre-TP1 or 3h max lifetime after TP1) */}
@@ -502,6 +594,142 @@ export const BtcTideView: React.FC = () => {
             isSpotStale={feedStale?.spot}
             spotAgeMs={feedAges?.spot}
           />
+
+          {/* Phase 5 Item 1: "Why no trade?" 24h Filter Funnel Diagnostics & Best 6h Score Panel */}
+          <div className="bg-[#08080a] border border-[#E8B84A]/25 rounded-xl p-4 sm:p-5 backdrop-blur-md shadow-[0_4px_24px_rgba(0,0,0,0.5)] space-y-3.5 font-mono">
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/10">
+              <div className="flex items-center gap-2">
+                <Target className="w-4 h-4 text-[#FFD97A]" />
+                <span className="text-xs font-bold uppercase tracking-wider text-white">
+                  WHY NO TRADE? · 24H FILTER FUNNEL DIAGNOSTICS
+                </span>
+                {decision.adaptiveModeActive && (
+                  <span className="px-2 py-0.5 rounded bg-cyan-950/70 border border-cyan-500/40 text-cyan-300 text-[10px] font-bold">
+                    Adaptive mode ON
+                  </span>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-[10px]">
+                <span className="text-neutral-400">
+                  24h Blocked Ticks:{' '}
+                  <strong className="text-white">
+                    {funnelDiagnostics?.totalBlockedTicks24h ?? 0}
+                  </strong>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleSendTestSetup}
+                  disabled={testSetupSending}
+                  className="px-2.5 py-1 rounded bg-[#E8B84A]/20 hover:bg-[#E8B84A]/35 border border-[#E8B84A]/50 text-[#FFD97A] font-bold text-[10px] transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {testSetupSending ? 'Sending TEST...' : 'Send test setup to Telegram'}
+                </button>
+              </div>
+            </div>
+
+            {/* Ranked Blocking Gates Summary String */}
+            <div className="bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-xs text-neutral-200">
+              <span className="text-[#FFD97A] font-bold mr-1.5">24h Funnel Summary:</span>
+              <span>
+                {funnelDiagnostics?.summaryLine ||
+                  'Collecting 24h engine tick diagnostics...'}
+              </span>
+            </div>
+
+            {/* Ranked Bars + Best Score in Last 6h */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+              {/* Ranked Gates List */}
+              <div className="lg:col-span-2 bg-black/40 border border-white/5 rounded-lg p-3 space-y-2">
+                <div className="text-[10px] text-neutral-400 uppercase font-bold">
+                  RANKED BLOCKING GATES (LAST 24H)
+                </div>
+                {funnelDiagnostics?.rankedGates && funnelDiagnostics.rankedGates.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {funnelDiagnostics.rankedGates.slice(0, 8).map((g) => (
+                      <div key={g.gate} className="space-y-0.5 text-[11px]">
+                        <div className="flex items-center justify-between">
+                          <span className="text-neutral-200 font-semibold">{g.label}</span>
+                          <span className="text-[#FFD97A] font-bold">
+                            {g.pct.toFixed(1)}%{' '}
+                            <span className="text-neutral-500 font-normal">({g.count} ticks)</span>
+                          </span>
+                        </div>
+                        <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden border border-white/5">
+                          <div
+                            className="h-full bg-gradient-to-r from-[#E8B84A] to-amber-500"
+                            style={{ width: `${Math.min(100, g.pct)}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-neutral-500 py-3">
+                    No blocked ticks recorded in the last 24h yet.
+                  </div>
+                )}
+              </div>
+
+              {/* Best Score Seen in Last 6h */}
+              <div className="bg-black/40 border border-white/5 rounded-lg p-3 flex flex-col justify-between space-y-2">
+                <div>
+                  <div className="text-[10px] text-neutral-400 uppercase font-bold">
+                    BEST SCORE SEEN (LAST 6H)
+                  </div>
+                  {funnelDiagnostics?.bestScore6h ? (
+                    <div className="mt-2 space-y-1.5 text-xs">
+                      <div className="flex items-baseline justify-between">
+                        <span className="text-neutral-400">Peak Confidence:</span>
+                        <span className="text-lg font-black text-[#FFD97A]">
+                          {funnelDiagnostics.bestScore6h.confidence.toFixed(0)}%
+                        </span>
+                      </div>
+                      <div className="flex items-baseline justify-between">
+                        <span className="text-neutral-400">Peak Lead:</span>
+                        <span className="text-sm font-bold text-teal-300">
+                          +{funnelDiagnostics.bestScore6h.lead.toFixed(0)}%
+                        </span>
+                      </div>
+                      <div className="flex items-baseline justify-between">
+                        <span className="text-neutral-400">Favored Side:</span>
+                        <span
+                          className={`text-xs font-bold ${
+                            funnelDiagnostics.bestScore6h.side === 'LONG'
+                              ? 'text-teal-400'
+                              : funnelDiagnostics.bestScore6h.side === 'SHORT'
+                              ? 'text-rose-400'
+                              : 'text-neutral-300'
+                          }`}
+                        >
+                          {funnelDiagnostics.bestScore6h.side}
+                        </span>
+                      </div>
+                      <div className="flex items-baseline justify-between text-[11px]">
+                        <span className="text-neutral-400">Seen At:</span>
+                        <span className="text-neutral-300">
+                          {new Date(funnelDiagnostics.bestScore6h.recordedAt)
+                            .toISOString()
+                            .slice(11, 19)}{' '}
+                          UTC
+                        </span>
+                      </div>
+                      <div className="pt-1 border-t border-white/5 text-[10px] text-neutral-400">
+                        Gate at peak: <span className="text-neutral-200">{funnelDiagnostics.bestScore6h.waitReason}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-neutral-500 py-4">
+                      Waiting for first post-warmup score peak...
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-2 border-t border-white/10 text-[10px] text-neutral-400">
+                  Target:Conf &ge;{decision.requiredConfidence ?? 68}% · Lead &ge;{decision.requiredLead ?? 22}% · Watch alert @ 60%/15% (max 1/hr)
+                </div>
+              </div>
+            </div>
+          </div>
 
           {/* 8-Component Breakdown (Collapsed by Default) */}
           <BtcTideDecisionCard

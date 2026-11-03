@@ -319,6 +319,7 @@ function connectBackendSse() {
             data.telegramTelemetry ||
             data.liveSelfCheck?.telegramTelemetry ||
             currentState.telegramTelemetry,
+          funnelDiagnostics: data.funnelDiagnostics || currentState.funnelDiagnostics,
           heatmapHistory: updatedHeatmapHistory,
           latestHeatmap: data.latestHeatmap || currentState.latestHeatmap,
         };
@@ -407,6 +408,7 @@ async function fetchInitialBackendState() {
           json.telegramTelemetry ||
           json.liveSelfCheck?.telegramTelemetry ||
           currentState.telegramTelemetry,
+        funnelDiagnostics: json.funnelDiagnostics || currentState.funnelDiagnostics,
         heatmapHistory: initialHeatmapHistory,
         latestHeatmap: json.latestHeatmap || initialHeatmapHistory[initialHeatmapHistory.length - 1],
       };

@@ -231,6 +231,8 @@ export interface ActiveTideSignal {
 
 import type { BtcTideTradeRecord, BtcTideStats } from '../server/btcTideSignalDatabase';
 export type { BtcTideTradeRecord, BtcTideStats };
+import type { BtcTideFunnelDiagnostics } from '../server/btcTideSqliteDatabase';
+export type { BtcTideFunnelDiagnostics };
 import type { DecisionEngineResult } from './signalEngine';
 
 export interface BtcTideSelfCheckItem {
@@ -313,6 +315,7 @@ export interface BtcTideStoreState {
   geoBlockedNotice: string | null;
   liveSelfCheck?: BtcTideLiveSelfCheck;
   telegramTelemetry?: BtcTideTelegramTelemetry;
+  funnelDiagnostics?: BtcTideFunnelDiagnostics;
   // Rolling store: last 30 minutes in per-second bins (1800 bins max)
   secondBins: SecondBin[];
   // Recent trades for the order tape (newest first)

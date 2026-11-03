@@ -236,6 +236,8 @@ import {
   getHeatmapHistory,
   registerSseClient,
   evaluateBtcTideLiveSelfCheck,
+  getBtcTideFunnelReport,
+  triggerBtcTideTestSetupTelegram,
 } from './src/server/btcTideBackendEngine.ts';
 import {
   initBtcTideSqlite,
@@ -2271,6 +2273,33 @@ app.get('/api/btc-tide/self-check', btcTideRateLimiter, (_req, res) => {
     liveSelfCheck: selfCheck,
     telegramTelemetry: selfCheck.telegramTelemetry,
   });
+});
+
+// 4C. Phase 5: Filter Funnel Diagnostics & Best 6h Score + Live SL/TP Rework Example
+app.get('/api/btc-tide/funnel', btcTideRateLimiter, (_req, res) => {
+  const report = getBtcTideFunnelReport();
+  return res.json({
+    success: true,
+    ...report,
+  });
+});
+
+// 4D. Phase 5: Dashboard "Send test setup" Endpoint (sends clearly marked TEST setup to Telegram)
+app.post('/api/btc-tide/test-setup', btcTideRateLimiter, async (req, res) => {
+  try {
+    const requestedSide =
+      req.body?.side === 'LONG' || req.body?.side === 'SHORT' ? req.body.side : undefined;
+    const result = await triggerBtcTideTestSetupTelegram(requestedSide);
+    return res.json({
+      success: result.success,
+      ...result,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to send test setup message',
+    });
+  }
 });
 
 // 5. Admin-Only Real Telegram Test & Outbox Inspection Endpoint (/api/btc-tide/qa-failover removed from production)

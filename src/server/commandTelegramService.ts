@@ -105,7 +105,9 @@ export function getCredentials(): {
 
   const envChatClean = sanitizeTelegramEnvString(process.env.TELEGRAM_CHAT_ID);
   const effectiveChatId = getEffectiveTelegramChatId();
-  const rawChatId = envChatClean.length > 0 ? envChatClean : effectiveChatId;
+  const rawChatId = isNumericTelegramChatId(envChatClean)
+    ? envChatClean
+    : effectiveChatId || (envChatClean.length > 0 ? envChatClean : null);
 
   const tokenPresent = Boolean(rawToken);
   const chatIdPresent = Boolean(rawChatId);

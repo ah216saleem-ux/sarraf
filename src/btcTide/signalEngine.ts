@@ -36,6 +36,70 @@ export interface ExcludedSignalComponent {
   reason: string;
 }
 
+export type FunnelGateId =
+  | 'confidence'
+  | 'lead'
+  | 'absorb_drive'
+  | 'volume_spike'
+  | 'htf_trend'
+  | 'flow_conflict'
+  | 'key_level'
+  | 'news'
+  | 'liquidity'
+  | 'cooldown'
+  | 'daily_limit'
+  | 'pending_cancelled'
+  | 'sl_too_wide';
+
+export interface KlineSlTpContext {
+  atr5m: number | null;
+  atr15m: number | null;
+  swingLow5m12: number | null;
+  swingHigh5m12: number | null;
+  swingLow15m12: number | null;
+  swingHigh15m12: number | null;
+}
+
+export type TpMode = 'FIXED_BASE' | 'R_MULTIPLE';
+
+export interface SlTpPlanPreview {
+  side: 'LONG' | 'SHORT';
+  entryPrice: number;
+  slPrice: number;
+  slDist: number;
+  slPct: number;
+  slR: number; // -1.00R
+  oneR: number;
+  tpMode: TpMode;
+  tpBase: number;
+  tp1Dist: number;
+  tp2Dist: number;
+  tp3Dist: number;
+  tp1Price: number;
+  tp2Price: number;
+  tp3Price: number;
+  tp1R: number;
+  tp2R: number;
+  tp3R: number;
+  tp1RewardRiskRatio: number;
+  bePlusPrice: number;
+  beLockDist: number;
+  beLockR: number;
+  atr5m: number;
+  atr15m: number;
+  atrShort: number;
+  swingRefPrice: number;
+  swingBasedDist: number;
+  minAllowedSlDist: number;
+  maxAllowedSlDist: number;
+  slCapped: boolean;
+  slTooWide: boolean;
+  pushedBeyondLevelNote: string | null;
+  tp1LowRWarning: string | null;
+  risk1PctFormula: string;
+  risk1PctExample10kBtc: number;
+}
+
 export interface HtfTrendContext {
   ema21_1h: number | null;
   ema50_1h: number | null;
@@ -76,6 +140,8 @@ export interface BtcSignalFilterContext {
   keyLevels?: KeyLevelsContext;
   newsLock?: NewsLockContext;
   pendingConfirmation?: PendingConfirmationInfo | null;
+  klineSlTp?: KlineSlTpContext;
+  adaptiveModeActive?: boolean;
 }
 
 export interface DecisionEngineResult {
@@ -101,6 +167,7 @@ export interface DecisionEngineResult {
   absorbDriveMagnitudeOk?: boolean;
   volumeSpikeRatio?: number;
   hasVolumeSpike?: boolean;
+  volumeSpikeBonusApplied?: number;
   flowBuy60sPct?: number;
   flowSell60sPct?: number;
   flowConflictBlocked?: boolean;
@@ -112,14 +179,25 @@ export interface DecisionEngineResult {
   trend4h?: 'BULL' | 'BEAR' | 'NEUTRAL' | 'UNKNOWN';
   trendStateLabel?: string;
   htfTrendBlocked?: boolean;
+  isCounterTrend?: boolean;
+  isTrendAligned?: boolean;
+  setupGrade?: 'A+' | 'A' | 'B';
+  adaptiveModeActive?: boolean;
   keyLevelBonusApplied?: number;
   keyLevelBonusNote?: string | null;
   keyLevelOppositeBlocked?: boolean;
   keyLevelBlockNote?: string | null;
+  keyLevelWarningNote?: string | null;
   keyLevels?: KeyLevelsContext;
   pendingConfirmation?: PendingConfirmationInfo | null;
   atrShort?: number;
   atr1h?: number;
+  atr5m?: number;
+  atr15m?: number;
+  slTpPreview?: SlTpPlanPreview | null;
+  slTooWideBlocked?: boolean;
+  blockingGates?: FunnelGateId[];
+  primaryBlockingGate?: FunnelGateId | null;
   requiredConfidence?: number;
   requiredLead?: number;
   canFire: boolean;
@@ -132,37 +210,49 @@ export interface DecisionEngineResult {
 const REQUIRED_SILENCE_SECONDS = 180; // 3 minutes of live data
 const SPOT_GREEN_MAX_AGE_MS = 3000; // SPOT dot is green only when fresh (<3s)
 export const COOLDOWN_DURATION_MS = 60 * 60 * 1000; // 60 minutes cooldown after trade fully closes
-export const TRADE_EXPIRY_MS = 30 * 60 * 1000; // 30 minutes expiry (only applies if TP1 has NOT been hit)
+export const TRADE_EXPIRY_MS = 60 * 60 * 1000; // 60 minutes expiry before TP1 is hit
 export const MAX_TRADE_LIFETIME_MS = 3 * 60 * 60 * 1000; // 3 hours hard maximum trade lifetime after TP1 is hit
 export const MAX_TRADES_PER_DAY = 5; // Max 5 trades per UTC day
 
 // ============================================================================
-// PHASE 2 SIGNAL-QUALITY UPGRADE CONSTANTS & CONFIG TOGGLES
+// PHASE 5 RELAXED SIGNAL-QUALITY CONSTANTS & SL/TP REWORK CONFIG
 // Each upgrade is a separate constant/config so it can be turned on or off.
 // ============================================================================
 export const ENABLE_HTF_TREND_FILTER = true;
 
 export const ENABLE_FLOW_CONFLICT_BLOCK = true;
-export const FLOW_CONFLICT_MAX_OPPOSITE_PCT = 65;
+export const FLOW_CONFLICT_MAX_OPPOSITE_PCT = 75; // Relaxed from 65% to 75%
 
 export const ENABLE_ENTRY_CONFIRMATION = true;
-export const ENTRY_CONFIRM_DURATION_MS = 90 * 1000; // Hold signal as PENDING for up to 90s
-export const ENTRY_CONFIRM_MAX_ADVERSE_ATR = 0.3; // Max 0.3 * atrShort move against signal
+export const ENTRY_CONFIRM_DURATION_MS = 45 * 1000; // Hold signal as PENDING for 45s (was 90s)
+export const ENTRY_CONFIRM_MAX_ADVERSE_ATR = 0.5; // Max 0.5 * atrShort move against signal (was 0.3)
 export const ENABLE_PULLBACK_EARLY_ENTRY = false; // Optional early entry on small pullback
 export const PULLBACK_MIN_ATR_FACTOR = 0.08;
 export const PULLBACK_MAX_ATR_FACTOR = 0.25;
 
 export const ENABLE_STRONGER_THRESHOLDS = true;
-export const MIN_CONFIDENCE_TO_FIRE = 75;
+export const MIN_CONFIDENCE_TO_FIRE = 68; // Restored to 68 for healthy 2-5 setups/day
 export const LEGACY_MIN_CONFIDENCE_TO_FIRE = 68;
-export const MIN_LEAD_TO_FIRE = 30;
+export const MIN_LEAD_TO_FIRE = 22; // Restored to 22 for healthy 2-5 setups/day
 export const LEGACY_MIN_LEAD_TO_FIRE = 22;
+
+export const ENABLE_ADAPTIVE_QUIET_MODE = true;
+export const ADAPTIVE_QUIET_HOURS_MS = 6 * 60 * 60 * 1000; // 6 hours with no trade entered
+export const ADAPTIVE_CONFIDENCE_DROP = 3;
+export const ADAPTIVE_MIN_CONFIDENCE_FLOOR = 65;
+export const ADAPTIVE_LEAD_DROP = 3;
+export const ADAPTIVE_MIN_LEAD_FLOOR = 18;
+
 export const ENABLE_ABSORB_DRIVE_MAGNITUDE_FILTER = true;
 export const MIN_ABSORB_DRIVE_MAGNITUDE = 20;
+
 export const ENABLE_VOLUME_SPIKE_FILTER = true;
-export const VOLUME_SPIKE_MULTIPLIER = 1.5;
+export const ENABLE_VOLUME_SPIKE_HARD_BLOCK = false; // Score bonus instead of hard block
+export const VOLUME_SPIKE_MULTIPLIER = 1.2; // Relaxed from 1.5x to 1.2x
+export const VOLUME_SPIKE_SCORE_BONUS = 4;
 
 export const ENABLE_KEY_LEVELS_FILTER = true;
+export const ENABLE_KEY_LEVEL_OPPOSITE_HARD_BLOCK = false; // Warning instead of hard block
 export const KEY_LEVEL_SCORE_BONUS = 5;
 export const KEY_LEVEL_NEAR_ATR1H_FACTOR = 0.15;
 export const KEY_LEVEL_OPPOSITE_BLOCK_R = 0.5;
@@ -171,7 +261,41 @@ export const ENABLE_NEWS_FILTER = true;
 export const NEWS_BLOCK_WINDOW_MINUTES = 15;
 
 export const ENABLE_LOW_LIQUIDITY_FILTER = true;
-export const MIN_1M_VOLUME_BTC = 1.5;
+export const MIN_1M_VOLUME_BTC = 0.75; // Lowered by half from 1.5 BTC
+
+export const ENABLE_WATCH_ALERTS = true;
+export const WATCH_MIN_CONFIDENCE = 60;
+export const WATCH_MIN_LEAD = 15;
+export const WATCH_COOLDOWN_MS = 60 * 60 * 1000; // At most 1 WATCH alert per hour
+export const TELEGRAM_IDLE_WARNING_MS = 12 * 60 * 60 * 1000; // Warn if nothing sent in 12h
+
+// ============================================================================
+// PHASE 6 SL/TP CONSTANTS (5m & 15m ATR + 12-candle swing structure)
+// ============================================================================
+export const SL_SWING_LOOKBACK_CANDLES = 12;
+export const SL_ATR15_MULT = 2.5; // slDist = max(swing-based, 2.5 x atr15m, 0.50% of entry)
+export const SL_SWING_BUFFER_ATR15_MULT = 0.3; // swing low/high +/- 0.3 x atr15m
+export const SL_ATR15M_BUFFER_FACTOR = SL_SWING_BUFFER_ATR15_MULT;
+export const SL_MIN_PCT = 0.5; // Floor: 0.50% of entry
+export const SL_MAX_PCT = 1.0; // Cap: 1.00% of entry
+export const SL_MIN_PCT_OF_PRICE = SL_MIN_PCT / 100; // 0.0050
+export const SL_MAX_PCT_OF_PRICE = SL_MAX_PCT / 100; // 0.0100
+export const SL_INSIDE_SWING_BLOCK_ATR15_MULT = 0.2; // Only block if capped SL sits inside nearest swing by > 0.2 x atr15m
+export const SL_ROUND_LEVEL_STEP_USD = 500;
+export const SL_ROUND_PROX_ATR15_MULT = 0.1; // Within 0.1 x atr15m of round $500 or heatmap cluster
+export const SL_ROUND_PUSH_ATR15_MULT = 0.15; // Push 0.15 x atr15m beyond that level
+export const SL_LEVEL_PROXIMITY_ATR15M_FACTOR = SL_ROUND_PROX_ATR15_MULT;
+export const SL_LEVEL_PUSH_ATR15M_FACTOR = SL_ROUND_PUSH_ATR15_MULT;
+
+// Take-Profit Constants (TP_MODE = 'FIXED_BASE' or 'R_MULTIPLE')
+export const TP_MODE: TpMode = 'FIXED_BASE';
+export const TP_BASE_ATR5_MULT = 1.5; // tpBase = max(1.5 x atr5m, 0.30% of entry)
+export const SL_MIN_ATR5M_FACTOR = TP_BASE_ATR5_MULT;
+export const TP_BASE_MIN_PCT = 0.3; // 0.30% of entry
+export const TP1_PROFIT_LOCK_TPBASE_MULT = 0.1; // After TP1 move stop to entry +/- 0.1 x tpBase
+export const TP1_BE_PLUS_OFFSET_R = TP1_PROFIT_LOCK_TPBASE_MULT;
+export const TP1_LOW_R_WARNING_THRESHOLD = 0.7; // Warn when TP1 < 0.7R
+export const TP1_LOW_R_WARNING_TEXT = 'TP1 smaller than SL - needs high win rate';
 
 export const BTC_TIDE_UPGRADE_CONFIG = {
   ENABLE_HTF_TREND_FILTER,
@@ -184,11 +308,18 @@ export const BTC_TIDE_UPGRADE_CONFIG = {
   ENABLE_STRONGER_THRESHOLDS,
   MIN_CONFIDENCE_TO_FIRE,
   MIN_LEAD_TO_FIRE,
+  ENABLE_ADAPTIVE_QUIET_MODE,
+  ADAPTIVE_QUIET_HOURS_MS,
+  ADAPTIVE_MIN_CONFIDENCE_FLOOR,
+  ADAPTIVE_MIN_LEAD_FLOOR,
   ENABLE_ABSORB_DRIVE_MAGNITUDE_FILTER,
   MIN_ABSORB_DRIVE_MAGNITUDE,
   ENABLE_VOLUME_SPIKE_FILTER,
+  ENABLE_VOLUME_SPIKE_HARD_BLOCK,
   VOLUME_SPIKE_MULTIPLIER,
+  VOLUME_SPIKE_SCORE_BONUS,
   ENABLE_KEY_LEVELS_FILTER,
+  ENABLE_KEY_LEVEL_OPPOSITE_HARD_BLOCK,
   KEY_LEVEL_SCORE_BONUS,
   KEY_LEVEL_NEAR_ATR1H_FACTOR,
   KEY_LEVEL_OPPOSITE_BLOCK_R,
@@ -196,6 +327,22 @@ export const BTC_TIDE_UPGRADE_CONFIG = {
   NEWS_BLOCK_WINDOW_MINUTES,
   ENABLE_LOW_LIQUIDITY_FILTER,
   MIN_1M_VOLUME_BTC,
+  SL_SWING_LOOKBACK_CANDLES,
+  SL_ATR15_MULT,
+  SL_SWING_BUFFER_ATR15_MULT,
+  SL_ATR15M_BUFFER_FACTOR,
+  SL_MIN_ATR5M_FACTOR,
+  SL_MIN_PCT,
+  SL_MAX_PCT,
+  SL_MIN_PCT_OF_PRICE,
+  SL_MAX_PCT_OF_PRICE,
+  SL_INSIDE_SWING_BLOCK_ATR15_MULT,
+  TP_MODE,
+  TP_BASE_ATR5_MULT,
+  TP_BASE_MIN_PCT,
+  TP1_PROFIT_LOCK_TPBASE_MULT,
+  TP1_LOW_R_WARNING_THRESHOLD,
+  TP1_BE_PLUS_OFFSET_R,
 };
 
 function clamp(val: number, min: number, max: number): number {
@@ -799,10 +946,20 @@ export function evaluateDecisionEngine(
       ? 'HTF Building...'
       : `1H ${trend1h} · 4H ${trend4h}`;
 
-  const reqConfidence = ENABLE_STRONGER_THRESHOLDS
+  const adaptiveModeActive = Boolean(
+    ENABLE_ADAPTIVE_QUIET_MODE && filterContext?.adaptiveModeActive
+  );
+  const baseReqConfidence = ENABLE_STRONGER_THRESHOLDS
     ? MIN_CONFIDENCE_TO_FIRE
     : LEGACY_MIN_CONFIDENCE_TO_FIRE;
-  const reqLead = ENABLE_STRONGER_THRESHOLDS ? MIN_LEAD_TO_FIRE : LEGACY_MIN_LEAD_TO_FIRE;
+  const baseReqLead = ENABLE_STRONGER_THRESHOLDS ? MIN_LEAD_TO_FIRE : LEGACY_MIN_LEAD_TO_FIRE;
+
+  const reqConfidence = adaptiveModeActive
+    ? Math.max(ADAPTIVE_MIN_CONFIDENCE_FLOOR, baseReqConfidence - ADAPTIVE_CONFIDENCE_DROP)
+    : baseReqConfidence;
+  const reqLead = adaptiveModeActive
+    ? Math.max(ADAPTIVE_MIN_LEAD_FLOOR, baseReqLead - ADAPTIVE_LEAD_DROP)
+    : baseReqLead;
 
   // If engine is silent (first 3 min of live data OR SPOT dot is not green), keep scores silent & canFire = false
   if (isSilent) {
@@ -840,6 +997,7 @@ export function evaluateDecisionEngine(
       absorbDriveMagnitudeOk: false,
       volumeSpikeRatio,
       hasVolumeSpike: false,
+      volumeSpikeBonusApplied: 0,
       flowBuy60sPct,
       flowSell60sPct,
       flowConflictBlocked: false,
@@ -851,12 +1009,21 @@ export function evaluateDecisionEngine(
       trend4h,
       trendStateLabel,
       htfTrendBlocked: false,
+      isCounterTrend: false,
+      isTrendAligned: false,
+      setupGrade: 'B',
+      adaptiveModeActive,
       keyLevelBonusApplied: 0,
       keyLevelBonusNote: null,
       keyLevelOppositeBlocked: false,
       keyLevelBlockNote: null,
+      keyLevelWarningNote: null,
       keyLevels: filterContext?.keyLevels,
       pendingConfirmation: filterContext?.pendingConfirmation || null,
+      slTpPreview: null,
+      slTooWideBlocked: false,
+      blockingGates: [],
+      primaryBlockingGate: null,
       requiredConfidence: reqConfidence,
       requiredLead: reqLead,
       canFire: false,
@@ -882,12 +1049,37 @@ export function evaluateDecisionEngine(
   const atr1h = computeAtr1h(secondBins, currentPrice, htf?.atr1h ?? null);
 
   // -------------------------------------------------------------
-  // Key Levels Bonus (+5 within 0.15 x 1H ATR) & Opposite Block (< 0.5R)
+  // Volume Spike Bonus (+4 score bonus instead of hard block)
+  // -------------------------------------------------------------
+  const prelimFavoredSide: 'LONG' | 'SHORT' | 'NEUTRAL' =
+    totalScore > 0 ? 'LONG' : totalScore < 0 ? 'SHORT' : 'NEUTRAL';
+  const volumeSpikeInDir =
+    (prelimFavoredSide === 'LONG' && buy10s > sell10s) ||
+    (prelimFavoredSide === 'SHORT' && sell10s > buy10s);
+  const hasVolumeSpike =
+    volumeSpikeRatio > VOLUME_SPIKE_MULTIPLIER && volumeSpikeInDir;
+
+  let volumeSpikeBonusApplied = 0;
+  if (ENABLE_VOLUME_SPIKE_FILTER && hasVolumeSpike) {
+    if (prelimFavoredSide === 'LONG') {
+      bullishScore += VOLUME_SPIKE_SCORE_BONUS;
+      totalScore += VOLUME_SPIKE_SCORE_BONUS;
+      volumeSpikeBonusApplied = VOLUME_SPIKE_SCORE_BONUS;
+    } else if (prelimFavoredSide === 'SHORT') {
+      bearishScore += VOLUME_SPIKE_SCORE_BONUS;
+      totalScore -= VOLUME_SPIKE_SCORE_BONUS;
+      volumeSpikeBonusApplied = -VOLUME_SPIKE_SCORE_BONUS;
+    }
+  }
+
+  // -------------------------------------------------------------
+  // Key Levels Bonus (+5 within 0.15 x 1H ATR) & Warning (< 0.5R)
   // -------------------------------------------------------------
   let keyLevelBonusApplied = 0;
   let keyLevelBonusNote: string | null = null;
   let keyLevelOppositeBlocked = false;
   let keyLevelBlockNote: string | null = null;
+  let keyLevelWarningNote: string | null = null;
 
   const kl = filterContext?.keyLevels;
   const supportLevels: Array<{ name: string; price: number }> = [];
@@ -964,26 +1156,26 @@ export function evaluateDecisionEngine(
       ? Math.max(0, Number((bearishScore - bullishScore).toFixed(1)))
       : 0;
 
-  // Prospective 1R distance to check opposite key level within 0.5R
+  // Compute SL/TP Preview for current favoredSide (or LONG if neutral) using new 5m/15m candle ATR & swing rules
+  const previewSide: 'LONG' | 'SHORT' = favoredSide === 'SHORT' ? 'SHORT' : 'LONG';
+  const slTpPreview =
+    currentPrice !== null
+      ? computeBtcTideSlTpPlan(
+          previewSide,
+          currentPrice,
+          secondBins,
+          filterContext?.klineSlTp,
+          filterContext?.keyLevels,
+          atrShort
+        )
+      : null;
+
+  const atr5m = slTpPreview?.atr5m ?? Number((currentPrice * 0.0018).toFixed(2));
+  const atr15m = slTpPreview?.atr15m ?? Number((currentPrice * 0.0030).toFixed(2));
+
+  // Prospective 1R distance to check opposite key level within 0.5R (Warning on card, only hard-blocks if ENABLE_KEY_LEVEL_OPPOSITE_HARD_BLOCK)
   if (ENABLE_KEY_LEVELS_FILTER && currentPrice !== null && favoredSide !== 'NEUTRAL') {
-    let swingLow = currentPrice;
-    let swingHigh = currentPrice;
-    if (secondBins.length > 0) {
-      const startWindow = latestSec - 89;
-      const recent = secondBins.filter((b) => b.sec >= startWindow);
-      if (recent.length > 0) {
-        swingLow = Math.min(...recent.map((b) => b.lowPrice));
-        swingHigh = Math.max(...recent.map((b) => b.highPrice));
-      }
-    }
-    const minSlFloor = currentPrice * 0.0008;
-    const minClamp = Math.max(1.2 * atrShort, minSlFloor);
-    const maxClamp = Math.max(minClamp, 3.2 * atrShort);
-    const unclampedOneR =
-      favoredSide === 'LONG'
-        ? currentPrice - swingLow + 0.4 * atrShort
-        : swingHigh - currentPrice + 0.4 * atrShort;
-    const prospectiveOneR = clamp(unclampedOneR, minClamp, maxClamp);
+    const prospectiveOneR = slTpPreview?.oneR ?? Math.max(1.5 * atr5m, currentPrice * 0.003);
     const maxOppositeDist = KEY_LEVEL_OPPOSITE_BLOCK_R * prospectiveOneR;
 
     if (favoredSide === 'LONG') {
@@ -993,8 +1185,11 @@ export function evaluateDecisionEngine(
         return distAbove >= minGap && distAbove <= maxOppositeDist;
       });
       if (blockingRes) {
-        keyLevelOppositeBlocked = true;
-        keyLevelBlockNote = `Blocked: firing into ${blockingRes.name} ($${blockingRes.price.toFixed(0)}, <0.5R)`;
+        keyLevelWarningNote = `Warning: opposite ${blockingRes.name} within <0.5R ($${blockingRes.price.toFixed(0)})`;
+        if (ENABLE_KEY_LEVEL_OPPOSITE_HARD_BLOCK) {
+          keyLevelOppositeBlocked = true;
+          keyLevelBlockNote = `Blocked: firing into ${blockingRes.name} ($${blockingRes.price.toFixed(0)}, <0.5R)`;
+        }
       }
     } else if (favoredSide === 'SHORT') {
       const blockingSup = supportLevels.find((lvl) => {
@@ -1003,8 +1198,11 @@ export function evaluateDecisionEngine(
         return distBelow >= minGap && distBelow <= maxOppositeDist;
       });
       if (blockingSup) {
-        keyLevelOppositeBlocked = true;
-        keyLevelBlockNote = `Blocked: firing into ${blockingSup.name} ($${blockingSup.price.toFixed(0)}, <0.5R)`;
+        keyLevelWarningNote = `Warning: opposite ${blockingSup.name} within <0.5R ($${blockingSup.price.toFixed(0)})`;
+        if (ENABLE_KEY_LEVEL_OPPOSITE_HARD_BLOCK) {
+          keyLevelOppositeBlocked = true;
+          keyLevelBlockNote = `Blocked: firing into ${blockingSup.name} ($${blockingSup.price.toFixed(0)}, <0.5R)`;
+        }
       }
     }
   }
@@ -1021,42 +1219,50 @@ export function evaluateDecisionEngine(
     !ENABLE_ABSORB_DRIVE_MAGNITUDE_FILTER ||
     Math.max(Math.abs(absorbDriveScore), absorbDriveRawMag) >= MIN_ABSORB_DRIVE_MAGNITUDE;
 
-  // Volume spike: last 10s volume > 1.5x 3-minute average 10s volume in signal direction
-  const volumeSpikeInDir =
-    (favoredSide === 'LONG' && buy10s > sell10s) ||
-    (favoredSide === 'SHORT' && sell10s > buy10s);
-  const hasVolumeSpike =
-    volumeSpikeRatio > VOLUME_SPIKE_MULTIPLIER && volumeSpikeInDir;
-  const volumeSpikeOk = !ENABLE_VOLUME_SPIKE_FILTER || hasVolumeSpike;
+  // Volume spike is now a score bonus by default; only blocks if ENABLE_VOLUME_SPIKE_HARD_BLOCK is true
+  const volumeSpikeOk =
+    !ENABLE_VOLUME_SPIKE_FILTER || !ENABLE_VOLUME_SPIKE_HARD_BLOCK || hasVolumeSpike;
 
-  // Flow Conflict Block: last 60s taker flow > 65% against signal side
+  // Flow Conflict Block: last 60s taker flow > 75% against signal side
   const flowConflictBlocked =
     ENABLE_FLOW_CONFLICT_BLOCK &&
     ((favoredSide === 'LONG' && flowSell60sPct > FLOW_CONFLICT_MAX_OPPOSITE_PCT) ||
       (favoredSide === 'SHORT' && flowBuy60sPct > FLOW_CONFLICT_MAX_OPPOSITE_PCT));
 
-  // HTF Trend Filter (1H EMA21/EMA50 + 4H agreement)
+  // HTF Trend Filter (Phase 5 rule: block ONLY when BOTH 1H and 4H trend are against the signal.
+  // If only one disagrees, allow the trade, mark it "counter-trend", and reduce its grade to B.)
   let htfTrendBlocked = false;
   let htfTrendBlockReason: string | null = null;
-  if (ENABLE_HTF_TREND_FILTER && favoredSide !== 'NEUTRAL' && trend1h !== 'UNKNOWN') {
-    if (favoredSide === 'LONG') {
-      if (trend1h !== 'BULL') {
-        htfTrendBlocked = true;
-        htfTrendBlockReason = 'Blocked: against 1H trend';
-      } else if (trend4h !== 'UNKNOWN' && trend4h !== 'BULL') {
-        htfTrendBlocked = true;
-        htfTrendBlockReason = 'Blocked: 1H/4H trend disagree';
+  let isCounterTrend = false;
+  let isTrendAligned = false;
+
+  if (favoredSide === 'LONG') {
+    const against1h = trend1h === 'BEAR';
+    const against4h = trend4h === 'BEAR';
+    isTrendAligned = trend1h === 'BULL' && (trend4h === 'BULL' || trend4h === 'UNKNOWN');
+    if (ENABLE_HTF_TREND_FILTER && against1h && against4h) {
+      htfTrendBlocked = true;
+      htfTrendBlockReason = 'Blocked: against both 1H & 4H trend';
+    } else if (against1h || against4h || trend1h === 'NEUTRAL' || trend4h === 'NEUTRAL') {
+      if (against1h || against4h) {
+        isCounterTrend = true;
       }
-    } else if (favoredSide === 'SHORT') {
-      if (trend1h !== 'BEAR') {
-        htfTrendBlocked = true;
-        htfTrendBlockReason = 'Blocked: against 1H trend';
-      } else if (trend4h !== 'UNKNOWN' && trend4h !== 'BEAR') {
-        htfTrendBlocked = true;
-        htfTrendBlockReason = 'Blocked: 1H/4H trend disagree';
+    }
+  } else if (favoredSide === 'SHORT') {
+    const against1h = trend1h === 'BULL';
+    const against4h = trend4h === 'BULL';
+    isTrendAligned = trend1h === 'BEAR' && (trend4h === 'BEAR' || trend4h === 'UNKNOWN');
+    if (ENABLE_HTF_TREND_FILTER && against1h && against4h) {
+      htfTrendBlocked = true;
+      htfTrendBlockReason = 'Blocked: against both 1H & 4H trend';
+    } else if (against1h || against4h || trend1h === 'NEUTRAL' || trend4h === 'NEUTRAL') {
+      if (against1h || against4h) {
+        isCounterTrend = true;
       }
     }
   }
+
+  const setupGrade = computeSetupGrade(confidence, isTrendAligned, isCounterTrend);
 
   // News & Session / Low-Liquidity Filters
   const newsBlocked = ENABLE_NEWS_FILTER && Boolean(filterContext?.newsLock?.isBlocked);
@@ -1064,9 +1270,15 @@ export function evaluateDecisionEngine(
   const lowLiquidityBlocked =
     ENABLE_LOW_LIQUIDITY_FILTER && total60 < MIN_1M_VOLUME_BTC;
 
+  // SL Too Wide gate (> 0.80% of entry price)
+  const slTooWideBlocked = Boolean(
+    favoredSide !== 'NEUTRAL' && slTpPreview && slTpPreview.slTooWide
+  );
+
   const dailyLimitReached = dailyTradesCount >= MAX_TRADES_PER_DAY;
   const meetsCriteria =
     !isLimitedData &&
+    favoredSide !== 'NEUTRAL' &&
     confidence >= reqConfidence &&
     lead >= reqLead &&
     absorbDriveAgrees &&
@@ -1076,7 +1288,8 @@ export function evaluateDecisionEngine(
     !htfTrendBlocked &&
     !keyLevelOppositeBlocked &&
     !newsBlocked &&
-    !lowLiquidityBlocked;
+    !lowLiquidityBlocked &&
+    !slTooWideBlocked;
 
   const canFire =
     meetsCriteria &&
@@ -1084,6 +1297,25 @@ export function evaluateDecisionEngine(
     cooldownRemainingSec === 0 &&
     !hasActiveTrade &&
     isSpotDotGreen;
+
+  // Collect all blocking gates on this tick for 24h Filter Funnel diagnostics
+  const blockingGates: FunnelGateId[] = [];
+  if (!hasActiveTrade && !isLimitedData) {
+    if (dailyLimitReached) blockingGates.push('daily_limit');
+    if (cooldownRemainingSec > 0) blockingGates.push('cooldown');
+    if (newsBlocked) blockingGates.push('news');
+    if (lowLiquidityBlocked) blockingGates.push('liquidity');
+    if (htfTrendBlocked) blockingGates.push('htf_trend');
+    if (flowConflictBlocked) blockingGates.push('flow_conflict');
+    if (keyLevelOppositeBlocked) blockingGates.push('key_level');
+    if (slTooWideBlocked) blockingGates.push('sl_too_wide');
+    if (confidence < reqConfidence) blockingGates.push('confidence');
+    if (lead < reqLead) blockingGates.push('lead');
+    if (!absorbDriveAgrees || !absorbDriveMagnitudeOk) blockingGates.push('absorb_drive');
+    if (!volumeSpikeOk) blockingGates.push('volume_spike');
+  }
+  const primaryBlockingGate: FunnelGateId | null =
+    !canFire && blockingGates.length > 0 ? blockingGates[0] : null;
 
   let waitReason = 'Awaiting high-probability setup';
   if (isLimitedData) {
@@ -1108,11 +1340,13 @@ export function evaluateDecisionEngine(
     waitReason = 'Blocked: live flow against signal';
   } else if (keyLevelOppositeBlocked && keyLevelBlockNote) {
     waitReason = keyLevelBlockNote;
+  } else if (slTooWideBlocked && slTpPreview) {
+    waitReason = `Blocked: SL cap sits >0.2x ATR15m inside nearest swing (${slTpPreview.slPct.toFixed(2)}% cap)`;
   } else if (!meetsCriteria) {
     if (confidence < reqConfidence) {
-      waitReason = `Confidence ${confidence.toFixed(0)} < ${reqConfidence} required`;
+      waitReason = `Confidence ${confidence.toFixed(0)} < ${reqConfidence} required${adaptiveModeActive ? ' (Adaptive ON)' : ''}`;
     } else if (lead < reqLead) {
-      waitReason = `Lead ${lead.toFixed(0)} < ${reqLead} required`;
+      waitReason = `Lead ${lead.toFixed(0)} < ${reqLead} required${adaptiveModeActive ? ' (Adaptive ON)' : ''}`;
     } else if (!absorbDriveAgrees) {
       waitReason = 'Absorb/Drive component must agree with side';
     } else if (!absorbDriveMagnitudeOk) {
@@ -1124,7 +1358,7 @@ export function evaluateDecisionEngine(
     const p = filterContext.pendingConfirmation;
     waitReason = `PENDING CONFIRMATION: ${p.side} (${p.remainingSec}s left · adverse $${p.adverseMove.toFixed(1)}/$${p.maxAdverseAllowed.toFixed(1)})`;
   } else {
-    waitReason = `READY TO FIRE ${favoredSide} (Confidence: ${confidence.toFixed(0)}%, Lead: ${lead.toFixed(0)}%)`;
+    waitReason = `READY TO FIRE ${favoredSide} [Grade ${setupGrade}${isCounterTrend ? ' · Counter-Trend' : ''}] (Confidence: ${confidence.toFixed(0)}%, Lead: ${lead.toFixed(0)}%)`;
   }
 
   return {
@@ -1150,6 +1384,7 @@ export function evaluateDecisionEngine(
     absorbDriveMagnitudeOk,
     volumeSpikeRatio,
     hasVolumeSpike,
+    volumeSpikeBonusApplied,
     flowBuy60sPct,
     flowSell60sPct,
     flowConflictBlocked,
@@ -1159,16 +1394,27 @@ export function evaluateDecisionEngine(
     newsBlockedTitle,
     trend1h,
     trend4h,
-    trendStateLabel,
+    trendStateLabel: isCounterTrend ? `${trendStateLabel} (Counter-Trend)` : trendStateLabel,
     htfTrendBlocked,
+    isCounterTrend,
+    isTrendAligned,
+    setupGrade,
+    adaptiveModeActive,
     keyLevelBonusApplied,
     keyLevelBonusNote,
     keyLevelOppositeBlocked,
     keyLevelBlockNote,
+    keyLevelWarningNote,
     keyLevels: filterContext?.keyLevels,
     pendingConfirmation: filterContext?.pendingConfirmation || null,
     atrShort,
     atr1h,
+    atr5m,
+    atr15m,
+    slTpPreview,
+    slTooWideBlocked,
+    blockingGates,
+    primaryBlockingGate,
     requiredConfidence: reqConfidence,
     requiredLead: reqLead,
     canFire,
@@ -1179,23 +1425,313 @@ export function evaluateDecisionEngine(
   };
 }
 
+/**
+ * Computes setup grade:
+ * - A+: confidence >= 75 and trend aligned (!isCounterTrend && isTrendAligned)
+ * - A:  confidence >= 70 (70-74, or >=75 when HTF neutral) and not counter-trend
+ * - B:  confidence 65-69 OR counter-trend
+ */
+export function computeSetupGrade(
+  confidence: number,
+  isTrendAligned: boolean,
+  isCounterTrend: boolean
+): 'A+' | 'A' | 'B' {
+  if (isCounterTrend || confidence < 70) {
+    return 'B';
+  }
+  if (confidence >= 75 && isTrendAligned) {
+    return 'A+';
+  }
+  return 'A';
+}
+
+/**
+ * Computes the Phase 6 SL/TP Plan from 5m & 15m candle ATR(14) and 12-candle swing high/low:
+ * 1. NEW SL RULE:
+ *    - slDist = max( swing-based distance, 2.5 x atr15m, 0.50% of entry )
+ *    - Swing-based:
+ *      * LONG  = entry - (min of last 12 candles' lows on 5m and 15m - 0.3 x atr15m)
+ *      * SHORT = (max of last 12 candles' highs on 5m and 15m + 0.3 x atr15m) - entry
+ *    - Floor: 0.50% of entry (SL_MIN_PCT = 0.5). Cap: 1.00% of entry (SL_MAX_PCT = 1.0).
+ *    - If swing-based SL exceeds the cap, use the cap instead of blocking the trade
+ *      (only block if the cap would still sit inside the nearest swing by more than 0.2 x atr15m).
+ *    - If the SL lies within 0.1 x atr15m of a round level (multiples of 500 USD) or a heatmap cluster,
+ *      push it 0.15 x atr15m beyond that level.
+ * 2. TAKE-PROFIT KEEP THE SAME:
+ *    - tpBase = max(1.5 x atr5m, 0.30% of entry)
+ *    - TP_MODE = 'FIXED_BASE' (default: TP1/2/3 = 1x/2x/3x tpBase) or 'R_MULTIPLE' (1R/2R/3R of slDist)
+ *    - After TP1 move stop to entry +/- 0.1 x tpBase (profit-lock)
+ * 3. R ACCOUNTING:
+ *    - oneR = slDist; tp1R = tp1Dist / slDist, tp2R = tp2Dist / slDist, tp3R = tp3Dist / slDist
+ */
+export function computeBtcTideSlTpPlan(
+  side: 'LONG' | 'SHORT',
+  entryPrice: number,
+  secondBins: SecondBin[],
+  klineSlTp?: KlineSlTpContext | null,
+  keyLevels?: KeyLevelsContext | null,
+  explicitAtrShort?: number | null,
+  tpModeOverride?: TpMode
+): SlTpPlanPreview {
+  const atrShort = computeAtr90s(secondBins, entryPrice, explicitAtrShort);
+
+  // 90s swing fallback when klines are not explicitly provided
+  let swingLow90s = entryPrice;
+  let swingHigh90s = entryPrice;
+  if (secondBins && secondBins.length > 0) {
+    const latestSec = secondBins[secondBins.length - 1].sec;
+    const startWindow = latestSec - 89;
+    const recent = secondBins.filter((b) => b.sec >= startWindow);
+    if (recent.length > 0) {
+      swingLow90s = Math.min(...recent.map((b) => b.lowPrice));
+      swingHigh90s = Math.max(...recent.map((b) => b.highPrice));
+    }
+  }
+
+  const fallbackAtr5m = Number(
+    clamp(
+      Math.max(entryPrice * 0.0018, atrShort * 1.8),
+      entryPrice * 0.0012,
+      entryPrice * 0.005
+    ).toFixed(2)
+  );
+  const atr5m =
+    klineSlTp?.atr5m && Number.isFinite(klineSlTp.atr5m) && klineSlTp.atr5m > 0
+      ? Number(klineSlTp.atr5m.toFixed(2))
+      : fallbackAtr5m;
+
+  const fallbackAtr15m = Number(
+    clamp(Math.max(entryPrice * 0.003, atr5m * 1.65), entryPrice * 0.002, entryPrice * 0.0085).toFixed(2)
+  );
+  const atr15m =
+    klineSlTp?.atr15m && Number.isFinite(klineSlTp.atr15m) && klineSlTp.atr15m > 0
+      ? Number(klineSlTp.atr15m.toFixed(2))
+      : fallbackAtr15m;
+
+  const swingLow5m12 =
+    klineSlTp?.swingLow5m12 && Number.isFinite(klineSlTp.swingLow5m12) && klineSlTp.swingLow5m12 > 0
+      ? klineSlTp.swingLow5m12
+      : swingLow90s;
+  const swingLow15m12 =
+    klineSlTp?.swingLow15m12 &&
+    Number.isFinite(klineSlTp.swingLow15m12) &&
+    klineSlTp.swingLow15m12 > 0
+      ? klineSlTp.swingLow15m12
+      : swingLow5m12;
+
+  const swingHigh5m12 =
+    klineSlTp?.swingHigh5m12 &&
+    Number.isFinite(klineSlTp.swingHigh5m12) &&
+    klineSlTp.swingHigh5m12 > 0
+      ? klineSlTp.swingHigh5m12
+      : swingHigh90s;
+  const swingHigh15m12 =
+    klineSlTp?.swingHigh15m12 &&
+    Number.isFinite(klineSlTp.swingHigh15m12) &&
+    klineSlTp.swingHigh15m12 > 0
+      ? klineSlTp.swingHigh15m12
+      : swingHigh5m12;
+
+  const minAllowedSlDist = Number(((SL_MIN_PCT / 100) * entryPrice).toFixed(2));
+  const maxAllowedSlDist = Number(((SL_MAX_PCT / 100) * entryPrice).toFixed(2));
+  const atr15FloorDist = Number((SL_ATR15_MULT * atr15m).toFixed(2));
+
+  let swingRefPrice = entryPrice;
+  let swingBasedDist = 0;
+
+  if (side === 'LONG') {
+    swingRefPrice = Number(Math.min(swingLow15m12, swingLow5m12, entryPrice).toFixed(2));
+    const swingSlPrice = swingRefPrice - SL_SWING_BUFFER_ATR15_MULT * atr15m;
+    swingBasedDist = Number(Math.max(0, entryPrice - swingSlPrice).toFixed(2));
+  } else {
+    swingRefPrice = Number(Math.max(swingHigh15m12, swingHigh5m12, entryPrice).toFixed(2));
+    const swingSlPrice = swingRefPrice + SL_SWING_BUFFER_ATR15_MULT * atr15m;
+    swingBasedDist = Number(Math.max(0, swingSlPrice - entryPrice).toFixed(2));
+  }
+
+  // Initial SL distance before cap: max(swing-based distance, 2.5 x atr15m, 0.50% of entry)
+  const initialSlDist = Math.max(swingBasedDist, atr15FloorDist, minAllowedSlDist);
+  let rawSlPrice = side === 'LONG' ? entryPrice - initialSlDist : entryPrice + initialSlDist;
+
+  // Check if SL lies within 0.1 x atr15m of a round level (multiples of $500) or heatmap cluster
+  const proxDist = SL_ROUND_PROX_ATR15_MULT * atr15m;
+  const pushDist = SL_ROUND_PUSH_ATR15_MULT * atr15m;
+  const nearestRound500 =
+    Math.round(rawSlPrice / SL_ROUND_LEVEL_STEP_USD) * SL_ROUND_LEVEL_STEP_USD;
+
+  const candidateLevels: Array<{ name: string; price: number }> = [
+    { name: `Round $${nearestRound500}`, price: nearestRound500 },
+  ];
+  if (
+    keyLevels?.heatmapSupportPrice &&
+    Number.isFinite(keyLevels.heatmapSupportPrice) &&
+    keyLevels.heatmapSupportPrice > 0
+  ) {
+    candidateLevels.push({
+      name: 'Heatmap Bid Cluster',
+      price: keyLevels.heatmapSupportPrice,
+    });
+  }
+  if (
+    keyLevels?.heatmapResistancePrice &&
+    Number.isFinite(keyLevels.heatmapResistancePrice) &&
+    keyLevels.heatmapResistancePrice > 0
+  ) {
+    candidateLevels.push({
+      name: 'Heatmap Ask Cluster',
+      price: keyLevels.heatmapResistancePrice,
+    });
+  }
+
+  let pushedBeyondLevelNote: string | null = null;
+  for (const lvl of candidateLevels) {
+    if (Math.abs(rawSlPrice - lvl.price) <= proxDist) {
+      if (side === 'LONG') {
+        const pushed = lvl.price - pushDist;
+        if (pushed < rawSlPrice) {
+          rawSlPrice = pushed;
+          pushedBeyondLevelNote = `Pushed 0.15x ATR15m below ${lvl.name} ($${lvl.price.toFixed(0)})`;
+        }
+      } else {
+        const pushed = lvl.price + pushDist;
+        if (pushed > rawSlPrice) {
+          rawSlPrice = pushed;
+          pushedBeyondLevelNote = `Pushed 0.15x ATR15m above ${lvl.name} ($${lvl.price.toFixed(0)})`;
+        }
+      }
+    }
+  }
+
+  let uncappedSlDist = Math.max(minAllowedSlDist, Math.abs(entryPrice - rawSlPrice));
+  let slCapped = false;
+  let finalSlDist = uncappedSlDist;
+
+  // Cap at 1.00% of entry (use the cap instead of blocking unless cap sits inside nearest swing by > 0.2 x atr15m)
+  if (finalSlDist > maxAllowedSlDist) {
+    finalSlDist = maxAllowedSlDist;
+    slCapped = true;
+  }
+
+  const slDist = Number(Math.max(minAllowedSlDist, finalSlDist).toFixed(2));
+  const slPrice = Number(
+    (side === 'LONG' ? entryPrice - slDist : entryPrice + slDist).toFixed(2)
+  );
+
+  // Only block if the capped SL still sits inside the nearest swing by more than 0.2 x atr15m
+  const insideSwingAllowance = SL_INSIDE_SWING_BLOCK_ATR15_MULT * atr15m;
+  const slTooWide =
+    side === 'LONG'
+      ? slPrice > swingRefPrice + insideSwingAllowance + 0.01
+      : slPrice < swingRefPrice - insideSwingAllowance - 0.01;
+
+  const slPct = Number(((slDist / entryPrice) * 100).toFixed(2));
+  const oneR = slDist;
+  const slR = -1.0;
+
+  // Take-profit calculation: tpBase = max(1.5 x atr5m, 0.30% of entry)
+  const tpMode: TpMode = tpModeOverride || TP_MODE;
+  const tpBase = Number(
+    Math.max(TP_BASE_ATR5_MULT * atr5m, (TP_BASE_MIN_PCT / 100) * entryPrice).toFixed(2)
+  );
+  const stepUnit = tpMode === 'R_MULTIPLE' ? oneR : tpBase;
+
+  const tp1Dist = Number((1.0 * stepUnit).toFixed(2));
+  const tp2Dist = Number((2.0 * stepUnit).toFixed(2));
+  const tp3Dist = Number((3.0 * stepUnit).toFixed(2));
+
+  const tp1Price = Number(
+    (side === 'LONG' ? entryPrice + tp1Dist : entryPrice - tp1Dist).toFixed(2)
+  );
+  const tp2Price = Number(
+    (side === 'LONG' ? entryPrice + tp2Dist : entryPrice - tp2Dist).toFixed(2)
+  );
+  const tp3Price = Number(
+    (side === 'LONG' ? entryPrice + tp3Dist : entryPrice - tp3Dist).toFixed(2)
+  );
+
+  // True R of each TP measured against real SL distance (slDist = oneR)
+  const tp1R = oneR > 0 ? Number((tp1Dist / oneR).toFixed(2)) : 1.0;
+  const tp2R = oneR > 0 ? Number((tp2Dist / oneR).toFixed(2)) : 2.0;
+  const tp3R = oneR > 0 ? Number((tp3Dist / oneR).toFixed(2)) : 3.0;
+  const tp1RewardRiskRatio = tp1R;
+
+  // After TP1 move stop to entry +/- 0.1 x tpBase (profit-lock), not exact entry
+  const beLockDist = Number((TP1_PROFIT_LOCK_TPBASE_MULT * tpBase).toFixed(2));
+  const bePlusPrice = Number(
+    (side === 'LONG' ? entryPrice + beLockDist : entryPrice - beLockDist).toFixed(2)
+  );
+  const beLockR = oneR > 0 ? Number((beLockDist / oneR).toFixed(2)) : 0.1;
+
+  const tp1LowRWarning =
+    tp1R < TP1_LOW_R_WARNING_THRESHOLD ? TP1_LOW_R_WARNING_TEXT : null;
+
+  const risk1PctExample10kBtc = oneR > 0 ? Number((100 / oneR).toFixed(4)) : 0;
+  const risk1PctFormula = `Risk 1% account: size = account x 1% / SL distance ($${oneR.toFixed(2)})`;
+
+  return {
+    side,
+    entryPrice,
+    slPrice,
+    slDist,
+    slPct,
+    slR,
+    oneR,
+    tpMode,
+    tpBase,
+    tp1Dist,
+    tp2Dist,
+    tp3Dist,
+    tp1Price,
+    tp2Price,
+    tp3Price,
+    tp1R,
+    tp2R,
+    tp3R,
+    tp1RewardRiskRatio,
+    bePlusPrice,
+    beLockDist,
+    beLockR,
+    atr5m,
+    atr15m,
+    atrShort,
+    swingRefPrice,
+    swingBasedDist,
+    minAllowedSlDist,
+    maxAllowedSlDist,
+    slCapped,
+    slTooWide,
+    pushedBeyondLevelNote,
+    tp1LowRWarning,
+    risk1PctFormula,
+    risk1PctExample10kBtc,
+  };
+}
+
 export interface TradeAnalyticsMetadata {
   componentScores?: Record<string, number> | null;
   trendState?: string | null;
   flowBuyPct?: number | null;
   atrShort?: number | null;
   atr1h?: number | null;
+  atr5m?: number | null;
+  atr15m?: number | null;
+  klineSlTp?: KlineSlTpContext | null;
+  keyLevels?: KeyLevelsContext | null;
+  grade?: 'A+' | 'A' | 'B' | null;
+  isCounterTrend?: boolean | null;
+  adaptiveMode?: boolean | null;
+  tpMode?: TpMode;
 }
 
-export const BTC_TIDE_ENGINE_VERSION = 'v6.4';
+export const BTC_TIDE_ENGINE_VERSION = 'v6.6';
 
 /**
- * Creates a new Trade Plan strictly according to the specification:
- * - ATR: 90s short-term ATR (computeAtr90s)
- * - Swing Level: 90s swing low (for LONG) / 90s swing high (for SHORT)
- * - SL: beyond the 90s swing +/- 0.4 ATR (short-term ATR), clamped 1.2 - 3.2 ATR
- * - TP1/2/3: exactly 1R / 2R / 3R of that SL distance
- * - TP1 + breakeven: realizes +0.50R
+ * Creates a new Trade Plan strictly according to the Phase 6 SL/TP specification:
+ * - slDist = max(swing-based distance, 2.5 x atr15m, 0.50% of entry), capped at 1.00% of entry
+ * - tpBase = max(1.5 x atr5m, 0.30% of entry)
+ * - TP1/TP2/TP3 = 1x / 2x / 3x tpBase (50% / 25% / 25%) in FIXED_BASE mode, or 1R/2R/3R in R_MULTIPLE mode
+ * - After TP1 stop moves to entry +/- 0.1 x tpBase (profit-lock)
+ * - R is always measured against real slDist
  */
 export function createTradePlan(
   side: 'LONG' | 'SHORT',
@@ -1207,51 +1743,24 @@ export function createTradePlan(
   explicitAtrShort?: number | null,
   analyticsMeta?: TradeAnalyticsMetadata
 ): BtcTideTradeRecord {
-  const atrShort = computeAtr90s(secondBins, entryPrice, explicitAtrShort);
+  const plan = computeBtcTideSlTpPlan(
+    side,
+    entryPrice,
+    secondBins,
+    analyticsMeta?.klineSlTp,
+    analyticsMeta?.keyLevels,
+    explicitAtrShort,
+    analyticsMeta?.tpMode
+  );
 
-  // 90s swing detection
-  let swingLow = entryPrice;
-  let swingHigh = entryPrice;
-  if (secondBins && secondBins.length > 0) {
-    const latestSec = secondBins[secondBins.length - 1].sec;
-    const startWindow = latestSec - 89;
-    const recent = secondBins.filter((b) => b.sec >= startWindow);
-    if (recent.length > 0) {
-      swingLow = Math.min(...recent.map((b) => b.lowPrice));
-      swingHigh = Math.max(...recent.map((b) => b.highPrice));
-    }
-  }
-
-  let slDist = 0;
-  let slPrice = 0;
-  let tp1Price = 0;
-  let tp2Price = 0;
-  let tp3Price = 0;
-
-  const minSlFloor = entryPrice * 0.0008; // Minimum SL distance of 0.08% of price
-  const minClamp = Math.max(1.2 * atrShort, minSlFloor);
-  const maxClamp = Math.max(minClamp, 3.2 * atrShort);
-
-  if (side === 'LONG') {
-    const unclamped = (entryPrice - swingLow) + 0.4 * atrShort;
-    slDist = Number(clamp(unclamped, minClamp, maxClamp).toFixed(2));
-    slPrice = Number((entryPrice - slDist).toFixed(2));
-    tp1Price = Number((entryPrice + 1.0 * slDist).toFixed(2));
-    tp2Price = Number((entryPrice + 2.0 * slDist).toFixed(2));
-    tp3Price = Number((entryPrice + 3.0 * slDist).toFixed(2));
-  } else {
-    const unclamped = (swingHigh - entryPrice) + 0.4 * atrShort;
-    slDist = Number(clamp(unclamped, minClamp, maxClamp).toFixed(2));
-    slPrice = Number((entryPrice + slDist).toFixed(2));
-    tp1Price = Number((entryPrice - 1.0 * slDist).toFixed(2));
-    tp2Price = Number((entryPrice - 2.0 * slDist).toFixed(2));
-    tp3Price = Number((entryPrice - 3.0 * slDist).toFixed(2));
-  }
-
-  const oneR = slDist; // 1R is the exact SL distance
+  const isCounterTrend = Boolean(analyticsMeta?.isCounterTrend);
+  const grade: 'A+' | 'A' | 'B' =
+    analyticsMeta?.grade ||
+    computeSetupGrade(confidence, !isCounterTrend && confidence >= 75, isCounterTrend);
+  const adaptiveMode = Boolean(analyticsMeta?.adaptiveMode);
 
   console.log(
-    `[BTC TIDE TRADE PLAN] Created ${side} trade @ $${entryPrice.toFixed(2)} | atrShort=$${atrShort.toFixed(2)}, slDist=$${slDist.toFixed(2)}, oneR=$${oneR.toFixed(2)}`
+    `[BTC TIDE TRADE PLAN] Created ${side} [Grade ${grade}${isCounterTrend ? ' CT' : ''}] trade @ $${entryPrice.toFixed(2)} | atr5m=$${plan.atr5m.toFixed(2)}, atr15m=$${plan.atr15m.toFixed(2)}, slDist=$${plan.slDist.toFixed(2)} (${plan.slPct.toFixed(2)}%), tpBase=$${plan.tpBase.toFixed(2)} (TP1=${plan.tp1R.toFixed(2)}R, TP2=${plan.tp2R.toFixed(2)}R, TP3=${plan.tp3R.toFixed(2)}R)`
   );
 
   const now = Date.now();
@@ -1260,12 +1769,12 @@ export function createTradePlan(
     side,
     entryTime: now,
     entryPrice,
-    initialSlPrice: slPrice,
-    slPrice,
-    tp1Price,
-    tp2Price,
-    tp3Price,
-    oneR,
+    initialSlPrice: plan.slPrice,
+    slPrice: plan.slPrice,
+    tp1Price: plan.tp1Price,
+    tp2Price: plan.tp2Price,
+    tp3Price: plan.tp3Price,
+    oneR: plan.oneR,
     currentR: 0,
     pnlPercent: 0,
     tp1Hit: false,
@@ -1275,6 +1784,7 @@ export function createTradePlan(
     status: 'ACTIVE',
     outcome: null,
     realizedR: null,
+    pnlUsdPerBtc: null,
     closedAt: null,
     closePrice: null,
     expiryTime: now + TRADE_EXPIRY_MS,
@@ -1285,8 +1795,20 @@ export function createTradePlan(
     componentScores: analyticsMeta?.componentScores ?? null,
     trendState: analyticsMeta?.trendState ?? null,
     flowBuyPct: analyticsMeta?.flowBuyPct ?? null,
-    atrShort: analyticsMeta?.atrShort ?? atrShort,
+    atrShort: analyticsMeta?.atrShort ?? plan.atrShort,
     atr1h: analyticsMeta?.atr1h ?? null,
+    atr5m: analyticsMeta?.atr5m ?? plan.atr5m,
+    atr15m: analyticsMeta?.atr15m ?? plan.atr15m,
+    slDist: plan.slDist,
+    slPct: plan.slPct,
+    tpBase: plan.tpBase,
+    tpMode: plan.tpMode,
+    tp1R: plan.tp1R,
+    tp2R: plan.tp2R,
+    tp3R: plan.tp3R,
+    grade,
+    isCounterTrend,
+    adaptiveMode,
   };
 
   return trade;
@@ -1294,7 +1816,9 @@ export function createTradePlan(
 
 /**
  * Evaluates an active trade against current real price on every tick.
- * Handles SL, TP1 (+ BE stop move), TP2, TP3, Expiry.
+ * - R is always measured against real slDist (oneR).
+ * - After TP1, moves stop to entry +/- 0.1 x tpBase (profit-lock).
+ * - Computes true realizedR (using true tp1R, tp2R, tp3R, beLockR) and dollar PnL per 1 BTC (pnlUsdPerBtc).
  */
 export function evaluateActiveTradeTick(
   trade: BtcTideTradeRecord,
@@ -1302,31 +1826,53 @@ export function evaluateActiveTradeTick(
   now: number = Date.now()
 ): { updatedTrade: BtcTideTradeRecord; closed: boolean } {
   const isLong = trade.side === 'LONG';
-  const oneR = trade.oneR;
+  const oneR =
+    trade.oneR > 0
+      ? trade.oneR
+      : Math.max(1, Math.abs(trade.entryPrice - trade.initialSlPrice));
 
-  // Live P&L in R
-  const currentR = Number(
-    ((isLong ? currentPrice - trade.entryPrice : trade.entryPrice - currentPrice) / oneR).toFixed(2)
-  );
-  const pnlPercent = Number(
-    (
-      (isLong
-        ? (currentPrice - trade.entryPrice) / trade.entryPrice
-        : (trade.entryPrice - currentPrice) / trade.entryPrice) * 100
-    ).toFixed(2)
-  );
+  const tp1Dist = Math.abs(trade.tp1Price - trade.entryPrice);
+  const tp2Dist = Math.abs(trade.tp2Price - trade.entryPrice);
+  const tp3Dist = Math.abs(trade.tp3Price - trade.entryPrice);
+  const tpBase =
+    typeof trade.tpBase === 'number' && Number.isFinite(trade.tpBase) && trade.tpBase > 0
+      ? trade.tpBase
+      : tp1Dist;
+
+  const rawTp1R = tp1Dist / oneR;
+  const rawTp2R = tp2Dist / oneR;
+  const rawTp3R = tp3Dist / oneR;
+
+  const beLockDist = Number((TP1_PROFIT_LOCK_TPBASE_MULT * tpBase).toFixed(2));
+  const rawBeLockR = beLockDist / oneR;
+  const bePlusStopPrice = isLong
+    ? Number((trade.entryPrice + beLockDist).toFixed(2))
+    : Number((trade.entryPrice - beLockDist).toFixed(2));
+
+  const liveDiffUsd = isLong
+    ? currentPrice - trade.entryPrice
+    : trade.entryPrice - currentPrice;
+
+  // Live P&L in true R (against real SL distance)
+  const currentR = Number((liveDiffUsd / oneR).toFixed(2));
+  const pnlPercent = Number(((liveDiffUsd / trade.entryPrice) * 100).toFixed(2));
 
   const updated: BtcTideTradeRecord = {
     ...trade,
     currentR,
     pnlPercent,
+    tpBase,
+    tp1R: Number(rawTp1R.toFixed(2)),
+    tp2R: Number(rawTp2R.toFixed(2)),
+    tp3R: Number(rawTp3R.toFixed(2)),
   };
 
-  // 1. Check Expiry (30 minutes — only applies if TP1 has NOT been hit)
+  // 1. Check Expiry (60 minutes — only applies if TP1 has NOT been hit)
   if (!trade.tp1Hit && now >= trade.expiryTime) {
     updated.status = 'CLOSED';
     updated.outcome = 'EXPIRED';
     updated.realizedR = currentR;
+    updated.pnlUsdPerBtc = Number(liveDiffUsd.toFixed(2));
     updated.closedAt = now;
     updated.closePrice = currentPrice;
     return { updatedTrade: updated, closed: true };
@@ -1340,7 +1886,12 @@ export function evaluateActiveTradeTick(
       updated.tp3Hit = true;
       updated.status = 'CLOSED';
       updated.outcome = 'TP3';
-      updated.realizedR = 1.75; // 0.50*1 + 0.25*2 + 0.25*3
+      updated.realizedR = Number(
+        (0.5 * rawTp1R + 0.25 * rawTp2R + 0.25 * rawTp3R).toFixed(2)
+      );
+      updated.pnlUsdPerBtc = Number(
+        (0.5 * tp1Dist + 0.25 * tp2Dist + 0.25 * tp3Dist).toFixed(2)
+      );
       updated.closedAt = now;
       updated.closePrice = currentPrice;
       return { updatedTrade: updated, closed: true };
@@ -1355,7 +1906,7 @@ export function evaluateActiveTradeTick(
     if (!trade.tp1Hit && currentPrice >= trade.tp1Price) {
       updated.tp1Hit = true;
       updated.beMoved = true;
-      updated.slPrice = trade.entryPrice;
+      updated.slPrice = bePlusStopPrice; // Move stop to entry + 0.1 x tpBase (profit-lock)
       updated.status = 'TP1_HIT_BE_ACTIVE';
     }
 
@@ -1367,14 +1918,21 @@ export function evaluateActiveTradeTick(
       if (updated.beMoved) {
         if (updated.tp2Hit) {
           updated.outcome = 'TP2';
-          updated.realizedR = 1.0;
+          updated.realizedR = Number(
+            (0.5 * rawTp1R + 0.25 * rawTp2R + 0.25 * rawBeLockR).toFixed(2)
+          );
+          updated.pnlUsdPerBtc = Number(
+            (0.5 * tp1Dist + 0.25 * tp2Dist + 0.25 * beLockDist).toFixed(2)
+          );
         } else {
           updated.outcome = 'TP1+BE';
-          updated.realizedR = 0.5;
+          updated.realizedR = Number((0.5 * rawTp1R + 0.5 * rawBeLockR).toFixed(2));
+          updated.pnlUsdPerBtc = Number((0.5 * tp1Dist + 0.5 * beLockDist).toFixed(2));
         }
       } else {
         updated.outcome = 'SL';
         updated.realizedR = -1.0;
+        updated.pnlUsdPerBtc = Number((-oneR).toFixed(2));
       }
       return { updatedTrade: updated, closed: true };
     }
@@ -1386,7 +1944,12 @@ export function evaluateActiveTradeTick(
       updated.tp3Hit = true;
       updated.status = 'CLOSED';
       updated.outcome = 'TP3';
-      updated.realizedR = 1.75;
+      updated.realizedR = Number(
+        (0.5 * rawTp1R + 0.25 * rawTp2R + 0.25 * rawTp3R).toFixed(2)
+      );
+      updated.pnlUsdPerBtc = Number(
+        (0.5 * tp1Dist + 0.25 * tp2Dist + 0.25 * tp3Dist).toFixed(2)
+      );
       updated.closedAt = now;
       updated.closePrice = currentPrice;
       return { updatedTrade: updated, closed: true };
@@ -1401,7 +1964,7 @@ export function evaluateActiveTradeTick(
     if (!trade.tp1Hit && currentPrice <= trade.tp1Price) {
       updated.tp1Hit = true;
       updated.beMoved = true;
-      updated.slPrice = trade.entryPrice;
+      updated.slPrice = bePlusStopPrice; // Move stop to entry - 0.1 x tpBase (profit-lock)
       updated.status = 'TP1_HIT_BE_ACTIVE';
     }
 
@@ -1413,14 +1976,21 @@ export function evaluateActiveTradeTick(
       if (updated.beMoved) {
         if (updated.tp2Hit) {
           updated.outcome = 'TP2';
-          updated.realizedR = 1.0;
+          updated.realizedR = Number(
+            (0.5 * rawTp1R + 0.25 * rawTp2R + 0.25 * rawBeLockR).toFixed(2)
+          );
+          updated.pnlUsdPerBtc = Number(
+            (0.5 * tp1Dist + 0.25 * tp2Dist + 0.25 * beLockDist).toFixed(2)
+          );
         } else {
           updated.outcome = 'TP1+BE';
-          updated.realizedR = 0.5;
+          updated.realizedR = Number((0.5 * rawTp1R + 0.5 * rawBeLockR).toFixed(2));
+          updated.pnlUsdPerBtc = Number((0.5 * tp1Dist + 0.5 * beLockDist).toFixed(2));
         }
       } else {
         updated.outcome = 'SL';
         updated.realizedR = -1.0;
+        updated.pnlUsdPerBtc = Number((-oneR).toFixed(2));
       }
       return { updatedTrade: updated, closed: true };
     }
@@ -1428,14 +1998,19 @@ export function evaluateActiveTradeTick(
 
   // 4. Hard Maximum Trade Lifetime (3 hours) after TP1 is hit:
   // If reached after TP1 without hitting TP3 or BE stop, close at market with outcome 'EXPIRED_AFTER_TP1'
-  // and realizedR = real locked R (including the 0.5R already taken at TP1, plus 0.5R if TP2 was hit, plus runner fraction * currentR).
+  // and realizedR = real locked R (50% at tp1R, plus 25% at tp2R if hit, plus runner fraction at market).
   if (updated.tp1Hit && now - trade.entryTime >= MAX_TRADE_LIFETIME_MS) {
     updated.status = 'CLOSED';
     updated.outcome = 'EXPIRED_AFTER_TP1';
+    const runnerR = liveDiffUsd / oneR;
     const lockedRunnerR = updated.tp2Hit
-      ? 0.5 * 1.0 + 0.25 * 2.0 + 0.25 * currentR
-      : 0.5 * 1.0 + 0.5 * currentR;
+      ? 0.5 * rawTp1R + 0.25 * rawTp2R + 0.25 * runnerR
+      : 0.5 * rawTp1R + 0.5 * runnerR;
+    const lockedRunnerUsd = updated.tp2Hit
+      ? 0.5 * tp1Dist + 0.25 * tp2Dist + 0.25 * liveDiffUsd
+      : 0.5 * tp1Dist + 0.5 * liveDiffUsd;
     updated.realizedR = Number(lockedRunnerR.toFixed(2));
+    updated.pnlUsdPerBtc = Number(lockedRunnerUsd.toFixed(2));
     updated.closedAt = now;
     updated.closePrice = currentPrice;
     return { updatedTrade: updated, closed: true };

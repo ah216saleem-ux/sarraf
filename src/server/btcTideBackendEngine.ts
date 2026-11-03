@@ -25,6 +25,8 @@ import {
   evaluateActiveTradeTick,
   computeEma,
   computeAtr90s,
+  computeBtcTideSlTpPlan,
+  computeSetupGrade,
   MAX_TRADES_PER_DAY,
   ENABLE_ENTRY_CONFIRMATION,
   ENTRY_CONFIRM_DURATION_MS,
@@ -34,10 +36,20 @@ import {
   PULLBACK_MAX_ATR_FACTOR,
   ENABLE_NEWS_FILTER,
   NEWS_BLOCK_WINDOW_MINUTES,
+  ENABLE_ADAPTIVE_QUIET_MODE,
+  ADAPTIVE_QUIET_HOURS_MS,
+  ENABLE_WATCH_ALERTS,
+  WATCH_MIN_CONFIDENCE,
+  WATCH_MIN_LEAD,
+  WATCH_COOLDOWN_MS,
+  TELEGRAM_IDLE_WARNING_MS,
+  SL_SWING_LOOKBACK_CANDLES,
   BtcSignalFilterContext,
   PendingConfirmationInfo,
   TradeAnalyticsMetadata,
   DecisionEngineResult,
+  KlineSlTpContext,
+  SlTpPlanPreview,
 } from '../btcTide/signalEngine.ts';
 import {
   initBtcTideSqlite,
@@ -56,16 +68,25 @@ import {
   voidInvalidActiveTradesInSqlite,
   validateActiveTradeAgainstCurrentRules,
   pruneSqliteDatabase,
+  recordFunnelTickInSqlite,
+  recordFunnelPendingCancelledInSqlite,
+  getFunnelDiagnosticsFromSqlite,
+  getLatestTradeEntryTimeFromSqlite,
+  getBtcTideMetaValue,
+  setBtcTideMetaValue,
+  BtcTideFunnelDiagnostics,
 } from './btcTideSqliteDatabase.ts';
 import {
   BTC_TIDE_DRY_RUN,
   setBtcTideLiveDispatchGate,
   notifyNewBtcTideSignal,
   notifyBtcTideTpHit,
-  notifyBtcTideBreakevenMove,
   notifyBtcTideBreakevenClose,
   notifyBtcTideSlHit,
   notifyBtcTideExpiry,
+  notifyBtcTideWatchSetup,
+  sendBtcTideTestSetupMessage,
+  TestSetupDispatchResult,
 } from './btcTideTelegramNotifier.ts';
 import { getNewsEventsForUI, getNewsFeedStatus } from './newsEngine.ts';
 import { isCurrentLeaseHolder } from './deploymentSafety.ts';
@@ -214,6 +235,7 @@ export interface BtcTideBackendState {
   signalStats: any;
   liveSelfCheck?: BtcTideLiveSelfCheck;
   telegramTelemetry?: BtcTideTelegramTelemetry;
+  funnelDiagnostics?: BtcTideFunnelDiagnostics;
   latestHeatmap?: HeatmapColumn;
 }
 
@@ -256,6 +278,8 @@ let ticksSeen = 0;
 let firstTickTime: number | null = null;
 let liqSeqCounter = 0;
 let lastEngineLoopRunAt = Date.now();
+let engineBootTime = Date.now();
+let lastWatchSentAt = 0;
 let lastWatchdogForceReconnectAt = 0;
 let supervisorLoopTimer: NodeJS.Timeout | null = null;
 let memoryPruneTimer: NodeJS.Timeout | null = null;
@@ -973,7 +997,6 @@ function handleTradeTick(
 
     if (!prevTp1 && updatedTrade.tp1Hit) {
       notifyBtcTideTpHit(updatedTrade, 1, price);
-      notifyBtcTideBreakevenMove(updatedTrade);
     } else if (!prevTp2 && updatedTrade.tp2Hit) {
       notifyBtcTideTpHit(updatedTrade, 2, price);
     }
@@ -2356,6 +2379,12 @@ async function pollBackendVenues() {
 }
 
 let currentAtr1h: number | null = null;
+let currentAtr5m: number | null = null;
+let currentAtr15m: number | null = null;
+let swingLow5m12: number | null = null;
+let swingHigh5m12: number | null = null;
+let swingLow15m12: number | null = null;
+let swingHigh15m12: number | null = null;
 let currentEma21_1h: number | null = null;
 let currentEma50_1h: number | null = null;
 let currentEma21_4h: number | null = null;
@@ -2374,8 +2403,8 @@ interface KlineBar {
 }
 
 async function pollBtc1hAtr() {
-  const parseKlinesAtr = (candles: KlineBar[]): number | null => {
-    const recent = candles.slice(-16);
+  const parseKlinesAtr = (candles: KlineBar[], period = 14): number | null => {
+    const recent = candles.slice(-(period + 2));
     if (recent.length < 5) return null;
     let trSum = 0;
     let count = 0;
@@ -2395,6 +2424,40 @@ async function pollBtc1hAtr() {
     return count > 0 ? Number((trSum / count).toFixed(2)) : null;
   };
 
+  const extractBinanceKlines = (d: any): KlineBar[] =>
+    Array.isArray(d)
+      ? d.map((r: any) => ({
+          ts: Number(r[0]),
+          high: parseFloat(r[2]),
+          low: parseFloat(r[3]),
+          close: parseFloat(r[4]),
+        }))
+      : [];
+
+  const extractOkxCandles = (d: any): KlineBar[] =>
+    Array.isArray(d?.data)
+      ? [...d.data]
+          .reverse()
+          .map((r: any) => ({
+            ts: Number(r[0]),
+            high: parseFloat(r[2]),
+            low: parseFloat(r[3]),
+            close: parseFloat(r[4]),
+          }))
+      : [];
+
+  const extractBybitKlines = (d: any): KlineBar[] =>
+    Array.isArray(d?.result?.list)
+      ? [...d.result.list]
+          .reverse()
+          .map((r: any) => ({
+            ts: Number(r[0]),
+            high: parseFloat(r[2]),
+            low: parseFloat(r[3]),
+            close: parseFloat(r[4]),
+          }))
+      : [];
+
   // 1. Fetch 1H Klines (limit=100) for 1H ATR, EMA21, EMA50, and Prev UTC Day High/Low
   const endpoints1h: Array<{
     name: string;
@@ -2404,58 +2467,22 @@ async function pollBtc1hAtr() {
     {
       name: 'Binance 1H Klines',
       url: 'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=100',
-      extract: (d) =>
-        Array.isArray(d)
-          ? d.map((r: any) => ({
-              ts: Number(r[0]),
-              high: parseFloat(r[2]),
-              low: parseFloat(r[3]),
-              close: parseFloat(r[4]),
-            }))
-          : [],
+      extract: extractBinanceKlines,
     },
     {
       name: 'Binance Vision 1H Klines',
       url: 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=100',
-      extract: (d) =>
-        Array.isArray(d)
-          ? d.map((r: any) => ({
-              ts: Number(r[0]),
-              high: parseFloat(r[2]),
-              low: parseFloat(r[3]),
-              close: parseFloat(r[4]),
-            }))
-          : [],
+      extract: extractBinanceKlines,
     },
     {
       name: 'OKX 1H Candles',
       url: 'https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar=1H&limit=100',
-      extract: (d) =>
-        Array.isArray(d?.data)
-          ? [...d.data]
-              .reverse()
-              .map((r: any) => ({
-                ts: Number(r[0]),
-                high: parseFloat(r[2]),
-                low: parseFloat(r[3]),
-                close: parseFloat(r[4]),
-              }))
-          : [],
+      extract: extractOkxCandles,
     },
     {
       name: 'Bybit 1H Klines',
       url: 'https://api.bybit.com/v5/market/kline?category=spot&symbol=BTCUSDT&interval=60&limit=100',
-      extract: (d) =>
-        Array.isArray(d?.result?.list)
-          ? [...d.result.list]
-              .reverse()
-              .map((r: any) => ({
-                ts: Number(r[0]),
-                high: parseFloat(r[2]),
-                low: parseFloat(r[3]),
-                close: parseFloat(r[4]),
-              }))
-          : [],
+      extract: extractBybitKlines,
     },
   ];
 
@@ -2466,7 +2493,7 @@ async function pollBtc1hAtr() {
         const candles = ep.extract(res.data).filter(
           (c) => Number.isFinite(c.close) && c.close > 0
         );
-        const atr = parseKlinesAtr(candles);
+        const atr = parseKlinesAtr(candles, 14);
         if (atr !== null && atr > 50) {
           currentAtr1h = atr;
           const closes1h = candles.map((c) => c.close);
@@ -2514,58 +2541,22 @@ async function pollBtc1hAtr() {
     {
       name: 'Binance 4H Klines',
       url: 'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=100',
-      extract: (d) =>
-        Array.isArray(d)
-          ? d.map((r: any) => ({
-              ts: Number(r[0]),
-              high: parseFloat(r[2]),
-              low: parseFloat(r[3]),
-              close: parseFloat(r[4]),
-            }))
-          : [],
+      extract: extractBinanceKlines,
     },
     {
       name: 'Binance Vision 4H Klines',
       url: 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=100',
-      extract: (d) =>
-        Array.isArray(d)
-          ? d.map((r: any) => ({
-              ts: Number(r[0]),
-              high: parseFloat(r[2]),
-              low: parseFloat(r[3]),
-              close: parseFloat(r[4]),
-            }))
-          : [],
+      extract: extractBinanceKlines,
     },
     {
       name: 'OKX 4H Candles',
       url: 'https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar=4H&limit=100',
-      extract: (d) =>
-        Array.isArray(d?.data)
-          ? [...d.data]
-              .reverse()
-              .map((r: any) => ({
-                ts: Number(r[0]),
-                high: parseFloat(r[2]),
-                low: parseFloat(r[3]),
-                close: parseFloat(r[4]),
-              }))
-          : [],
+      extract: extractOkxCandles,
     },
     {
       name: 'Bybit 4H Klines',
       url: 'https://api.bybit.com/v5/market/kline?category=spot&symbol=BTCUSDT&interval=240&limit=100',
-      extract: (d) =>
-        Array.isArray(d?.result?.list)
-          ? [...d.result.list]
-              .reverse()
-              .map((r: any) => ({
-                ts: Number(r[0]),
-                high: parseFloat(r[2]),
-                low: parseFloat(r[3]),
-                close: parseFloat(r[4]),
-              }))
-          : [],
+      extract: extractBybitKlines,
     },
   ];
 
@@ -2580,6 +2571,104 @@ async function pollBtc1hAtr() {
           const closes4h = candles.map((c) => c.close);
           currentEma21_4h = computeEma(closes4h, 21);
           currentEma50_4h = computeEma(closes4h, 50);
+          break;
+        }
+      }
+    } catch {}
+  }
+
+  // 3. Fetch 5m Klines (limit=30) for 5m ATR(14) and last 12 5m candles' swing high/low
+  const endpoints5m: Array<{
+    name: string;
+    url: string;
+    extract: (d: any) => KlineBar[];
+  }> = [
+    {
+      name: 'Binance 5m Klines',
+      url: 'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=30',
+      extract: extractBinanceKlines,
+    },
+    {
+      name: 'Binance Vision 5m Klines',
+      url: 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=30',
+      extract: extractBinanceKlines,
+    },
+    {
+      name: 'OKX 5m Candles',
+      url: 'https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar=5m&limit=30',
+      extract: extractOkxCandles,
+    },
+    {
+      name: 'Bybit 5m Klines',
+      url: 'https://api.bybit.com/v5/market/kline?category=spot&symbol=BTCUSDT&interval=5&limit=30',
+      extract: extractBybitKlines,
+    },
+  ];
+
+  for (const ep of endpoints5m) {
+    try {
+      const res = await fetchJsonWithStatus(ep.url, {}, 4000);
+      if (res.ok && res.data) {
+        const candles = ep.extract(res.data).filter(
+          (c) => Number.isFinite(c.close) && c.close > 0 && Number.isFinite(c.high) && Number.isFinite(c.low)
+        );
+        const atr5 = parseKlinesAtr(candles, 14);
+        if (atr5 !== null && atr5 > 5) {
+          currentAtr5m = atr5;
+          const swingBars = candles.slice(-SL_SWING_LOOKBACK_CANDLES);
+          if (swingBars.length > 0) {
+            swingLow5m12 = Number(Math.min(...swingBars.map((c) => c.low)).toFixed(2));
+            swingHigh5m12 = Number(Math.max(...swingBars.map((c) => c.high)).toFixed(2));
+          }
+          break;
+        }
+      }
+    } catch {}
+  }
+
+  // 4. Fetch 15m Klines (limit=30) for 15m ATR(14) and last 12 15m candles' swing high/low
+  const endpoints15m: Array<{
+    name: string;
+    url: string;
+    extract: (d: any) => KlineBar[];
+  }> = [
+    {
+      name: 'Binance 15m Klines',
+      url: 'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=30',
+      extract: extractBinanceKlines,
+    },
+    {
+      name: 'Binance Vision 15m Klines',
+      url: 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=30',
+      extract: extractBinanceKlines,
+    },
+    {
+      name: 'OKX 15m Candles',
+      url: 'https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar=15m&limit=30',
+      extract: extractOkxCandles,
+    },
+    {
+      name: 'Bybit 15m Klines',
+      url: 'https://api.bybit.com/v5/market/kline?category=spot&symbol=BTCUSDT&interval=15&limit=30',
+      extract: extractBybitKlines,
+    },
+  ];
+
+  for (const ep of endpoints15m) {
+    try {
+      const res = await fetchJsonWithStatus(ep.url, {}, 4000);
+      if (res.ok && res.data) {
+        const candles = ep.extract(res.data).filter(
+          (c) => Number.isFinite(c.close) && c.close > 0 && Number.isFinite(c.high) && Number.isFinite(c.low)
+        );
+        const atr15 = parseKlinesAtr(candles, 14);
+        if (atr15 !== null && atr15 > 5) {
+          currentAtr15m = atr15;
+          const swingBars = candles.slice(-SL_SWING_LOOKBACK_CANDLES);
+          if (swingBars.length > 0) {
+            swingLow15m12 = Number(Math.min(...swingBars.map((c) => c.low)).toFixed(2));
+            swingHigh15m12 = Number(Math.max(...swingBars.map((c) => c.high)).toFixed(2));
+          }
           break;
         }
       }
@@ -3013,12 +3102,42 @@ function buildAnalyticsMetaFromDecision(dec: DecisionEngineResult): TradeAnalyti
   for (const c of dec.components) {
     scoresMap[c.id] = c.score;
   }
+  const effectiveSessionHigh =
+    sessionHigh !== null && klineTodayHigh !== null
+      ? Math.max(sessionHigh, klineTodayHigh)
+      : sessionHigh ?? klineTodayHigh;
+  const effectiveSessionLow =
+    sessionLow !== null && klineTodayLow !== null
+      ? Math.min(sessionLow, klineTodayLow)
+      : sessionLow ?? klineTodayLow;
+  const { heatmapSupportPrice, heatmapResistancePrice } = extractHeatmapClusterLevels(currentPrice);
   return {
     componentScores: scoresMap,
     trendState: dec.trendStateLabel || null,
     flowBuyPct: dec.flowBuy60sPct ?? null,
     atrShort: dec.atrShort ?? null,
     atr1h: dec.atr1h ?? currentAtr1h ?? null,
+    atr5m: dec.atr5m ?? currentAtr5m ?? null,
+    atr15m: dec.atr15m ?? currentAtr15m ?? null,
+    klineSlTp: {
+      atr5m: currentAtr5m,
+      atr15m: currentAtr15m,
+      swingLow5m12,
+      swingHigh5m12,
+      swingLow15m12,
+      swingHigh15m12,
+    },
+    keyLevels: dec.keyLevels ?? {
+      prevDayHigh,
+      prevDayLow,
+      sessionHigh: effectiveSessionHigh,
+      sessionLow: effectiveSessionLow,
+      heatmapSupportPrice,
+      heatmapResistancePrice,
+    },
+    grade: dec.setupGrade ?? null,
+    isCounterTrend: dec.isCounterTrend ?? false,
+    adaptiveMode: dec.adaptiveModeActive ?? false,
   };
 }
 
@@ -3259,6 +3378,7 @@ function runBackendSignalEngineStep() {
         console.log(
           `[BTC TIDE PENDING CANCELLED] ${pendingEntryState.side} pending confirmation cancelled immediately: ${cancelReason}`
         );
+        recordFunnelPendingCancelledInSqlite(now);
         pendingEntryState = null;
       } else {
         const adverseMove =
@@ -3275,6 +3395,7 @@ function runBackendSignalEngineStep() {
           console.log(
             `[BTC TIDE ENTRY CONFIRM CANCELLED] ${pendingEntryState.side} cancelled: price moved $${adverseMove.toFixed(2)} against signal (> ${ENTRY_CONFIRM_MAX_ADVERSE_ATR}x atrShort = $${maxAdverseAllowed.toFixed(2)})`
           );
+          recordFunnelPendingCancelledInSqlite(now);
           pendingEntryState = null;
         } else {
           if (
@@ -3310,6 +3431,14 @@ function runBackendSignalEngineStep() {
     const { heatmapSupportPrice, heatmapResistancePrice } = extractHeatmapClusterLevels(currentPrice);
     const newsLock = getHighImpactUsdNewsLock(now);
 
+    const lastEnteredAt = getLatestTradeEntryTimeFromSqlite() || lastSignalTime || engineBootTime;
+    const adaptiveModeActive = Boolean(
+      ENABLE_ADAPTIVE_QUIET_MODE &&
+        !currentActiveTrade &&
+        dailyTradesCount < MAX_TRADES_PER_DAY &&
+        now - lastEnteredAt >= ADAPTIVE_QUIET_HOURS_MS
+    );
+
     const filterContext: BtcSignalFilterContext = {
       htf: {
         ema21_1h: currentEma21_1h,
@@ -3317,6 +3446,14 @@ function runBackendSignalEngineStep() {
         ema21_4h: currentEma21_4h,
         ema50_4h: currentEma50_4h,
         atr1h: currentAtr1h,
+      },
+      klineSlTp: {
+        atr5m: currentAtr5m,
+        atr15m: currentAtr15m,
+        swingLow5m12,
+        swingHigh5m12,
+        swingLow15m12,
+        swingHigh15m12,
       },
       keyLevels: {
         prevDayHigh,
@@ -3328,6 +3465,7 @@ function runBackendSignalEngineStep() {
       },
       newsLock,
       pendingConfirmation: pendingInfoForContext,
+      adaptiveModeActive,
     };
 
     currentDecision = evaluateDecisionEngine(
@@ -3343,6 +3481,46 @@ function runBackendSignalEngineStep() {
       dailyTradesCount,
       filterContext
     );
+
+    // Phase 5 Item 1: Record Filter Funnel Diagnostics on every engine tick
+    recordFunnelTickInSqlite({
+      nowMs: now,
+      isSilent: currentDecision.isSilent,
+      canFire: currentDecision.canFire,
+      hasActiveTrade: Boolean(currentActiveTrade),
+      blockingGates: currentDecision.blockingGates || [],
+      confidence: currentDecision.confidence,
+      lead: currentDecision.lead,
+      favoredSide: currentDecision.favoredSide,
+      price: currentPrice,
+      waitReason: currentDecision.waitReason,
+    });
+
+    // Phase 5 Item 5: Setup Watch (Heads-up) Message (at most 1 per hour when 60+ conf & 15+ lead while blocked)
+    if (
+      ENABLE_WATCH_ALERTS &&
+      !currentDecision.isSilent &&
+      !currentDecision.canFire &&
+      !currentActiveTrade &&
+      (currentDecision.favoredSide === 'LONG' || currentDecision.favoredSide === 'SHORT') &&
+      currentDecision.confidence >= WATCH_MIN_CONFIDENCE &&
+      currentDecision.lead >= WATCH_MIN_LEAD &&
+      currentPrice !== null &&
+      currentPrice > 0 &&
+      now - lastWatchSentAt >= WATCH_COOLDOWN_MS
+    ) {
+      lastWatchSentAt = now;
+      setBtcTideMetaValue('last_watch_sent_at', String(now), true);
+      notifyBtcTideWatchSetup({
+        side: currentDecision.favoredSide,
+        confidence: currentDecision.confidence,
+        lead: currentDecision.lead,
+        price: currentPrice,
+        missingReason: currentDecision.waitReason,
+        trendStateLabel: currentDecision.trendStateLabel,
+        adaptiveModeActive: currentDecision.adaptiveModeActive,
+      });
+    }
 
     if (currentActiveTrade && currentPrice !== null) {
       // Validate active trade against current rules; if from an old engine_version or invalid, close as VOID in SQLite
@@ -3372,7 +3550,6 @@ function runBackendSignalEngineStep() {
 
       if (!prevTp1 && updatedTrade.tp1Hit) {
         notifyBtcTideTpHit(updatedTrade, 1, currentPrice);
-        notifyBtcTideBreakevenMove(updatedTrade);
       } else if (!prevTp2 && updatedTrade.tp2Hit) {
         notifyBtcTideTpHit(updatedTrade, 2, currentPrice);
       }
@@ -3463,7 +3640,7 @@ function runBackendSignalEngineStep() {
               pendingEntryState = null;
               enterConfirmedTrade(
                 confirmedSide,
-                `CONFIRMED ${confirmedSide} (90s hold passed · Conf ${currentDecision.confidence.toFixed(0)}%, Lead ${currentDecision.lead.toFixed(0)}%)`
+                `CONFIRMED ${confirmedSide} (${Math.round(ENTRY_CONFIRM_DURATION_MS / 1000)}s hold passed · Grade ${currentDecision.setupGrade || 'A'} · Conf ${currentDecision.confidence.toFixed(0)}%, Lead ${currentDecision.lead.toFixed(0)}%)`
               );
             } else {
               const failReason = !currentDecision.canFire
@@ -3472,8 +3649,9 @@ function runBackendSignalEngineStep() {
                 ? `favored side flipped from ${confirmedSide} to ${currentDecision.favoredSide}`
                 : `adverse move $${adverseMove.toFixed(2)} > $${maxAdverseAllowed.toFixed(2)}`;
               console.log(
-                `[BTC TIDE ENTRY CONFIRM CANCELLED] ${confirmedSide} cancelled at 90s check: ${failReason}`
+                `[BTC TIDE ENTRY CONFIRM CANCELLED] ${confirmedSide} cancelled at ${Math.round(ENTRY_CONFIRM_DURATION_MS / 1000)}s check: ${failReason}`
               );
+              recordFunnelPendingCancelledInSqlite(now);
               pendingEntryState = null;
               currentDecision = {
                 ...currentDecision,
@@ -3740,7 +3918,7 @@ export function triggerLiveBtcTideSignalFromTelegram(
           hadPullback: false,
         };
         console.log(
-          `[BTC TIDE TRIGGER -> PENDING] Placed ${targetSide} into 90s confirmation @ $${currentPrice.toFixed(2)}`
+          `[BTC TIDE TRIGGER -> PENDING] Placed ${targetSide} into ${Math.round(ENTRY_CONFIRM_DURATION_MS / 1000)}s confirmation @ $${currentPrice.toFixed(2)}`
         );
         scheduleBroadcast();
       }
@@ -3857,8 +4035,132 @@ export function getBackendSnapshot(): BtcTideBackendState {
     signalStats: computeSqliteStats(),
     liveSelfCheck: selfCheck,
     telegramTelemetry: selfCheck.telegramTelemetry,
+    funnelDiagnostics: getFunnelDiagnosticsFromSqlite(now),
     latestHeatmap: latestHeatmapColumn || undefined,
   };
+}
+
+export function getBtcTideFunnelReport() {
+  const now = Date.now();
+  const funnel = getFunnelDiagnosticsFromSqlite(now);
+  const lastEnteredAt = getLatestTradeEntryTimeFromSqlite() || lastSignalTime || engineBootTime;
+  const hoursSinceLastTrade = Number(((now - lastEnteredAt) / (3600 * 1000)).toFixed(2));
+  const tgTelemetry = getBtcTideTelegramOutboxTelemetry(now);
+  const idleMoreThan12h = Boolean(
+    !tgTelemetry.lastMessageSentAt || now - tgTelemetry.lastMessageSentAt > 12 * 3600 * 1000
+  );
+
+  const px = currentPrice || 84000;
+  const sortedBins = Array.from(binsMap.values()).sort((a, b) => a.sec - b.sec);
+  const atrShort = computeAtr90s(sortedBins, px);
+  const effectiveSessionHigh =
+    sessionHigh !== null && klineTodayHigh !== null
+      ? Math.max(sessionHigh, klineTodayHigh)
+      : sessionHigh ?? klineTodayHigh;
+  const effectiveSessionLow =
+    sessionLow !== null && klineTodayLow !== null
+      ? Math.min(sessionLow, klineTodayLow)
+      : sessionLow ?? klineTodayLow;
+  const { heatmapSupportPrice, heatmapResistancePrice } = extractHeatmapClusterLevels(px);
+
+  const klineSlTp = {
+    atr5m: currentAtr5m,
+    atr15m: currentAtr15m,
+    swingLow5m12,
+    swingHigh5m12,
+    swingLow15m12,
+    swingHigh15m12,
+  };
+  const keyLevels = {
+    prevDayHigh,
+    prevDayLow,
+    sessionHigh: effectiveSessionHigh,
+    sessionLow: effectiveSessionLow,
+    heatmapSupportPrice,
+    heatmapResistancePrice,
+  };
+
+  const longPlan = computeBtcTideSlTpPlan('LONG', px, sortedBins, klineSlTp, keyLevels, atrShort);
+  const shortPlan = computeBtcTideSlTpPlan('SHORT', px, sortedBins, klineSlTp, keyLevels, atrShort);
+
+  return {
+    funnel,
+    adaptiveMode: {
+      active: Boolean(currentDecision.adaptiveModeActive),
+      lastTradeEnteredAt: lastEnteredAt,
+      hoursSinceLastTrade,
+      requiredConfidence: currentDecision.requiredConfidence,
+      requiredLead: currentDecision.requiredLead,
+    },
+    telegramIdleWarning: {
+      idleMoreThan12h,
+      lastMessageSentAt: tgTelemetry.lastMessageSentAt,
+      totalMessagesSentToday: tgTelemetry.totalMessagesSentToday,
+    },
+    liveSlTpExample: {
+      currentPrice: px,
+      atr5m: longPlan.atr5m,
+      atr15m: longPlan.atr15m,
+      longPlan,
+      shortPlan,
+    },
+  };
+}
+
+export async function triggerBtcTideTestSetupTelegram(
+  requestedSide?: 'LONG' | 'SHORT'
+): Promise<TestSetupDispatchResult> {
+  const px = currentPrice && currentPrice > 0 ? currentPrice : 84000;
+  const side: 'LONG' | 'SHORT' =
+    requestedSide === 'LONG' || requestedSide === 'SHORT'
+      ? requestedSide
+      : currentDecision.favoredSide === 'SHORT'
+      ? 'SHORT'
+      : 'LONG';
+  const sortedBins = Array.from(binsMap.values()).sort((a, b) => a.sec - b.sec);
+  const atrShort = computeAtr90s(sortedBins, px);
+  const effectiveSessionHigh =
+    sessionHigh !== null && klineTodayHigh !== null
+      ? Math.max(sessionHigh, klineTodayHigh)
+      : sessionHigh ?? klineTodayHigh;
+  const effectiveSessionLow =
+    sessionLow !== null && klineTodayLow !== null
+      ? Math.min(sessionLow, klineTodayLow)
+      : sessionLow ?? klineTodayLow;
+  const { heatmapSupportPrice, heatmapResistancePrice } = extractHeatmapClusterLevels(px);
+  const plan = computeBtcTideSlTpPlan(
+    side,
+    px,
+    sortedBins,
+    {
+      atr5m: currentAtr5m,
+      atr15m: currentAtr15m,
+      swingLow5m12,
+      swingHigh5m12,
+      swingLow15m12,
+      swingHigh15m12,
+    },
+    {
+      prevDayHigh,
+      prevDayLow,
+      sessionHigh: effectiveSessionHigh,
+      sessionLow: effectiveSessionLow,
+      heatmapSupportPrice,
+      heatmapResistancePrice,
+    },
+    atrShort
+  );
+  const result = await sendBtcTideTestSetupMessage({
+    plan,
+    confidence: Math.max(70, Math.round(currentDecision.confidence || 72)),
+    lead: Math.max(24, Math.round(currentDecision.lead || 26)),
+    grade: currentDecision.setupGrade || 'A',
+    isCounterTrend: Boolean(currentDecision.isCounterTrend),
+    adaptiveModeActive: Boolean(currentDecision.adaptiveModeActive),
+    trendStateLabel: currentDecision.trendStateLabel || 'HTF Ready',
+  });
+  scheduleBroadcast();
+  return result;
 }
 
 export function getServerRegionInfo(): ServerRegionInfo {
@@ -4056,6 +4358,7 @@ export async function initBtcTideBackend(): Promise<void> {
   currentActiveTrade = getActiveTradeFromSqlite();
   currentClosedTrades = getClosedTradesFromSqlite(300).filter((t) => t.outcome !== 'VOID');
   lastSignalTime = getLastSignalTimeFromSqlite();
+  lastWatchSentAt = Number(getBtcTideMetaValue('last_watch_sent_at') || 0) || 0;
 
   // Register Live Self-Check Notice on Telegram Notifier (non-blocking: queues in outbox if degraded)
   setBtcTideLiveDispatchGate(() => {

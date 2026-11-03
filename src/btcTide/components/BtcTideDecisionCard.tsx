@@ -83,12 +83,21 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
       trend4h = 'UNKNOWN',
       trendStateLabel = 'HTF Building...',
       htfTrendBlocked = false,
+      isCounterTrend = false,
+      setupGrade = null,
+      adaptiveModeActive = false,
+      volumeSpikeBonusApplied = 0,
       keyLevelBonusApplied = 0,
       keyLevelBonusNote = null,
+      keyLevelWarningNote = null,
       keyLevelOppositeBlocked = false,
+      slTooWideBlocked = false,
+      slTpPreview = null,
+      atr5m = null,
+      atr15m = null,
       pendingConfirmation = null,
-      requiredConfidence = 75,
-      requiredLead = 30,
+      requiredConfidence = 68,
+      requiredLead = 22,
       canFire,
       cooldownRemainingSec,
       dailyTradesCount = 0,
@@ -131,13 +140,41 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
                 </span>
                 <span
                   className={`font-mono text-[10px] px-1.5 py-0.5 rounded border font-semibold ${trendBadgeColor}`}
-                  title="1H & 4H EMA21/EMA50 Trend Filter"
+                  title="1H & 4H EMA21/EMA50 Trend Filter (Blocks only when BOTH 1H & 4H disagree)"
                 >
                   {trendStateLabel}
                 </span>
+                {setupGrade && (
+                  <span
+                    className={`font-mono text-[10px] px-1.5 py-0.5 rounded border font-bold ${
+                      setupGrade === 'A+'
+                        ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300'
+                        : setupGrade === 'A'
+                        ? 'bg-teal-950/70 border-teal-500/50 text-teal-300'
+                        : 'bg-amber-950/70 border-amber-500/50 text-amber-300'
+                    }`}
+                  >
+                    Grade {setupGrade}{setupGrade === 'B' ? ' (Half Size)' : ''}
+                  </span>
+                )}
+                {isCounterTrend && (
+                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-purple-950/70 border border-purple-500/40 text-purple-300 font-semibold">
+                    Counter-Trend
+                  </span>
+                )}
+                {adaptiveModeActive && (
+                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-cyan-950/70 border border-cyan-500/50 text-cyan-300 font-bold">
+                    Adaptive mode ON ({requiredConfidence}%/{requiredLead}%)
+                  </span>
+                )}
                 {keyLevelBonusNote && (
                   <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-[#FFD97A]/15 border border-[#FFD97A]/40 text-[#FFD97A]">
                     {keyLevelBonusNote}
+                  </span>
+                )}
+                {keyLevelWarningNote && (
+                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-amber-950/70 border border-amber-500/50 text-amber-300">
+                    ⚠ {keyLevelWarningNote}
                   </span>
                 )}
                 {isStaleOrOffline && (
@@ -147,7 +184,7 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
                 )}
               </div>
               <div className="font-mono text-[10px] text-neutral-400">
-                Silent first 3m &amp; when SPOT dot not green (&lt;3s) · Conf &ge;{requiredConfidence}% · Lead &ge;{requiredLead}% · 90s Confirm
+                Silent first 3m &amp; when SPOT dot not green (&lt;3s) · Conf &ge;{requiredConfidence}% · Lead &ge;{requiredLead}% · 45s Confirm
               </div>
             </div>
           </div>
@@ -176,13 +213,13 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-950/80 border border-[#FFD97A]/50 text-[#FFD97A] font-mono text-[11px] font-bold animate-pulse">
               <Clock className="w-3.5 h-3.5 text-[#FFD97A] shrink-0" />
               <span>
-                PENDING {pendingConfirmation.side} ({pendingConfirmation.remainingSec}s / 90s · Adv ${pendingConfirmation.adverseMove.toFixed(1)}/${pendingConfirmation.maxAdverseAllowed.toFixed(1)})
+                PENDING {pendingConfirmation.side} ({pendingConfirmation.remainingSec}s / 45s · Adv ${pendingConfirmation.adverseMove.toFixed(1)}/${pendingConfirmation.maxAdverseAllowed.toFixed(1)})
               </span>
             </div>
           ) : canFire ? (
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 font-mono text-[11px] font-bold animate-pulse">
               <Zap className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span>FIRING QUALIFIED: {favoredSide}</span>
+              <span>FIRING QUALIFIED: {favoredSide} (Grade {setupGrade || 'A'})</span>
             </div>
           ) : (
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black/60 border border-white/10 text-neutral-300 font-mono text-[11px] max-w-full">
@@ -191,6 +228,83 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
             </div>
           )}
         </div>
+
+        {/* Live Phase 6 SL/TP Preview Bar */}
+        {slTpPreview && (
+          <div className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 font-mono text-[11px] space-y-1.5 text-neutral-300">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-[#FFD97A] font-bold">
+                  SL/TP PLAN ({favoredSide !== 'NEUTRAL' ? favoredSide : 'LONG'} · {slTpPreview.tpMode}):
+                </span>
+                <span>
+                  Entry: <strong className="text-white">${slTpPreview.entryPrice.toFixed(2)}</strong>
+                </span>
+                <span>
+                  SL (-1.00R):{' '}
+                  <strong className="text-rose-300">${slTpPreview.slPrice.toFixed(2)}</strong> (-$
+                  {slTpPreview.slDist.toFixed(2)} · -{slTpPreview.slPct.toFixed(2)}%{slTpPreview.slCapped ? ' · 1.0% cap' : ''})
+                </span>
+                <span>
+                  TP1:{' '}
+                  <strong className="text-teal-300">${slTpPreview.tp1Price.toFixed(2)}</strong> (+
+                  {slTpPreview.tp1R.toFixed(2)}R · 50%)
+                </span>
+                <span>
+                  TP2:{' '}
+                  <strong className="text-teal-300">${slTpPreview.tp2Price.toFixed(2)}</strong> (+
+                  {slTpPreview.tp2R.toFixed(2)}R · 25%)
+                </span>
+                <span>
+                  TP3:{' '}
+                  <strong className="text-[#FFD97A]">${slTpPreview.tp3Price.toFixed(2)}</strong> (+
+                  {slTpPreview.tp3R.toFixed(2)}R · 25%)
+                </span>
+                <span>
+                  TP1 R:R:{' '}
+                  <strong className="text-[#FFD97A]">
+                    {slTpPreview.tp1RewardRiskRatio.toFixed(2)}:1
+                  </strong>
+                </span>
+                <span>
+                  Post-TP1 Stop:{' '}
+                  <strong className="text-amber-300">
+                    ${slTpPreview.bePlusPrice.toFixed(2)} (+0.1x tpBase / +{slTpPreview.beLockR.toFixed(2)}R)
+                  </strong>
+                </span>
+              </div>
+              <div className="text-neutral-400 text-[10px]">
+                {slTpPreview.risk1PctFormula}
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[10px]">
+              <div className="flex flex-wrap items-center gap-3 text-neutral-400">
+                <span>
+                  1R = <strong className="text-white">${slTpPreview.oneR.toFixed(2)}</strong>
+                </span>
+                <span>
+                  tpBase = <strong className="text-teal-300">${slTpPreview.tpBase.toFixed(2)}</strong>
+                </span>
+                <span>
+                  ATR(5m):{' '}
+                  <strong className="text-teal-300">${(atr5m ?? slTpPreview.atr5m).toFixed(2)}</strong>
+                </span>
+                <span>
+                  ATR(15m):{' '}
+                  <strong className="text-teal-300">${(atr15m ?? slTpPreview.atr15m).toFixed(2)}</strong>
+                </span>
+                {slTpPreview.pushedBeyondLevelNote && (
+                  <span className="text-amber-300">({slTpPreview.pushedBeyondLevelNote})</span>
+                )}
+              </div>
+              {slTpPreview.tp1LowRWarning && (
+                <span className="px-2 py-0.5 rounded bg-amber-950/70 border border-amber-500/40 text-amber-300 font-bold">
+                  ⚠ {slTpPreview.tp1LowRWarning}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Excluded PERPS Components & Re-Normalised / LIMITED DATA Notice */}
         {excludedComponents.length > 0 && (
@@ -456,10 +570,10 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
                     {hasVolumeSpike && !isSilent ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
                     ) : (
-                      <XCircle className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
+                      <Clock className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
                     )}
-                    <span className={hasVolumeSpike && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-400'}>
-                      Vol Spike &gt;1.5x ({volumeSpikeRatio.toFixed(2)}x)
+                    <span className={hasVolumeSpike && !isSilent ? 'text-teal-300 font-semibold' : 'text-neutral-300'}>
+                      Vol Spike &gt;1.2x ({volumeSpikeRatio.toFixed(2)}x{volumeSpikeBonusApplied !== 0 ? ' +4 bonus' : ' bonus'})
                     </span>
                   </div>
 
@@ -470,7 +584,7 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
                       <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                     )}
                     <span className={!htfTrendBlocked && !isSilent ? 'text-neutral-200' : 'text-rose-300'}>
-                      HTF Trend ({trendStateLabel})
+                      HTF ({trendStateLabel}{isCounterTrend ? ' · CT→B' : ''})
                     </span>
                   </div>
 
@@ -481,24 +595,24 @@ export const BtcTideDecisionCard: React.FC<BtcTideDecisionCardProps> = React.mem
                       <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                     )}
                     <span className={!flowConflictBlocked && !isSilent ? 'text-neutral-200' : 'text-rose-300'}>
-                      60s Flow ({flowBuy60sPct.toFixed(0)}%B / {flowSell60sPct.toFixed(0)}%S)
+                      60s Flow &le;75% Opp ({flowBuy60sPct.toFixed(0)}%B / {flowSell60sPct.toFixed(0)}%S)
                     </span>
                   </div>
 
                   <div className="flex items-center gap-1.5">
-                    {!keyLevelOppositeBlocked && !newsBlocked && !lowLiquidityBlocked && !isSilent ? (
+                    {!slTooWideBlocked && !keyLevelOppositeBlocked && !newsBlocked && !lowLiquidityBlocked && !isSilent ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-teal-400 shrink-0" />
                     ) : (
                       <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                     )}
-                    <span className={!keyLevelOppositeBlocked && !newsBlocked && !lowLiquidityBlocked && !isSilent ? 'text-neutral-200' : 'text-rose-300'}>
+                    <span className={!slTooWideBlocked && !keyLevelOppositeBlocked && !newsBlocked && !lowLiquidityBlocked && !isSilent ? 'text-neutral-200' : 'text-rose-300'}>
                       {newsBlocked
                         ? `News Lock (${newsBlockedTitle || 'USD'})`
                         : lowLiquidityBlocked
-                        ? `Low Liq (${vol1mBtc} BTC)`
-                        : keyLevelOppositeBlocked
-                        ? 'Opposite Level (<0.5R)'
-                        : `Levels & Liq (${vol1mBtc} BTC/m)`}
+                        ? `Low Liq (${vol1mBtc} BTC < 0.75)`
+                        : slTooWideBlocked
+                        ? 'SL Inside Swing (>0.2x ATR15m)'
+                        : `Liq & SL OK (${vol1mBtc} BTC/m)`}
                     </span>
                   </div>
 

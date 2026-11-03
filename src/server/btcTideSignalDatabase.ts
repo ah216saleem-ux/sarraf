@@ -36,6 +36,19 @@ export interface BtcTideTradeRecord {
   flowBuyPct?: number | null;
   atrShort?: number | null;
   atr1h?: number | null;
+  atr5m?: number | null;
+  atr15m?: number | null;
+  slDist?: number | null;
+  slPct?: number | null;
+  tpBase?: number | null;
+  tpMode?: 'FIXED_BASE' | 'R_MULTIPLE' | null;
+  tp1R?: number | null;
+  tp2R?: number | null;
+  tp3R?: number | null;
+  pnlUsdPerBtc?: number | null;
+  grade?: 'A+' | 'A' | 'B' | null;
+  isCounterTrend?: boolean | null;
+  adaptiveMode?: boolean | null;
 }
 
 export interface BtcTideDatabaseState {
@@ -56,10 +69,14 @@ export interface BtcTideStats {
   totalClosed: number;
   winsCount: number;
   lossesCount: number;
-  winRate: number | null; // null if < 10 closed trades
-  avgR: number | null; // null if < 10 closed trades
+  winRate: number | null;
+  avgR: number | null;
   expectancy?: number | null;
+  expectancyUsdPerBtc?: number | null;
+  avgPnlUsdPerBtc?: number | null;
+  tp1HitRate?: number | null;
   slRate?: number | null;
+  avgSlPct?: number | null;
   expiredRate?: number | null;
   worstLosingComponent?: WorstLosingComponentStat | null;
   tp1BeCount: number;
@@ -165,6 +182,20 @@ export function saveBtcTideDatabase(): void {
   }
 }
 
+export function resolveClosedTradePnlUsdPerBtc(t: BtcTideTradeRecord): number {
+  if (typeof t.pnlUsdPerBtc === 'number' && Number.isFinite(t.pnlUsdPerBtc)) {
+    return t.pnlUsdPerBtc;
+  }
+  const oneR =
+    typeof t.slDist === 'number' && t.slDist > 0
+      ? t.slDist
+      : typeof t.oneR === 'number' && t.oneR > 0
+      ? t.oneR
+      : Math.abs(t.entryPrice - t.initialSlPrice);
+  const r = typeof t.realizedR === 'number' && Number.isFinite(t.realizedR) ? t.realizedR : 0;
+  return Number((r * oneR).toFixed(2));
+}
+
 export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTideStats {
   // Only consider trades from Phase 6 fixes (engine_version >= 'v6.0' or explicit v6.0), and exclude VOID trades
   const validTrades = closedTrades.filter(
@@ -179,7 +210,11 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
       winRate: null,
       avgR: null,
       expectancy: null,
+      expectancyUsdPerBtc: null,
+      avgPnlUsdPerBtc: null,
+      tp1HitRate: null,
       slRate: null,
+      avgSlPct: null,
       expiredRate: null,
       worstLosingComponent: null,
       tp1BeCount: 0,
@@ -195,6 +230,12 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
   let sumR = 0;
   let sumWinR = 0;
   let sumLossAbsR = 0;
+  let sumPnlUsd = 0;
+  let sumWinUsd = 0;
+  let sumLossAbsUsd = 0;
+  let sumSlPct = 0;
+  let slPctCount = 0;
+  let tp1ReachedCount = 0;
   let tp1BeCount = 0;
   let tp2Count = 0;
   let tp3Count = 0;
@@ -203,9 +244,32 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
 
   for (const t of validTrades) {
     const r = typeof t.realizedR === 'number' ? t.realizedR : 0;
+    const pnlUsd = resolveClosedTradePnlUsdPerBtc(t);
     sumR += r;
+    sumPnlUsd += pnlUsd;
 
-    // Strict win vs loss vs expired logic (EXPIRED is NOT a win; EXPIRED_AFTER_TP1 locked >= +0.5R at TP1)
+    const pct =
+      typeof t.slPct === 'number' && Number.isFinite(t.slPct) && t.slPct > 0
+        ? t.slPct
+        : t.entryPrice > 0 && t.oneR > 0
+        ? (t.oneR / t.entryPrice) * 100
+        : null;
+    if (pct !== null && Number.isFinite(pct) && pct > 0) {
+      sumSlPct += pct;
+      slPctCount++;
+    }
+
+    const reachedTp1 =
+      Boolean(t.tp1Hit) ||
+      t.outcome === 'TP1+BE' ||
+      t.outcome === 'TP2' ||
+      t.outcome === 'TP3' ||
+      t.outcome === 'EXPIRED_AFTER_TP1';
+    if (reachedTp1) {
+      tp1ReachedCount++;
+    }
+
+    // Strict win vs loss vs expired logic (EXPIRED is NOT a win; EXPIRED_AFTER_TP1 locked >= TP1 partial)
     if (
       t.outcome === 'TP1+BE' ||
       t.outcome === 'TP2' ||
@@ -214,9 +278,11 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
     ) {
       winsCount++;
       sumWinR += Math.max(0, r);
+      sumWinUsd += Math.max(0, pnlUsd);
     } else if (t.outcome === 'SL') {
       lossesCount++;
       sumLossAbsR += Math.abs(r);
+      sumLossAbsUsd += Math.abs(pnlUsd);
     } else if (t.outcome === 'EXPIRED') {
       expiredCount++;
     }
@@ -233,16 +299,29 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
   const totalClosed = validTrades.length;
   const winRate = totalClosed > 0 ? Number(((winsCount / totalClosed) * 100).toFixed(1)) : null;
   const avgR = totalClosed > 0 ? Number((sumR / totalClosed).toFixed(2)) : null;
+  const avgPnlUsdPerBtc =
+    totalClosed > 0 ? Number((sumPnlUsd / totalClosed).toFixed(2)) : null;
   const winProb = totalClosed > 0 ? winsCount / totalClosed : 0;
   const lossProb = totalClosed > 0 ? lossesCount / totalClosed : 0;
   const avgWinR = winsCount > 0 ? sumWinR / winsCount : 0;
   const avgLossAbsR = lossesCount > 0 ? sumLossAbsR / lossesCount : 0;
+  const avgWinUsd = winsCount > 0 ? sumWinUsd / winsCount : 0;
+  const avgLossAbsUsd = lossesCount > 0 ? sumLossAbsUsd / lossesCount : 0;
+
   const expectancy =
     totalClosed > 0
       ? Number((winProb * avgWinR - lossProb * avgLossAbsR).toFixed(2))
       : null;
+  const expectancyUsdPerBtc =
+    totalClosed > 0
+      ? Number((winProb * avgWinUsd - lossProb * avgLossAbsUsd).toFixed(2))
+      : null;
+  const tp1HitRate =
+    totalClosed > 0 ? Number(((tp1ReachedCount / totalClosed) * 100).toFixed(1)) : null;
   const slRate =
     totalClosed > 0 ? Number(((slCount / totalClosed) * 100).toFixed(1)) : null;
+  const avgSlPct =
+    slPctCount > 0 ? Number((sumSlPct / slPctCount).toFixed(2)) : null;
   const expiredRate =
     totalClosed > 0 ? Number(((expiredCount / totalClosed) * 100).toFixed(1)) : null;
   const worstLosingComponent = computeWorstLosingComponent(validTrades);
@@ -254,7 +333,11 @@ export function computeBtcTideStats(closedTrades: BtcTideTradeRecord[]): BtcTide
     winRate,
     avgR,
     expectancy,
+    expectancyUsdPerBtc,
+    avgPnlUsdPerBtc,
+    tp1HitRate,
     slRate,
+    avgSlPct,
     expiredRate,
     worstLosingComponent,
     tp1BeCount,

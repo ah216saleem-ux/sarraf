@@ -6,6 +6,7 @@ import {
   BtcTideTradeRecord,
   BtcTideStats,
   computeWorstLosingComponent,
+  resolveClosedTradePnlUsdPerBtc,
 } from './btcTideSignalDatabase.ts';
 
 const SQLITE_DB_PATH = path.resolve(DATA_DIR, 'btc_tide.db');
@@ -44,6 +45,9 @@ import {
   BTC_TIDE_ENGINE_VERSION,
   TRADE_EXPIRY_MS,
   MAX_TRADE_LIFETIME_MS,
+  ADAPTIVE_MIN_CONFIDENCE_FLOOR,
+  ADAPTIVE_MIN_LEAD_FLOOR,
+  FunnelGateId,
 } from '../btcTide/signalEngine.ts';
 
 const REPO_SQLITE_DB_PATH = path.resolve(process.cwd(), 'data', 'btc_tide.db');
@@ -98,12 +102,25 @@ export async function initBtcTideSqlite(): Promise<Database> {
       lead REAL NOT NULL,
       trigger_reason TEXT NOT NULL,
       created_at INTEGER NOT NULL,
-      engine_version TEXT DEFAULT 'v6.4',
+      engine_version TEXT DEFAULT 'v6.5',
       component_scores_json TEXT,
       trend_state TEXT,
       flow_buy_pct REAL,
       atr_short REAL,
-      atr_1h REAL
+      atr_1h REAL,
+      atr_5m REAL,
+      atr_15m REAL,
+      sl_dist REAL,
+      sl_pct REAL,
+      tp_base REAL,
+      tp_mode TEXT,
+      tp1_r REAL,
+      tp2_r REAL,
+      tp3_r REAL,
+      pnl_usd_per_btc REAL,
+      grade TEXT,
+      is_counter_trend INTEGER,
+      adaptive_mode INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS btc_tide_meta (
@@ -116,6 +133,23 @@ export async function initBtcTideSqlite(): Promise<Database> {
       open_interest REAL NOT NULL,
       source TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS btc_tide_funnel_buckets (
+      bucket_ts INTEGER NOT NULL,
+      gate TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (bucket_ts, gate)
+    );
+
+    CREATE TABLE IF NOT EXISTS btc_tide_score_peaks (
+      bucket_ts INTEGER PRIMARY KEY,
+      confidence REAL NOT NULL,
+      lead REAL NOT NULL,
+      side TEXT NOT NULL,
+      price REAL,
+      wait_reason TEXT,
+      recorded_at INTEGER NOT NULL
+    );
   `);
 
   try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN engine_version TEXT DEFAULT 'v6.0';"); } catch {}
@@ -124,6 +158,19 @@ export async function initBtcTideSqlite(): Promise<Database> {
   try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN flow_buy_pct REAL;"); } catch {}
   try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN atr_short REAL;"); } catch {}
   try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN atr_1h REAL;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN atr_5m REAL;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN atr_15m REAL;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN sl_dist REAL;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN sl_pct REAL;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN tp_base REAL;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN tp_mode TEXT;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN tp1_r REAL;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN tp2_r REAL;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN tp3_r REAL;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN pnl_usd_per_btc REAL;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN grade TEXT;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN is_counter_trend INTEGER;"); } catch {}
+  try { db.run("ALTER TABLE btc_tide_signals ADD COLUMN adaptive_mode INTEGER;"); } catch {}
 
   dbInstance = db;
   isDbInitialized = true;
@@ -153,11 +200,11 @@ export function validateActiveTradeAgainstCurrentRules(
   if (!Number.isFinite(trade.entryTime) || trade.entryTime > nowMs + 60_000) {
     reasons.push(`entryTime in the future (${trade.entryTime} > ${nowMs})`);
   }
-  if (!Number.isFinite(trade.confidence) || trade.confidence < 75) {
-    reasons.push(`confidence ${trade.confidence} < 75 threshold`);
+  if (!Number.isFinite(trade.confidence) || trade.confidence < ADAPTIVE_MIN_CONFIDENCE_FLOOR) {
+    reasons.push(`confidence ${trade.confidence} < ${ADAPTIVE_MIN_CONFIDENCE_FLOOR} threshold`);
   }
-  if (!Number.isFinite(trade.lead) || trade.lead < 30) {
-    reasons.push(`lead ${trade.lead} < 30 threshold`);
+  if (!Number.isFinite(trade.lead) || trade.lead < ADAPTIVE_MIN_LEAD_FLOOR) {
+    reasons.push(`lead ${trade.lead} < ${ADAPTIVE_MIN_LEAD_FLOOR} threshold`);
   }
   const expirySpanMs = trade.expiryTime - trade.entryTime;
   if (
@@ -166,7 +213,7 @@ export function validateActiveTradeAgainstCurrentRules(
     expirySpanMs > TRADE_EXPIRY_MS + 60_000
   ) {
     reasons.push(
-      `expiry span ${Math.round(expirySpanMs / 60000)}m violates 30m pre-TP1 rule`
+      `expiry span ${Math.round(expirySpanMs / 60000)}m violates 60m pre-TP1 rule`
     );
   }
   if (nowMs - trade.entryTime > MAX_TRADE_LIFETIME_MS) {
@@ -179,16 +226,22 @@ export function validateActiveTradeAgainstCurrentRules(
   };
 }
 
+const SELECT_TRADE_COLUMNS = `
+  id, side, entry_time, entry_price, initial_sl_price, sl_price,
+  tp1_price, tp2_price, tp3_price, one_r, current_r, pnl_percent,
+  tp1_hit, tp2_hit, tp3_hit, be_moved, status, outcome, realized_r,
+  closed_at, close_price, expiry_time, confidence, lead, trigger_reason,
+  engine_version, component_scores_json, trend_state, flow_buy_pct, atr_short, atr_1h,
+  atr_5m, atr_15m, sl_dist, sl_pct, grade, is_counter_trend, adaptive_mode,
+  tp_base, tp_mode, tp1_r, tp2_r, tp3_r, pnl_usd_per_btc
+`;
+
 export function voidInvalidActiveTradesInSqlite(nowMs: number = Date.now()): number {
   if (!dbInstance) return 0;
   let voidedCount = 0;
   try {
     const res = dbInstance.exec(`
-      SELECT id, side, entry_time, entry_price, initial_sl_price, sl_price,
-             tp1_price, tp2_price, tp3_price, one_r, current_r, pnl_percent,
-             tp1_hit, tp2_hit, tp3_hit, be_moved, status, outcome, realized_r,
-             closed_at, close_price, expiry_time, confidence, lead, trigger_reason,
-             engine_version, component_scores_json, trend_state, flow_buy_pct, atr_short, atr_1h
+      SELECT ${SELECT_TRADE_COLUMNS}
       FROM btc_tide_signals
       WHERE status != 'CLOSED';
     `);
@@ -294,17 +347,45 @@ export function rowToTradeRecord(row: any[]): BtcTideTradeRecord {
     } catch {}
   }
 
+  const entryPrice = Number(row[3]);
+  const oneR = Number(row[9]);
+  const rawSlDist = row[33] !== null && row[33] !== undefined ? Number(row[33]) : oneR;
+  const rawSlPct =
+    row[34] !== null && row[34] !== undefined
+      ? Number(row[34])
+      : entryPrice > 0 && rawSlDist > 0
+      ? Number(((rawSlDist / entryPrice) * 100).toFixed(2))
+      : null;
+
+  const tp1Price = Number(row[6]);
+  const tp2Price = Number(row[7]);
+  const tp3Price = Number(row[8]);
+  const slDistNum = Number.isFinite(rawSlDist) && rawSlDist > 0 ? rawSlDist : oneR;
+  const fallbackTp1R =
+    slDistNum > 0 ? Number((Math.abs(tp1Price - entryPrice) / slDistNum).toFixed(2)) : 1.0;
+  const fallbackTp2R =
+    slDistNum > 0 ? Number((Math.abs(tp2Price - entryPrice) / slDistNum).toFixed(2)) : 2.0;
+  const fallbackTp3R =
+    slDistNum > 0 ? Number((Math.abs(tp3Price - entryPrice) / slDistNum).toFixed(2)) : 3.0;
+  const realizedRVal = row[18] !== null && row[18] !== undefined ? Number(row[18]) : null;
+  const pnlUsdVal =
+    row[43] !== null && row[43] !== undefined
+      ? Number(row[43])
+      : realizedRVal !== null && slDistNum > 0
+      ? Number((realizedRVal * slDistNum).toFixed(2))
+      : null;
+
   return {
     id: String(row[0]),
     side: row[1] as 'LONG' | 'SHORT',
     entryTime: Number(row[2]),
-    entryPrice: Number(row[3]),
+    entryPrice,
     initialSlPrice: Number(row[4]),
     slPrice: Number(row[5]),
-    tp1Price: Number(row[6]),
-    tp2Price: Number(row[7]),
-    tp3Price: Number(row[8]),
-    oneR: Number(row[9]),
+    tp1Price,
+    tp2Price,
+    tp3Price,
+    oneR,
     currentR: Number(row[10]),
     pnlPercent: Number(row[11]),
     tp1Hit: Boolean(row[12]),
@@ -313,7 +394,8 @@ export function rowToTradeRecord(row: any[]): BtcTideTradeRecord {
     beMoved: Boolean(row[15]),
     status: row[16] as any,
     outcome: row[17] ? (row[17] as any) : null,
-    realizedR: row[18] !== null && row[18] !== undefined ? Number(row[18]) : null,
+    realizedR: realizedRVal,
+    pnlUsdPerBtc: pnlUsdVal,
     closedAt: row[19] ? Number(row[19]) : null,
     closePrice: row[20] !== null && row[20] !== undefined ? Number(row[20]) : null,
     expiryTime: Number(row[21]),
@@ -326,6 +408,23 @@ export function rowToTradeRecord(row: any[]): BtcTideTradeRecord {
     flowBuyPct: row[28] !== null && row[28] !== undefined ? Number(row[28]) : null,
     atrShort: row[29] !== null && row[29] !== undefined ? Number(row[29]) : null,
     atr1h: row[30] !== null && row[30] !== undefined ? Number(row[30]) : null,
+    atr5m: row[31] !== null && row[31] !== undefined ? Number(row[31]) : null,
+    atr15m: row[32] !== null && row[32] !== undefined ? Number(row[32]) : null,
+    slDist: Number.isFinite(rawSlDist) ? rawSlDist : null,
+    slPct: rawSlPct,
+    grade: row[35] ? (String(row[35]) as 'A+' | 'A' | 'B') : null,
+    isCounterTrend:
+      row[36] !== null && row[36] !== undefined ? Boolean(Number(row[36])) : null,
+    adaptiveMode:
+      row[37] !== null && row[37] !== undefined ? Boolean(Number(row[37])) : null,
+    tpBase:
+      row[38] !== null && row[38] !== undefined
+        ? Number(row[38])
+        : Number(Math.abs(tp1Price - entryPrice).toFixed(2)),
+    tpMode: row[39] ? (String(row[39]) as 'FIXED_BASE' | 'R_MULTIPLE') : 'FIXED_BASE',
+    tp1R: row[40] !== null && row[40] !== undefined ? Number(row[40]) : fallbackTp1R,
+    tp2R: row[41] !== null && row[41] !== undefined ? Number(row[41]) : fallbackTp2R,
+    tp3R: row[42] !== null && row[42] !== undefined ? Number(row[42]) : fallbackTp3R,
   };
 }
 
@@ -333,11 +432,7 @@ export function getActiveTradeFromSqlite(): BtcTideTradeRecord | null {
   if (!dbInstance) return null;
   try {
     const res = dbInstance.exec(`
-      SELECT id, side, entry_time, entry_price, initial_sl_price, sl_price,
-             tp1_price, tp2_price, tp3_price, one_r, current_r, pnl_percent,
-             tp1_hit, tp2_hit, tp3_hit, be_moved, status, outcome, realized_r,
-             closed_at, close_price, expiry_time, confidence, lead, trigger_reason,
-             engine_version, component_scores_json, trend_state, flow_buy_pct, atr_short, atr_1h
+      SELECT ${SELECT_TRADE_COLUMNS}
       FROM btc_tide_signals
       WHERE status != 'CLOSED'
       ORDER BY entry_time DESC
@@ -357,11 +452,7 @@ export function getClosedTradesFromSqlite(limit = 300): BtcTideTradeRecord[] {
   if (!dbInstance) return [];
   try {
     const res = dbInstance.exec(`
-      SELECT id, side, entry_time, entry_price, initial_sl_price, sl_price,
-             tp1_price, tp2_price, tp3_price, one_r, current_r, pnl_percent,
-             tp1_hit, tp2_hit, tp3_hit, be_moved, status, outcome, realized_r,
-             closed_at, close_price, expiry_time, confidence, lead, trigger_reason,
-             engine_version, component_scores_json, trend_state, flow_buy_pct, atr_short, atr_1h
+      SELECT ${SELECT_TRADE_COLUMNS}
       FROM btc_tide_signals
       WHERE status = 'CLOSED'
       ORDER BY entry_time DESC
@@ -378,23 +469,29 @@ export function getClosedTradesFromSqlite(limit = 300): BtcTideTradeRecord[] {
 }
 
 export function computeSqliteStats(): BtcTideStats {
+  const emptyStats: BtcTideStats = {
+    totalClosed: 0,
+    winsCount: 0,
+    lossesCount: 0,
+    winRate: null,
+    avgR: null,
+    expectancy: null,
+    expectancyUsdPerBtc: null,
+    avgPnlUsdPerBtc: null,
+    tp1HitRate: null,
+    slRate: null,
+    avgSlPct: null,
+    expiredRate: null,
+    worstLosingComponent: null,
+    tp1BeCount: 0,
+    tp2Count: 0,
+    tp3Count: 0,
+    slCount: 0,
+    expiredCount: 0,
+  };
+
   if (!dbInstance) {
-    return {
-      totalClosed: 0,
-      winsCount: 0,
-      lossesCount: 0,
-      winRate: null,
-      avgR: null,
-      expectancy: null,
-      slRate: null,
-      expiredRate: null,
-      worstLosingComponent: null,
-      tp1BeCount: 0,
-      tp2Count: 0,
-      tp3Count: 0,
-      slCount: 0,
-      expiredCount: 0,
-    };
+    return emptyStats;
   }
 
   try {
@@ -404,22 +501,7 @@ export function computeSqliteStats(): BtcTideStats {
 
     const totalClosed = closedRows.length;
     if (totalClosed === 0) {
-      return {
-        totalClosed: 0,
-        winsCount: 0,
-        lossesCount: 0,
-        winRate: null,
-        avgR: null,
-        expectancy: null,
-        slRate: null,
-        expiredRate: null,
-        worstLosingComponent: null,
-        tp1BeCount: 0,
-        tp2Count: 0,
-        tp3Count: 0,
-        slCount: 0,
-        expiredCount: 0,
-      };
+      return emptyStats;
     }
 
     let winsCount = 0;
@@ -427,6 +509,12 @@ export function computeSqliteStats(): BtcTideStats {
     let sumR = 0;
     let sumWinR = 0;
     let sumLossAbsR = 0;
+    let sumPnlUsd = 0;
+    let sumWinUsd = 0;
+    let sumLossAbsUsd = 0;
+    let sumSlPct = 0;
+    let slPctCount = 0;
+    let tp1ReachedCount = 0;
     let tp1BeCount = 0;
     let tp2Count = 0;
     let tp3Count = 0;
@@ -435,7 +523,31 @@ export function computeSqliteStats(): BtcTideStats {
 
     for (const t of closedRows) {
       const r = typeof t.realizedR === 'number' ? t.realizedR : 0;
+      const pnlUsd = resolveClosedTradePnlUsdPerBtc(t);
       sumR += r;
+      sumPnlUsd += pnlUsd;
+
+      const pct =
+        typeof t.slPct === 'number' && Number.isFinite(t.slPct) && t.slPct > 0
+          ? t.slPct
+          : t.entryPrice > 0 && t.oneR > 0
+          ? (t.oneR / t.entryPrice) * 100
+          : null;
+      if (pct !== null && Number.isFinite(pct) && pct > 0) {
+        sumSlPct += pct;
+        slPctCount++;
+      }
+
+      const reachedTp1 =
+        Boolean(t.tp1Hit) ||
+        t.outcome === 'TP1+BE' ||
+        t.outcome === 'TP2' ||
+        t.outcome === 'TP3' ||
+        t.outcome === 'EXPIRED_AFTER_TP1';
+      if (reachedTp1) {
+        tp1ReachedCount++;
+      }
+
       if (
         t.outcome === 'TP1+BE' ||
         t.outcome === 'TP2' ||
@@ -444,9 +556,11 @@ export function computeSqliteStats(): BtcTideStats {
       ) {
         winsCount++;
         sumWinR += Math.max(0, r);
+        sumWinUsd += Math.max(0, pnlUsd);
       } else if (t.outcome === 'SL') {
         lossesCount++;
         sumLossAbsR += Math.abs(r);
+        sumLossAbsUsd += Math.abs(pnlUsd);
       } else if (t.outcome === 'EXPIRED') {
         expiredCount++;
       }
@@ -462,12 +576,21 @@ export function computeSqliteStats(): BtcTideStats {
 
     const winRate = Number(((winsCount / totalClosed) * 100).toFixed(1));
     const avgR = Number((sumR / totalClosed).toFixed(2));
+    const avgPnlUsdPerBtc = Number((sumPnlUsd / totalClosed).toFixed(2));
     const winProb = winsCount / totalClosed;
     const lossProb = lossesCount / totalClosed;
     const avgWinR = winsCount > 0 ? sumWinR / winsCount : 0;
     const avgLossAbsR = lossesCount > 0 ? sumLossAbsR / lossesCount : 0;
+    const avgWinUsd = winsCount > 0 ? sumWinUsd / winsCount : 0;
+    const avgLossAbsUsd = lossesCount > 0 ? sumLossAbsUsd / lossesCount : 0;
+
     const expectancy = Number((winProb * avgWinR - lossProb * avgLossAbsR).toFixed(2));
+    const expectancyUsdPerBtc = Number(
+      (winProb * avgWinUsd - lossProb * avgLossAbsUsd).toFixed(2)
+    );
+    const tp1HitRate = Number(((tp1ReachedCount / totalClosed) * 100).toFixed(1));
     const slRate = Number(((slCount / totalClosed) * 100).toFixed(1));
+    const avgSlPct = slPctCount > 0 ? Number((sumSlPct / slPctCount).toFixed(2)) : null;
     const expiredRate = Number(((expiredCount / totalClosed) * 100).toFixed(1));
     const worstLosingComponent = computeWorstLosingComponent(closedRows);
 
@@ -478,7 +601,11 @@ export function computeSqliteStats(): BtcTideStats {
       winRate,
       avgR,
       expectancy,
+      expectancyUsdPerBtc,
+      avgPnlUsdPerBtc,
+      tp1HitRate,
       slRate,
+      avgSlPct,
       expiredRate,
       worstLosingComponent,
       tp1BeCount,
@@ -491,22 +618,7 @@ export function computeSqliteStats(): BtcTideStats {
     console.error('[BTC TIDE SQLITE] Error computing stats:', err.message);
   }
 
-  return {
-    totalClosed: 0,
-    winsCount: 0,
-    lossesCount: 0,
-    winRate: null,
-    avgR: null,
-    expectancy: null,
-    slRate: null,
-    expiredRate: null,
-    worstLosingComponent: null,
-    tp1BeCount: 0,
-    tp2Count: 0,
-    tp3Count: 0,
-    slCount: 0,
-    expiredCount: 0,
-  };
+  return emptyStats;
 }
 
 export function validateSignalPriceSafety(
@@ -553,13 +665,54 @@ export function saveTradeToSqlite(trade: BtcTideTradeRecord, livePrice?: number 
         tp1_price, tp2_price, tp3_price, one_r, current_r, pnl_percent,
         tp1_hit, tp2_hit, tp3_hit, be_moved, status, outcome, realized_r,
         closed_at, close_price, expiry_time, confidence, lead, trigger_reason, created_at,
-        engine_version, component_scores_json, trend_state, flow_buy_pct, atr_short, atr_1h
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        engine_version, component_scores_json, trend_state, flow_buy_pct, atr_short, atr_1h,
+        atr_5m, atr_15m, sl_dist, sl_pct, grade, is_counter_trend, adaptive_mode,
+        tp_base, tp_mode, tp1_r, tp2_r, tp3_r, pnl_usd_per_btc
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
     `;
 
     const scoresJson =
       trade.componentScores && typeof trade.componentScores === 'object'
         ? JSON.stringify(trade.componentScores)
+        : null;
+
+    const slDistVal =
+      typeof trade.slDist === 'number' && Number.isFinite(trade.slDist)
+        ? trade.slDist
+        : trade.oneR;
+    const slPctVal =
+      typeof trade.slPct === 'number' && Number.isFinite(trade.slPct)
+        ? trade.slPct
+        : trade.entryPrice > 0 && slDistVal > 0
+        ? Number(((slDistVal / trade.entryPrice) * 100).toFixed(2))
+        : null;
+    const tpBaseVal =
+      typeof trade.tpBase === 'number' && Number.isFinite(trade.tpBase)
+        ? trade.tpBase
+        : Number(Math.abs(trade.tp1Price - trade.entryPrice).toFixed(2));
+    const tp1RVal =
+      typeof trade.tp1R === 'number' && Number.isFinite(trade.tp1R)
+        ? trade.tp1R
+        : slDistVal > 0
+        ? Number((Math.abs(trade.tp1Price - trade.entryPrice) / slDistVal).toFixed(2))
+        : 1.0;
+    const tp2RVal =
+      typeof trade.tp2R === 'number' && Number.isFinite(trade.tp2R)
+        ? trade.tp2R
+        : slDistVal > 0
+        ? Number((Math.abs(trade.tp2Price - trade.entryPrice) / slDistVal).toFixed(2))
+        : 2.0;
+    const tp3RVal =
+      typeof trade.tp3R === 'number' && Number.isFinite(trade.tp3R)
+        ? trade.tp3R
+        : slDistVal > 0
+        ? Number((Math.abs(trade.tp3Price - trade.entryPrice) / slDistVal).toFixed(2))
+        : 3.0;
+    const pnlUsdVal =
+      typeof trade.pnlUsdPerBtc === 'number' && Number.isFinite(trade.pnlUsdPerBtc)
+        ? trade.pnlUsdPerBtc
+        : typeof trade.realizedR === 'number' && Number.isFinite(trade.realizedR) && slDistVal > 0
+        ? Number((trade.realizedR * slDistVal).toFixed(2))
         : null;
 
     dbInstance.run(stmt, [
@@ -595,6 +748,19 @@ export function saveTradeToSqlite(trade: BtcTideTradeRecord, livePrice?: number 
       typeof trade.flowBuyPct === 'number' ? trade.flowBuyPct : null,
       typeof trade.atrShort === 'number' ? trade.atrShort : null,
       typeof trade.atr1h === 'number' ? trade.atr1h : null,
+      typeof trade.atr5m === 'number' ? trade.atr5m : null,
+      typeof trade.atr15m === 'number' ? trade.atr15m : null,
+      slDistVal,
+      slPctVal,
+      trade.grade || null,
+      trade.isCounterTrend ? 1 : 0,
+      trade.adaptiveMode ? 1 : 0,
+      tpBaseVal,
+      trade.tpMode || 'FIXED_BASE',
+      tp1RVal,
+      tp2RVal,
+      tp3RVal,
+      pnlUsdVal,
     ]);
 
     // Cooldown starts when a real trade fully closes (never on VOID cleanup)
@@ -953,3 +1119,292 @@ export function getTodayClosedTradesChronological(nowMs: number = Date.now()): B
     })
     .sort((a, b) => (a.closedAt || a.entryTime) - (b.closedAt || b.entryTime));
 }
+
+export function getLatestTradeEntryTimeFromSqlite(): number | null {
+  if (!dbInstance) return null;
+  try {
+    const res = dbInstance.exec(
+      `SELECT MAX(entry_time) FROM btc_tide_signals WHERE outcome IS NULL OR outcome != 'VOID';`
+    );
+    if (res.length > 0 && res[0].values.length > 0 && res[0].values[0][0] !== null) {
+      const ts = Number(res[0].values[0][0]);
+      return Number.isFinite(ts) && ts > 0 ? ts : null;
+    }
+  } catch {}
+  return null;
+}
+
+export interface BtcTideFunnelGateStat {
+  gate: FunnelGateId;
+  label: string;
+  count: number;
+  pct: number;
+  pctOfBlockedTicks: number;
+}
+
+export interface BtcTideBestScore6h {
+  confidence: number;
+  lead: number;
+  side: 'LONG' | 'SHORT' | 'NEUTRAL';
+  price: number | null;
+  waitReason: string;
+  recordedAt: number;
+}
+
+export interface BtcTideFunnelDiagnostics {
+  windowHours: number;
+  totalEvaluatedTicks24h: number;
+  totalBlockedTicks24h: number;
+  totalGateBlocks24h: number;
+  rankedGates: BtcTideFunnelGateStat[];
+  summaryLine: string;
+  bestScore6h: BtcTideBestScore6h | null;
+  updatedAt: number;
+}
+
+const FUNNEL_GATE_LABELS: Record<FunnelGateId, string> = {
+  confidence: 'Confidence (< threshold)',
+  lead: 'Directional Lead (< threshold)',
+  absorb_drive: 'Absorb / Drive',
+  volume_spike: 'Volume Spike',
+  htf_trend: 'HTF Trend (1H & 4H against)',
+  flow_conflict: 'Flow Conflict (>75% opposite)',
+  key_level: 'Key Level Proximity',
+  news: 'USD News Window (15m)',
+  liquidity: 'Low Liquidity (1m Vol)',
+  cooldown: '60m Post-Trade Cooldown',
+  daily_limit: 'Daily Limit (5/5)',
+  pending_cancelled: 'Pending Confirmation Cancelled',
+  sl_too_wide: 'SL Cap Inside Nearest Swing (>0.2x ATR15m)',
+};
+
+const ALL_FUNNEL_GATES: FunnelGateId[] = [
+  'confidence',
+  'lead',
+  'absorb_drive',
+  'volume_spike',
+  'htf_trend',
+  'flow_conflict',
+  'key_level',
+  'news',
+  'liquidity',
+  'cooldown',
+  'daily_limit',
+  'pending_cancelled',
+  'sl_too_wide',
+];
+
+let lastFunnelPersistTime = 0;
+
+function incrementFunnelBucketCount(bucketTs: number, gateKey: string): void {
+  if (!dbInstance) return;
+  dbInstance.run(
+    `INSERT INTO btc_tide_funnel_buckets (bucket_ts, gate, count)
+     VALUES (?, ?, 1)
+     ON CONFLICT(bucket_ts, gate) DO UPDATE SET count = count + 1;`,
+    [bucketTs, gateKey]
+  );
+}
+
+export function recordFunnelTickInSqlite(params: {
+  nowMs?: number;
+  isSilent: boolean;
+  canFire: boolean;
+  hasActiveTrade: boolean;
+  blockingGates: FunnelGateId[];
+  confidence: number;
+  lead: number;
+  favoredSide: 'LONG' | 'SHORT' | 'NEUTRAL';
+  price: number | null;
+  waitReason: string;
+}): void {
+  if (!dbInstance) return;
+  const nowMs = params.nowMs ?? Date.now();
+  const bucketTs = Math.floor(nowMs / 300_000) * 300_000; // 5-minute bucket
+
+  try {
+    if (!params.isSilent) {
+      incrementFunnelBucketCount(bucketTs, '__evaluated_ticks__');
+
+      if (!params.canFire && !params.hasActiveTrade && params.blockingGates.length > 0) {
+        incrementFunnelBucketCount(bucketTs, '__blocked_ticks__');
+        for (const gate of params.blockingGates) {
+          incrementFunnelBucketCount(bucketTs, gate);
+        }
+      }
+
+      // Update 6h best score peak in current 5-minute bucket
+      if (params.confidence > 0) {
+        const existingRes = dbInstance.exec(
+          `SELECT confidence, lead FROM btc_tide_score_peaks WHERE bucket_ts = ?;`,
+          [bucketTs]
+        );
+        const prevConf =
+          existingRes.length > 0 && existingRes[0].values.length > 0
+            ? Number(existingRes[0].values[0][0] || 0)
+            : -1;
+        const prevLead =
+          existingRes.length > 0 && existingRes[0].values.length > 0
+            ? Number(existingRes[0].values[0][1] || 0)
+            : -1;
+
+        if (
+          params.confidence > prevConf ||
+          (params.confidence === prevConf && params.lead > prevLead)
+        ) {
+          dbInstance.run(
+            `INSERT OR REPLACE INTO btc_tide_score_peaks
+             (bucket_ts, confidence, lead, side, price, wait_reason, recorded_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?);`,
+            [
+              bucketTs,
+              params.confidence,
+              params.lead,
+              params.favoredSide,
+              params.price,
+              params.waitReason,
+              nowMs,
+            ]
+          );
+        }
+      }
+    }
+
+    // Prune older than 24h and persist every 30s
+    if (nowMs - lastFunnelPersistTime >= 30_000) {
+      lastFunnelPersistTime = nowMs;
+      const cutoff24h = nowMs - 24 * 3600 * 1000;
+      const cutoff6h = nowMs - 6 * 3600 * 1000;
+      dbInstance.run(`DELETE FROM btc_tide_funnel_buckets WHERE bucket_ts < ?;`, [cutoff24h]);
+      dbInstance.run(`DELETE FROM btc_tide_score_peaks WHERE bucket_ts < ?;`, [cutoff6h]);
+      persistSqliteToDisk();
+    }
+  } catch (err: any) {
+    console.error('[BTC TIDE SQLITE] Funnel tick record error:', err.message);
+  }
+}
+
+export function recordFunnelPendingCancelledInSqlite(nowMs: number = Date.now()): void {
+  if (!dbInstance) return;
+  try {
+    const bucketTs = Math.floor(nowMs / 300_000) * 300_000;
+    incrementFunnelBucketCount(bucketTs, 'pending_cancelled');
+    persistSqliteToDisk();
+  } catch (err: any) {
+    console.error('[BTC TIDE SQLITE] Error recording pending_cancelled:', err.message);
+  }
+}
+
+export function getFunnelDiagnosticsFromSqlite(
+  nowMs: number = Date.now()
+): BtcTideFunnelDiagnostics {
+  const emptyResult: BtcTideFunnelDiagnostics = {
+    windowHours: 24,
+    totalEvaluatedTicks24h: 0,
+    totalBlockedTicks24h: 0,
+    totalGateBlocks24h: 0,
+    rankedGates: ALL_FUNNEL_GATES.map((gate) => ({
+      gate,
+      label: FUNNEL_GATE_LABELS[gate],
+      count: 0,
+      pct: 0,
+      pctOfBlockedTicks: 0,
+    })),
+    summaryLine: 'Collecting live engine ticks...',
+    bestScore6h: null,
+    updatedAt: nowMs,
+  };
+
+  if (!dbInstance) return emptyResult;
+
+  try {
+    const cutoff24h = nowMs - 24 * 3600 * 1000;
+    const cutoff6h = nowMs - 6 * 3600 * 1000;
+
+    const bucketRes = dbInstance.exec(
+      `SELECT gate, SUM(count) as total_count
+       FROM btc_tide_funnel_buckets
+       WHERE bucket_ts >= ?
+       GROUP BY gate;`,
+      [cutoff24h]
+    );
+
+    const countsMap: Record<string, number> = {};
+    if (bucketRes.length > 0 && bucketRes[0].values.length > 0) {
+      for (const row of bucketRes[0].values) {
+        countsMap[String(row[0])] = Number(row[1] || 0);
+      }
+    }
+
+    const totalEvaluatedTicks24h = countsMap['__evaluated_ticks__'] || 0;
+    const totalBlockedTicks24h = countsMap['__blocked_ticks__'] || 0;
+
+    let totalGateBlocks24h = 0;
+    for (const gate of ALL_FUNNEL_GATES) {
+      totalGateBlocks24h += countsMap[gate] || 0;
+    }
+
+    const rankedGates: BtcTideFunnelGateStat[] = ALL_FUNNEL_GATES.map((gate) => {
+      const count = countsMap[gate] || 0;
+      const pct =
+        totalGateBlocks24h > 0 ? Number(((count / totalGateBlocks24h) * 100).toFixed(1)) : 0;
+      const pctOfBlockedTicks =
+        totalBlockedTicks24h > 0
+          ? Number(((count / totalBlockedTicks24h) * 100).toFixed(1))
+          : 0;
+      return {
+        gate,
+        label: FUNNEL_GATE_LABELS[gate],
+        count,
+        pct,
+        pctOfBlockedTicks,
+      };
+    }).sort((a, b) => b.count - a.count);
+
+    const nonZeroGates = rankedGates.filter((g) => g.count > 0);
+    const summaryLine =
+      nonZeroGates.length > 0
+        ? `Blocked by ${nonZeroGates
+            .slice(0, 4)
+            .map((g) => `${g.label}: ${g.pct.toFixed(0)}%`)
+            .join(', ')}`
+        : 'No blocked ticks recorded yet in 24h window';
+
+    const peakRes = dbInstance.exec(
+      `SELECT confidence, lead, side, price, wait_reason, recorded_at
+       FROM btc_tide_score_peaks
+       WHERE bucket_ts >= ?
+       ORDER BY confidence DESC, lead DESC, recorded_at DESC
+       LIMIT 1;`,
+      [cutoff6h]
+    );
+
+    let bestScore6h: BtcTideBestScore6h | null = null;
+    if (peakRes.length > 0 && peakRes[0].values.length > 0) {
+      const r = peakRes[0].values[0];
+      bestScore6h = {
+        confidence: Number(r[0] || 0),
+        lead: Number(r[1] || 0),
+        side: (String(r[2] || 'NEUTRAL') as 'LONG' | 'SHORT' | 'NEUTRAL'),
+        price: r[3] !== null && r[3] !== undefined ? Number(r[3]) : null,
+        waitReason: String(r[4] || ''),
+        recordedAt: Number(r[5] || nowMs),
+      };
+    }
+
+    return {
+      windowHours: 24,
+      totalEvaluatedTicks24h,
+      totalBlockedTicks24h,
+      totalGateBlocks24h,
+      rankedGates,
+      summaryLine,
+      bestScore6h,
+      updatedAt: nowMs,
+    };
+  } catch (err: any) {
+    console.error('[BTC TIDE SQLITE] Funnel query error:', err.message);
+    return emptyResult;
+  }
+}
+
