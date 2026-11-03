@@ -144,6 +144,7 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
     const {
       tf: curTf,
       candles: curCandles,
+      atr14: curAtr,
       zones: curZones,
       structures: curStructures,
       showBosChoch: curShowBosChoch,
@@ -219,15 +220,32 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
       ctx.restore();
     }
 
-    // 2) Supply/Demand Base Zones (starting at base candle time and extending to right edge)
-    // Cap boxes drawn per timeframe at maxZones (chosen AFTER >=70% overlap rule); hide FAR zones (>farAtr*ATR) and CONSUMED zones (pctLeft=0) from chart boxes by default
-    const nonConsumedZones = curZones.filter(
-      (z) => curShowConsumedZones || !z.consumed || z.id === curHighlightedId
+    // 2) Swing-Pivot Zones for selected TF only (starting at pivot candle time and extending to right edge)
+    // Consumed zones (pctLeft < 15 or 3+ retests) are hidden; far zones fill empty slots (dimmed); max 3 SELL above + 3 BUY below.
+    const tfOnlyZones = curZones.filter((z) => z.tf === curTf);
+    const nonConsumedZones = tfOnlyZones.filter(
+      (z) =>
+        (curShowConsumedZones || (!z.consumed && z.pctLeft >= 15 && z.retests < 3)) ||
+        z.id === curHighlightedId
     );
-    const eligibleForBox = nonConsumedZones
-      .filter((z) => curShowFarZones || !z.isFar || z.id === curHighlightedId)
-      .sort((a, b) => a.distancePts - b.distancePts || b.power - a.power)
-      .slice(0, Math.max(3, Math.min(8, curMaxZones || 6)));
+    const rankChartZone = (a: RedSniperZone, b: RedSniperZone) => {
+      const aFar = Boolean(a.isFar);
+      const bFar = Boolean(b.isFar);
+      if (aFar !== bFar) return aFar ? 1 : -1;
+      return a.distancePts - b.distancePts || b.power - a.power;
+    };
+    const eligibleSells = nonConsumedZones
+      .filter((z) => z.side === 'SELL')
+      .sort(rankChartZone)
+      .slice(0, 3);
+    const eligibleBuys = nonConsumedZones
+      .filter((z) => z.side === 'BUY')
+      .sort(rankChartZone)
+      .slice(0, 3);
+    const eligibleForBox = [...eligibleSells, ...eligibleBuys].slice(
+      0,
+      Math.max(3, Math.min(8, curMaxZones || 6))
+    );
     const boxIds = new Set(eligibleForBox.map((z) => z.id));
     if (curHighlightedId) {
       boxIds.add(curHighlightedId);
@@ -242,6 +260,7 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
       labelY: number;
       showFullLabel: boolean;
       isHighlighted: boolean;
+      isDimmed: boolean;
     }
 
     const visibleZones: VisibleZoneDraw[] = [];
@@ -278,6 +297,12 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
       const boxBot = Math.min(plotHeight, yMax);
       const boxH = Math.max(3, boxBot - boxTop);
       const xStart = resolveTimeToX(chart, curCandles, z.time, plotWidth);
+      const labelAboveY =
+        boxTop >= 13
+          ? boxTop - 4
+          : Math.min(plotHeight - 4, boxBot + 11);
+      const refAtr = Math.max(0.5, z.atr14 || curAtr || 2.0);
+      const isDimmed = Boolean(z.isFar || z.distancePts > 6 * refAtr);
 
       visibleZones.push({
         zone: z,
@@ -285,84 +310,109 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
         boxTop,
         boxBot,
         boxH,
-        labelY: Math.max(11, Math.min(plotHeight - 4, boxTop + 11)),
+        labelY: labelAboveY,
         showFullLabel: false,
         isHighlighted: z.id === curHighlightedId,
+        isDimmed,
       });
     }
 
-    // B.1) Draw a full label ("SELL · FRESH · PWR 82 · 100% left · 0x") ONLY for the 3 highest-power zones
-    // whose labels do not overlap (14px min vertical gap). Other zones: thin box + power bar without text.
-    // Tapping a chip highlights that zone on the chart for 3 seconds with a full label.
+    // Short one-line label above box start ("SELL · FRESH · PWR 83 · 100%") with no overlap
     const byPowerDesc = [...visibleZones].sort((a, b) => {
       if (a.isHighlighted !== b.isHighlighted) return a.isHighlighted ? -1 : 1;
+      if (a.isDimmed !== b.isDimmed) return a.isDimmed ? 1 : -1;
       return b.zone.power - a.zone.power;
     });
     const occupiedYs: number[] = [];
-    let fullLabelsAssigned = 0;
     for (const vz of byPowerDesc) {
       if (vz.isHighlighted) {
         vz.showFullLabel = true;
         occupiedYs.push(vz.labelY);
-        fullLabelsAssigned += 1;
         continue;
       }
-      if (fullLabelsAssigned >= 3) {
-        vz.showFullLabel = false;
-        continue;
-      }
-      const collides = occupiedYs.some((oy) => Math.abs(oy - vz.labelY) < 14);
+      const collides = occupiedYs.some((oy) => Math.abs(oy - vz.labelY) < 13);
       if (!collides) {
         vz.showFullLabel = true;
         occupiedYs.push(vz.labelY);
-        fullLabelsAssigned += 1;
       } else {
         vz.showFullLabel = false;
       }
     }
 
     for (const vz of visibleZones) {
-      const { zone: z, xStart, boxTop, boxH, labelY, showFullLabel, isHighlighted } = vz;
+      const {
+        zone: z,
+        xStart,
+        boxTop,
+        boxH,
+        labelY,
+        showFullLabel,
+        isHighlighted,
+        isDimmed,
+      } = vz;
       const isSell = z.side === 'SELL';
       const strokeColor = isSell ? '#ff4d66' : '#2fe08a';
       const fillColor = isHighlighted
         ? isSell
-          ? 'rgba(255, 77, 102, 0.22)'
-          : 'rgba(47, 224, 138, 0.22)'
+          ? 'rgba(255, 77, 102, 0.24)'
+          : 'rgba(47, 224, 138, 0.24)'
         : isSell
-        ? 'rgba(255, 77, 102, 0.09)'
-        : 'rgba(47, 224, 138, 0.09)';
+        ? 'rgba(255, 77, 102, 0.11)'
+        : 'rgba(47, 224, 138, 0.11)';
 
       const boxW = Math.max(24, plotWidth - xStart);
 
       ctx.save();
+      ctx.globalAlpha = isDimmed && !isHighlighted ? 0.45 : 1.0;
       ctx.fillStyle = fillColor;
       ctx.fillRect(xStart, boxTop, boxW, boxH);
 
       ctx.strokeStyle = isHighlighted ? '#ffffff' : strokeColor;
-      ctx.lineWidth = isHighlighted ? 2.0 : 1.3;
+      ctx.lineWidth = isHighlighted ? 2.0 : z.minor ? 0.9 : 1.25;
       ctx.setLineDash([]);
-      ctx.strokeRect(xStart + 0.5, boxTop + 0.5, Math.max(1, boxW - 1), Math.max(1, boxH - 1));
+      ctx.strokeRect(
+        xStart + 0.5,
+        boxTop + 0.5,
+        Math.max(1, boxW - 1),
+        Math.max(1, boxH - 1)
+      );
 
-      // Power bar on the right of the box
+      // Small strength bar at the right end of each box
       const barW = 34;
       const barH = 4;
       const barX = plotWidth - barW - 6;
-      const barY = Math.max(2, Math.min(plotHeight - barH - 2, boxTop + 4));
+      const barY = Math.max(
+        2,
+        Math.min(plotHeight - barH - 2, boxTop + Math.max(1, (boxH - barH) / 2))
+      );
       ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
       ctx.fillRect(barX, barY, barW, barH);
       ctx.fillStyle = strokeColor;
-      ctx.fillRect(barX, barY, Math.round((barW * Math.min(100, z.power)) / 100), barH);
+      ctx.fillRect(
+        barX,
+        barY,
+        Math.round((barW * Math.min(100, z.power)) / 100),
+        barH
+      );
 
-      // Full zone label only for the top-3 non-overlapping zones (or highlighted chip zone)
+      // Short one-line label above box start: "SELL · FRESH · PWR 83 · 100%" (or thinner minor label)
       if (showFullLabel) {
-        const text = z.chartLabel;
-        ctx.font = "700 9.5px 'JetBrains Mono', monospace";
+        const text =
+          z.chartLabel ||
+          `${z.side} · ${z.isAPlus ? 'A+ · ' : ''}${z.minor ? 'minor · ' : ''}${z.status} · PWR ${z.power} · ${z.pctLeft}%`;
+        ctx.font = z.minor
+          ? "500 8.5px 'JetBrains Mono', monospace"
+          : "700 9.5px 'JetBrains Mono', monospace";
         ctx.shadowColor = '#08080b';
         ctx.shadowBlur = 3;
-        ctx.fillStyle = isHighlighted ? '#ffffff' : strokeColor;
-        const labelX = Math.min(barX - 42, xStart + 6);
-        ctx.fillText(text, Math.max(4, labelX), labelY);
+        ctx.fillStyle = isHighlighted
+          ? '#ffffff'
+          : z.isAPlus
+          ? '#ffd97a'
+          : strokeColor;
+        const textW = ctx.measureText(text).width;
+        const labelX = Math.max(4, Math.min(barX - textW - 8, xStart + 2));
+        ctx.fillText(text, labelX, labelY);
       }
       ctx.restore();
     }

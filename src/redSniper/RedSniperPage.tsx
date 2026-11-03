@@ -552,10 +552,12 @@ export const RedSniperPage: React.FC = () => {
     };
   }, [bars, livePrice, nowDate]);
 
-  // Filter zones within farAtr * ATR14 (non-FAR) and non-consumed (unless showConsumedZones is enabled) by default
+  // Filter zones within farAtr * ATR14 (non-FAR) and non-consumed (pctLeft >= 15 and retests < 3, unless showConsumedZones is enabled)
   const nearZones = useMemo(() => {
     const base = allZones.filter(
-      (z) => !z.isFar && (settings.showConsumedZones || !z.consumed)
+      (z) =>
+        !z.isFar &&
+        (settings.showConsumedZones || (!z.consumed && z.pctLeft >= 15 && z.retests < 3))
     );
     if (!hasLiveFeed || livePrice === null) return base;
     return base.filter((z) => isZoneNear(z, livePrice, settings.farAtr));
@@ -568,18 +570,25 @@ export const RedSniperPage: React.FC = () => {
   ]);
 
   const sortedStrongZones = useMemo(() => {
-    const source = settings.showFarZones
+    const source = settings.showConsumedZones
       ? mergedZones
-      : mergedZones.filter((z) => !z.isFar);
+      : mergedZones.filter((z) => !z.consumed && z.pctLeft >= 15 && z.retests < 3);
     if (!hasLiveFeed || livePrice === null) {
-      return [...source].sort((a, b) => b.power - a.power);
+      return [...source].sort(
+        (a, b) =>
+          Number(Boolean(a.isFar)) - Number(Boolean(b.isFar)) ||
+          Number(Boolean(a.minor)) - Number(Boolean(b.minor)) ||
+          b.power - a.power
+      );
     }
     return [...source].sort(
       (a, b) =>
+        Number(Boolean(a.isFar)) - Number(Boolean(b.isFar)) ||
+        Number(Boolean(a.minor)) - Number(Boolean(b.minor)) ||
         computeZoneProximityScore(b, livePrice) -
-        computeZoneProximityScore(a, livePrice)
+          computeZoneProximityScore(a, livePrice)
     );
-  }, [mergedZones, settings.showFarZones, hasLiveFeed, livePrice]);
+  }, [mergedZones, settings.showConsumedZones, hasLiveFeed, livePrice]);
 
   // Nearest pending trade plan (using near qualifying FRESH/TESTED zones ranked by proximity/power)
   const pendingPlan = useMemo(() => {
@@ -663,7 +672,9 @@ export const RedSniperPage: React.FC = () => {
 
   const currentTfAnalysis = byTf[selectedTf];
   const currentTfCandles = bars[selectedTf] || [];
-  const currentTfZones = currentTfAnalysis?.zones || [];
+  const currentTfZones = settings.showConsumedZones
+    ? currentTfAnalysis?.zones || []
+    : currentTfAnalysis?.chartZones || [];
   const currentTfBuyCount = currentTfZones.filter((z) => z.side === 'BUY').length;
   const currentTfSellCount = currentTfZones.filter((z) => z.side === 'SELL').length;
 
@@ -780,6 +791,7 @@ export const RedSniperPage: React.FC = () => {
       farAtr: settings.farAtr,
       heightCapAtr: settings.heightCapAtr,
       showConsumedZones: settings.showConsumedZones,
+      debugCounts: currentTfAnalysis?.debugCounts ?? null,
       deadAtrComparison,
       zonesBeforeSelection: currentTfAnalysis?.debugAliveZones ?? [],
       serverHealth: serverHealth || null,
@@ -1883,7 +1895,7 @@ export const RedSniperPage: React.FC = () => {
                     border: `1px solid ${isHigh ? '#ffffff' : chipColor}`,
                   }}
                 >
-                  {z.side} {z.bottom.toFixed(2)}–{z.top.toFixed(2)} · {statusText} · PWR{' '}
+                  {z.side} {z.isAPlus ? 'A+ · ' : ''}{z.bottom.toFixed(2)}–{z.top.toFixed(2)} · {statusText} · PWR{' '}
                   {z.power}
                   {z.consumed ? ' · consumed' : ''}
                   {z.trimmed ? ' · trim' : ''}
@@ -2275,6 +2287,11 @@ export const RedSniperPage: React.FC = () => {
                       <span className="text-[10px] text-neutral-400">
                         · {stateLabel}
                       </span>
+                      {z.isAPlus && (
+                        <span className="border border-[#ffd97a]/70 bg-[#ffd97a]/15 px-1 py-0.2 text-[9px] font-bold text-[#ffd97a]">
+                          A+
+                        </span>
+                      )}
                       {z.consumed && (
                         <span className="border border-rose-500/60 bg-rose-500/15 px-1 py-0.2 text-[9px] font-bold text-rose-300">
                           consumed
