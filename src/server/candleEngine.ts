@@ -812,9 +812,31 @@ export function processTick(price: number, timestampMs: number) {
   }
 }
 
-// Fetch authentic historical candles from biquote.io endpoint for a specific interval
-async function fetchTimeframeOhlc(intervalParam: string, limit: number = 1000): Promise<Candle[]> {
-  const res = await fetch(`https://biquote.io/api/XAUUSD/ohlc?interval=${intervalParam}&limit=${limit}`, {
+const REQUIRED_MIN_BARS_BY_TF: Record<RedSniperStoreTf, number> = {
+  '1m': 5000,
+  '3m': 3000,
+  '5m': 5000,
+  '15m': 4000,
+  '30m': 3000,
+  '1h': 2500,
+  '4h': 1500,
+  '1d': 1000,
+};
+
+async function fetchTimeframeOhlcPage(
+  intervalParam: string,
+  limit: number,
+  fromIso?: string,
+  toIso?: string
+): Promise<Candle[]> {
+  const params = new URLSearchParams({
+    interval: intervalParam,
+    limit: String(limit),
+  });
+  if (fromIso) params.set('from', fromIso);
+  if (toIso) params.set('to', toIso);
+
+  const res = await fetch(`https://biquote.io/api/XAUUSD/ohlc?${params.toString()}`, {
     headers: { Accept: 'application/json', 'User-Agent': 'SARRAF-Engine/2.0' },
   });
 
@@ -829,19 +851,74 @@ async function fetchTimeframeOhlc(intervalParam: string, limit: number = 1000): 
     return [];
   }
 
+  const tf = (['1m', '5m', '15m', '30m', '1h', '4h', '1d'].includes(intervalParam)
+    ? intervalParam
+    : '1m') as RedSniperDirectStoreTf;
+
   // Reverse descending array to chronological ascending order [oldest -> newest]
   const chronological = [...rawBars].reverse();
 
-  return chronological.map((b: any, idx: number) => ({
-    openTime: b.openTime || new Date(typeof b.time === 'number' && b.time < 10_000_000_000 ? b.time * 1000 : b.time || Date.now()).toISOString(),
-    open: Number(b.open),
-    high: Number(b.high),
-    low: Number(b.low),
-    close: Number(b.close),
-    volume: Number(b.tickVolume || b.volume || 1),
-    isClosed: idx < chronological.length - 1, // latest bar is forming/open
-    usableForZones: true,
-  }));
+  return chronological.map((b: any, idx: number) => {
+    const rawMs = b.openTime
+      ? Date.parse(b.openTime)
+      : typeof b.time === 'number'
+      ? b.time < 10_000_000_000
+        ? b.time * 1000
+        : b.time
+      : Date.parse(String(b.time || '')) || Date.now();
+    const alignedSec = alignTimeSecToTf(Math.floor(rawMs / 1000), tf);
+    return {
+      openTime: new Date(alignedSec * 1000).toISOString(),
+      open: Number(b.open),
+      high: Number(b.high),
+      low: Number(b.low),
+      close: Number(b.close),
+      volume: Number(b.tickVolume || b.volume || 1),
+      isClosed: idx < chronological.length - 1,
+      usableForZones: true,
+    };
+  });
+}
+
+// Fetch authentic historical candles from biquote.io endpoint for a specific interval up to required depth
+async function fetchTimeframeOhlc(intervalParam: string, limit: number = 5000): Promise<Candle[]> {
+  const tf = (['1m', '5m', '15m', '30m', '1h', '4h', '1d'].includes(intervalParam)
+    ? intervalParam
+    : '1m') as RedSniperDirectStoreTf;
+  const targetBars = Math.max(REQUIRED_MIN_BARS_BY_TF[tf] ?? 1000, limit);
+  const reqLimit = Math.max(1000, targetBars);
+
+  let collected = await fetchTimeframeOhlcPage(intervalParam, reqLimit);
+  if (collected.length === 0 || limit <= 50) {
+    return collected;
+  }
+
+  const periodSec = getRedSniperTfPeriodSeconds(tf);
+  let attempts = 0;
+  while (collected.length < targetBars && attempts < 3) {
+    attempts++;
+    const oldestMs = Date.parse(collected[0]?.openTime || '');
+    if (Number.isNaN(oldestMs) || oldestMs <= 0) break;
+    const oldestSec = Math.floor(oldestMs / 1000);
+    const toSec = attempts === 1 ? oldestSec - periodSec : oldestSec;
+    const chunkBars = attempts === 1 ? 500 : 1000 * attempts;
+    const fromIso = new Date((toSec - chunkBars * periodSec) * 1000).toISOString();
+    const toIso = new Date(toSec * 1000).toISOString();
+
+    try {
+      const olderBatch = await fetchTimeframeOhlcPage(intervalParam, reqLimit, fromIso, toIso);
+      const strictlyOlder = olderBatch.filter((b) => Date.parse(b.openTime) < oldestMs);
+      if (strictlyOlder.length === 0) {
+        if (attempts >= 2) break;
+        continue;
+      }
+      collected = mergeCandleSeries(strictlyOlder, collected, Math.max(5000, targetBars));
+    } catch {
+      break;
+    }
+  }
+
+  return collected;
 }
 
 let activeRedSniperGaps: RedSniperGap[] = [];
@@ -858,13 +935,13 @@ export function getActiveRedSniperGaps(): RedSniperGap[] {
 export async function syncBrokerCandlesToStore(): Promise<number> {
   try {
     const [m1Bars, m5Bars, m15Bars, m30Bars, h1Bars, h4Bars, d1Bars] = await Promise.all([
-      fetchTimeframeOhlc('1m', 1000).catch(() => []),
-      fetchTimeframeOhlc('5m', 1000).catch(() => []),
-      fetchTimeframeOhlc('15m', 1000).catch(() => []),
-      fetchTimeframeOhlc('30m', 1000).catch(() => []),
-      fetchTimeframeOhlc('1h', 1000).catch(() => []),
-      fetchTimeframeOhlc('4h', 1000).catch(() => []),
-      fetchTimeframeOhlc('1d', 1000).catch(() => []),
+      fetchTimeframeOhlc('1m', REQUIRED_MIN_BARS_BY_TF['1m']).catch(() => []),
+      fetchTimeframeOhlc('5m', REQUIRED_MIN_BARS_BY_TF['5m']).catch(() => []),
+      fetchTimeframeOhlc('15m', REQUIRED_MIN_BARS_BY_TF['15m']).catch(() => []),
+      fetchTimeframeOhlc('30m', REQUIRED_MIN_BARS_BY_TF['30m']).catch(() => []),
+      fetchTimeframeOhlc('1h', REQUIRED_MIN_BARS_BY_TF['1h']).catch(() => []),
+      fetchTimeframeOhlc('4h', REQUIRED_MIN_BARS_BY_TF['4h']).catch(() => []),
+      fetchTimeframeOhlc('1d', REQUIRED_MIN_BARS_BY_TF['1d']).catch(() => []),
     ]);
 
     if (m1Bars.length > 0) store.M1 = mergeCandleSeries(store.M1, m1Bars, 10000);
@@ -882,7 +959,9 @@ export async function syncBrokerCandlesToStore(): Promise<number> {
 
     const savedCount = await saveRedSniperJsonlStoreToDisk();
     if (savedCount > 0) {
-      console.log(`[RED SNIPER STORE] saved ${savedCount} candles`);
+      console.log(
+        `[RED SNIPER STORE] saved ${savedCount} candles | barsLoaded per TF: 5m=${redSniperStore['5m'].length}/${REQUIRED_MIN_BARS_BY_TF['5m']}, 15m=${redSniperStore['15m'].length}/${REQUIRED_MIN_BARS_BY_TF['15m']}, 30m=${redSniperStore['30m'].length}/${REQUIRED_MIN_BARS_BY_TF['30m']}, 1h=${redSniperStore['1h'].length}/${REQUIRED_MIN_BARS_BY_TF['1h']}, 4h=${redSniperStore['4h'].length}/${REQUIRED_MIN_BARS_BY_TF['4h']}, 1d=${redSniperStore['1d'].length}/${REQUIRED_MIN_BARS_BY_TF['1d']}`
+      );
     }
     return savedCount;
   } catch (err: any) {
@@ -960,7 +1039,7 @@ export async function getRedSniperHealth(): Promise<RedSniperHealthReport> {
 
 /**
  * Serve candles for GET /api/redsniper/candles?tf=1m&limit=5000.
- * Builds higher timeframes (3m, 5m, 15m, 30m) from stored M1 when they cover the requested range.
+ * Loads direct timeframe candles from store/broker first; uses M1 aggregation ONLY as a fallback when direct candles are empty.
  */
 export async function getRedSniperCandlesForApi(
   tfRaw: string,
@@ -980,7 +1059,8 @@ export async function getRedSniperCandlesForApi(
   const tf: RedSniperStoreTf = validTfs.includes(tfRaw as RedSniperStoreTf)
     ? (tfRaw as RedSniperStoreTf)
     : '1m';
-  const limit = Math.max(1, Math.min(5000, Number(limitRaw) || 5000));
+  const reqMin = REQUIRED_MIN_BARS_BY_TF[tf] ?? 1000;
+  const limit = Math.max(1, Math.min(5000, Math.max(reqMin, Number(limitRaw) || 5000)));
 
   syncStoreToRedSniperMemory();
 
@@ -1004,17 +1084,18 @@ export async function getRedSniperCandlesForApi(
   let bars: RedSniperStoredCandle[] = [];
   let builtFromM1 = false;
 
-  if (tf === '3m' || tf === '5m' || tf === '15m' || tf === '30m') {
-    const directStored = tf === '3m' ? [] : redSniperStore[tf] || [];
-    const m1Covers = doesStoredM1CoverRange(m1Stored, directStored, tf, limit);
-    if (m1Covers) {
-      const fromM1 = buildHigherTfFromStoredM1(m1Stored, tf, limit);
-      bars = dedupeAndMergeRedSniperCandles(directStored, fromM1, limit);
-      builtFromM1 = true;
-    } else {
-      const fromM1 = buildHigherTfFromStoredM1(m1Stored, tf, limit);
-      bars = dedupeAndMergeRedSniperCandles(fromM1, directStored, limit);
+  if (tf === '3m') {
+    bars = buildHigherTfFromStoredM1(m1Stored, '3m', limit);
+    builtFromM1 = true;
+  } else if (tf === '5m' || tf === '15m' || tf === '30m') {
+    const directStored = redSniperStore[tf] || [];
+    if (directStored.length > 0) {
+      bars = directStored.slice(-limit);
       builtFromM1 = false;
+    } else {
+      // M1 aggregation ONLY as a fallback when direct TF candles are empty
+      bars = buildHigherTfFromStoredM1(m1Stored, tf, limit);
+      builtFromM1 = true;
     }
   } else {
     bars = (redSniperStore[tf] || []).slice(-limit);
@@ -1110,16 +1191,19 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
   startRedSniperCandlePersistenceWorker();
 
   const hasEnough =
-    store.M1.length >= 300 &&
-    store.M5.length >= 250 &&
-    store.M15.length >= 300 &&
-    store.M30.length >= 250 &&
-    store.H1.length >= 180 &&
-    store.H4.length >= 150 &&
-    store.D1.length >= 300;
+    store.M1.length >= REQUIRED_MIN_BARS_BY_TF['1m'] &&
+    store.M5.length >= REQUIRED_MIN_BARS_BY_TF['5m'] &&
+    store.M15.length >= REQUIRED_MIN_BARS_BY_TF['15m'] &&
+    store.M30.length >= REQUIRED_MIN_BARS_BY_TF['30m'] &&
+    store.H1.length >= REQUIRED_MIN_BARS_BY_TF['1h'] &&
+    store.H4.length >= REQUIRED_MIN_BARS_BY_TF['4h'] &&
+    store.D1.length >= REQUIRED_MIN_BARS_BY_TF['1d'];
 
   if (hasEnough) {
     runGapDetectionAudit();
+    console.log(
+      `[RED SNIPER HISTORY] Startup barsLoaded per TF: 5m=${store.M5.length}/${REQUIRED_MIN_BARS_BY_TF['5m']}, 15m=${store.M15.length}/${REQUIRED_MIN_BARS_BY_TF['15m']}, 30m=${store.M30.length}/${REQUIRED_MIN_BARS_BY_TF['30m']}, 1h=${store.H1.length}/${REQUIRED_MIN_BARS_BY_TF['1h']}, 4h=${store.H4.length}/${REQUIRED_MIN_BARS_BY_TF['4h']}, 1d=${store.D1.length}/${REQUIRED_MIN_BARS_BY_TF['1d']}`
+    );
     return true;
   }
 
@@ -1127,13 +1211,13 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
     console.log('[CANDLE ENGINE] Fetching authentic historical candles from biquote.io for M1, M5, M15, M30, H1, H4, D1...');
 
     const [m1Bars, m5Bars, m15Bars, m30Bars, h1Bars, h4Bars, d1Bars] = await Promise.all([
-      fetchTimeframeOhlc('1m', 1000).catch(() => []),
-      fetchTimeframeOhlc('5m', 1000).catch(() => []),
-      fetchTimeframeOhlc('15m', 1000).catch(() => []),
-      fetchTimeframeOhlc('30m', 1000).catch(() => []),
-      fetchTimeframeOhlc('1h', 1000).catch(() => []),
-      fetchTimeframeOhlc('4h', 1000).catch(() => []),
-      fetchTimeframeOhlc('1d', 1000).catch(() => []),
+      fetchTimeframeOhlc('1m', REQUIRED_MIN_BARS_BY_TF['1m']).catch(() => []),
+      fetchTimeframeOhlc('5m', REQUIRED_MIN_BARS_BY_TF['5m']).catch(() => []),
+      fetchTimeframeOhlc('15m', REQUIRED_MIN_BARS_BY_TF['15m']).catch(() => []),
+      fetchTimeframeOhlc('30m', REQUIRED_MIN_BARS_BY_TF['30m']).catch(() => []),
+      fetchTimeframeOhlc('1h', REQUIRED_MIN_BARS_BY_TF['1h']).catch(() => []),
+      fetchTimeframeOhlc('4h', REQUIRED_MIN_BARS_BY_TF['4h']).catch(() => []),
+      fetchTimeframeOhlc('1d', REQUIRED_MIN_BARS_BY_TF['1d']).catch(() => []),
     ]);
 
     if (m1Bars.length > 0) store.M1 = mergeCandleSeries(store.M1, m1Bars, 10000);
@@ -1142,8 +1226,8 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
     if (m30Bars.length > 0) store.M30 = mergeCandleSeries(store.M30, m30Bars, 5000);
     if (h1Bars.length > 0) store.H1 = mergeCandleSeries(store.H1, h1Bars, 5000);
 
-    // If M5 is short, build from M1
-    if (store.M5.length < 60 && store.M1.length > 0) {
+    // Use M1 aggregation ONLY as a fallback when M5 is empty
+    if (store.M5.length === 0 && store.M1.length > 0) {
       const fromM1 = buildM5FromM1(store.M1);
       store.M5 = mergeCandleSeries(store.M5, fromM1, 5000);
     }
@@ -1151,30 +1235,32 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
     if (h4Bars.length > 0) {
       store.H4 = mergeCandleSeries(store.H4, h4Bars, 5000);
       store.htfBootstrapMethod = 'NATIVE_BIQUOTE_OHLC_INTERVALS (Direct 4h & 1d API bootstrap)';
-    } else if (store.H1.length > 0) {
+    } else if (store.H4.length === 0 && store.H1.length > 0) {
       store.H4 = buildH4FromH1(store.H1);
       store.htfBootstrapMethod = 'AGGREGATED_FROM_STORED_H1_CANDLES (Session boundary aligned)';
     }
 
     if (d1Bars.length > 0) {
       store.D1 = mergeCandleSeries(store.D1, d1Bars, 5000);
-    } else if (store.H1.length > 0) {
+    } else if (store.D1.length === 0 && store.H1.length > 0) {
       store.D1 = buildD1FromH1(store.H1);
     }
 
     runGapDetectionAudit();
     saveCandlesToDisk();
 
-    console.log(`[CANDLE ENGINE] Bootstrapped real history: M1=${store.M1.length}, M5=${store.M5.length}, M15=${store.M15.length}, M30=${store.M30.length}, H1=${store.H1.length}, H4=${store.H4.length}, D1=${store.D1.length} (${store.htfBootstrapMethod})`);
+    console.log(
+      `[RED SNIPER HISTORY] Startup barsLoaded per TF: 5m=${store.M5.length}/${REQUIRED_MIN_BARS_BY_TF['5m']}, 15m=${store.M15.length}/${REQUIRED_MIN_BARS_BY_TF['15m']}, 30m=${store.M30.length}/${REQUIRED_MIN_BARS_BY_TF['30m']}, 1h=${store.H1.length}/${REQUIRED_MIN_BARS_BY_TF['1h']}, 4h=${store.H4.length}/${REQUIRED_MIN_BARS_BY_TF['4h']}, 1d=${store.D1.length}/${REQUIRED_MIN_BARS_BY_TF['1d']} (${store.htfBootstrapMethod})`
+    );
     return true;
   } catch (err: any) {
     console.warn('[CANDLE ENGINE] Historical bootstrap failed, attempting aggregation fallback:', err.message);
-    if (store.M1.length > 0 && store.M5.length < 60) {
+    if (store.M1.length > 0 && store.M5.length === 0) {
       store.M5 = mergeCandleSeries(store.M5, buildM5FromM1(store.M1), 5000);
     }
     if (store.H1.length > 0) {
-      store.H4 = buildH4FromH1(store.H1);
-      store.D1 = buildD1FromH1(store.H1);
+      if (store.H4.length === 0) store.H4 = buildH4FromH1(store.H1);
+      if (store.D1.length === 0) store.D1 = buildD1FromH1(store.H1);
       store.htfBootstrapMethod = 'AGGREGATED_FROM_STORED_H1_CANDLES (Session boundary aligned)';
       runGapDetectionAudit();
       saveCandlesToDisk();
@@ -1189,13 +1275,13 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
 export async function backfillCandleGaps(): Promise<boolean> {
   try {
     const [m1Bars, m5Bars, m15Bars, m30Bars, h1Bars, h4Bars, d1Bars] = await Promise.all([
-      fetchTimeframeOhlc('1m', 1000).catch(() => []),
-      fetchTimeframeOhlc('5m', 1000).catch(() => []),
-      fetchTimeframeOhlc('15m', 1000).catch(() => []),
-      fetchTimeframeOhlc('30m', 1000).catch(() => []),
-      fetchTimeframeOhlc('1h', 1000).catch(() => []),
-      fetchTimeframeOhlc('4h', 1000).catch(() => []),
-      fetchTimeframeOhlc('1d', 1000).catch(() => []),
+      fetchTimeframeOhlc('1m', REQUIRED_MIN_BARS_BY_TF['1m']).catch(() => []),
+      fetchTimeframeOhlc('5m', REQUIRED_MIN_BARS_BY_TF['5m']).catch(() => []),
+      fetchTimeframeOhlc('15m', REQUIRED_MIN_BARS_BY_TF['15m']).catch(() => []),
+      fetchTimeframeOhlc('30m', REQUIRED_MIN_BARS_BY_TF['30m']).catch(() => []),
+      fetchTimeframeOhlc('1h', REQUIRED_MIN_BARS_BY_TF['1h']).catch(() => []),
+      fetchTimeframeOhlc('4h', REQUIRED_MIN_BARS_BY_TF['4h']).catch(() => []),
+      fetchTimeframeOhlc('1d', REQUIRED_MIN_BARS_BY_TF['1d']).catch(() => []),
     ]);
 
     let anyMerged = false;
@@ -1208,7 +1294,7 @@ export async function backfillCandleGaps(): Promise<boolean> {
     if (h4Bars.length > 0) {
       store.H4 = mergeCandleSeries(store.H4, h4Bars, 5000);
       anyMerged = true;
-    } else if (store.H1.length > 0) {
+    } else if (store.H4.length === 0 && store.H1.length > 0) {
       store.H4 = buildH4FromH1(store.H1);
       anyMerged = true;
     }
@@ -1216,7 +1302,7 @@ export async function backfillCandleGaps(): Promise<boolean> {
     if (d1Bars.length > 0) {
       store.D1 = mergeCandleSeries(store.D1, d1Bars, 5000);
       anyMerged = true;
-    } else if (store.H1.length > 0) {
+    } else if (store.D1.length === 0 && store.H1.length > 0) {
       store.D1 = buildD1FromH1(store.H1);
       anyMerged = true;
     }
@@ -1224,7 +1310,9 @@ export async function backfillCandleGaps(): Promise<boolean> {
     if (anyMerged) {
       runGapDetectionAudit();
       saveCandlesToDisk();
-      console.log(`[CANDLE ENGINE] Startup backfill completed: M1=${store.M1.length}, M5=${store.M5.length}, M15=${store.M15.length}, M30=${store.M30.length}, H1=${store.H1.length}, H4=${store.H4.length}, D1=${store.D1.length}`);
+      console.log(
+        `[RED SNIPER HISTORY] Startup backfill barsLoaded per TF: 5m=${store.M5.length}/${REQUIRED_MIN_BARS_BY_TF['5m']}, 15m=${store.M15.length}/${REQUIRED_MIN_BARS_BY_TF['15m']}, 30m=${store.M30.length}/${REQUIRED_MIN_BARS_BY_TF['30m']}, 1h=${store.H1.length}/${REQUIRED_MIN_BARS_BY_TF['1h']}, 4h=${store.H4.length}/${REQUIRED_MIN_BARS_BY_TF['4h']}, 1d=${store.D1.length}/${REQUIRED_MIN_BARS_BY_TF['1d']}`
+      );
       return true;
     }
   } catch (err: any) {

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, useState } from 'react';
 import {
   createChart,
   IChartApi,
@@ -9,21 +9,33 @@ import {
 } from 'lightweight-charts';
 import { Candle, RedSniperTimeframe } from './feed';
 import {
+  ChartZoneBoxLayout,
+  MIN_ZONE_BOX_HEIGHT_PX,
   OpenSniperTrade,
   PendingTradePlan,
   RedSniperZone,
   StructureEvent,
+  computeAuctionProfileFromM5,
+  computeEquilibriumLevel,
+  formatZoneChartLabel,
+  getVisibleStructureLineSpecs,
+  layoutChartZoneBoxes,
 } from './engine';
 
 interface RedSniperChartProps {
   tf: RedSniperTimeframe;
   candles: Candle[];
+  m5Candles?: Candle[];
   atr14: number;
   zones: RedSniperZone[];
   structures: StructureEvent[];
   showBosChoch: boolean;
+  onToggleStructure?: () => void;
+  onSelectZone?: (zoneId: string) => void;
   showFarZones?: boolean;
   showConsumedZones?: boolean;
+  hideConsumed?: boolean;
+  zonesPerSide?: number;
   maxZones?: number;
   highlightedZoneId?: string | null;
   openTrades: OpenSniperTrade[];
@@ -32,7 +44,20 @@ interface RedSniperChartProps {
   isConnected: boolean;
 }
 
-const CHART_HEIGHT = 430;
+const CHART_HEIGHT = 420;
+
+const COLOR_SELL_STROKE = '#d83a4c';
+const COLOR_SELL_TEXT = '#ff8a96';
+const COLOR_SELL_FILL = 'rgba(139, 0, 0, 0.42)';
+const COLOR_SELL_FILL_HIGH = 'rgba(216, 58, 76, 0.52)';
+
+const COLOR_BUY_STROKE = '#2fd08f';
+const COLOR_BUY_TEXT = '#7ff0c0';
+const COLOR_BUY_FILL = 'rgba(20, 120, 80, 0.32)';
+const COLOR_BUY_FILL_HIGH = 'rgba(47, 208, 143, 0.46)';
+
+const COLOR_GOLD = '#d9ac4a';
+const COLOR_CYAN = '#5ad7ff';
 
 function resolveTimeToX(
   chart: IChartApi,
@@ -55,7 +80,6 @@ function resolveTimeToX(
       ? Math.max(0, Math.min(plotWidth - 28, lastCoord))
       : Math.max(0, plotWidth - 40);
   }
-  // Binary search nearest candle index
   let lo = 0;
   let hi = candles.length - 1;
   while (lo < hi) {
@@ -75,13 +99,18 @@ function resolveTimeToX(
 export const RedSniperChart: React.FC<RedSniperChartProps> = ({
   tf,
   candles,
+  m5Candles = [],
   atr14,
   zones,
   structures,
   showBosChoch,
+  onToggleStructure,
+  onSelectZone,
   showFarZones = false,
-  showConsumedZones = false,
-  maxZones = 6,
+  showConsumedZones = true,
+  hideConsumed = false,
+  zonesPerSide = 5,
+  maxZones = 5,
   highlightedZoneId = null,
   openTrades,
   pendingPlan,
@@ -95,16 +124,26 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const loadedBarCountRef = useRef<number>(0);
   const prevTfRef = useRef<RedSniperTimeframe>(tf);
+  const lastTapMsRef = useRef<number>(0);
+  const renderedZoneBoxesRef = useRef<ChartZoneBoxLayout[]>([]);
+
+  const [showAuction, setShowAuction] = useState<boolean>(false);
+  const [showAPlusOnly, setShowAPlusOnly] = useState<boolean>(false);
 
   const propsRef = useRef({
     tf,
     candles,
+    m5Candles,
     atr14,
     zones,
     structures,
     showBosChoch,
+    showAuction,
+    showAPlusOnly,
     showFarZones,
     showConsumedZones,
+    hideConsumed,
+    zonesPerSide,
     maxZones,
     highlightedZoneId,
     openTrades,
@@ -114,12 +153,17 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
   propsRef.current = {
     tf,
     candles,
+    m5Candles,
     atr14,
     zones,
     structures,
     showBosChoch,
+    showAuction,
+    showAPlusOnly,
     showFarZones,
     showConsumedZones,
+    hideConsumed,
+    zonesPerSide,
     maxZones,
     highlightedZoneId,
     openTrades,
@@ -144,13 +188,15 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
     const {
       tf: curTf,
       candles: curCandles,
+      m5Candles: curM5Candles,
       atr14: curAtr,
       zones: curZones,
       structures: curStructures,
       showBosChoch: curShowBosChoch,
-      showFarZones: curShowFarZones,
-      showConsumedZones: curShowConsumedZones,
-      maxZones: curMaxZones,
+      showAuction: curShowAuction,
+      showAPlusOnly: curShowAPlusOnly,
+      hideConsumed: curHideConsumed,
+      zonesPerSide: curZonesPerSide,
       highlightedZoneId: curHighlightedId,
       openTrades: curOpenTrades,
       livePrice: curLivePrice,
@@ -162,7 +208,10 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
     const dpr = window.devicePixelRatio || 1;
     const fullW = parent.clientWidth || 340;
     const fullH = parent.clientHeight || CHART_HEIGHT;
-    if (canvas.width !== Math.floor(fullW * dpr) || canvas.height !== Math.floor(fullH * dpr)) {
+    if (
+      canvas.width !== Math.floor(fullW * dpr) ||
+      canvas.height !== Math.floor(fullH * dpr)
+    ) {
       canvas.width = Math.floor(fullW * dpr);
       canvas.height = Math.floor(fullH * dpr);
     }
@@ -178,6 +227,7 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
     const plotWidth = Math.max(60, fullW - priceScaleWidth);
     const plotHeight = Math.max(60, fullH - timeScaleHeight);
 
+    ctx.save();
     ctx.beginPath();
     ctx.rect(0, 0, plotWidth, plotHeight);
     ctx.clip();
@@ -189,271 +239,113 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
         ? curCandles[curCandles.length - 1].close
         : 0;
 
-    // 1) Optional BOS / CHoCH structure lines
+    // 1) EQ (Equilibrium) dashed line
+    const eqInfo = computeEquilibriumLevel(curCandles, curTf);
+    if (eqInfo) {
+      const yEq = series.priceToCoordinate(eqInfo.eq);
+      if (yEq !== null && yEq >= 4 && yEq <= plotHeight - 4) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(217, 172, 74, 0.38)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([5, 5]);
+        ctx.beginPath();
+        ctx.moveTo(0, yEq);
+        ctx.lineTo(plotWidth, yEq);
+        ctx.stroke();
+
+        ctx.setLineDash([]);
+        ctx.font = "700 8.5px 'JetBrains Mono', monospace";
+        const eqTag = `EQ ${eqInfo.eq.toFixed(2)}`;
+        const eqW = ctx.measureText(eqTag).width + 8;
+        ctx.fillStyle = 'rgba(3, 3, 3, 0.85)';
+        ctx.fillRect(6, Math.max(2, yEq - 7), eqW, 13);
+        ctx.fillStyle = COLOR_GOLD;
+        ctx.fillText(eqTag, 10, Math.max(11, yEq + 2.5));
+        ctx.restore();
+      }
+    }
+
+    // 2) Optional Auction toggle: VAH / POC / VAL lines computed from last 288 M5 candles
+    if (curShowAuction) {
+      const auctionSource =
+        curM5Candles && curM5Candles.length > 0 ? curM5Candles : curCandles;
+      const auction = computeAuctionProfileFromM5(auctionSource, 288);
+      if (auction) {
+        const auctionLines: Array<{
+          label: 'VAH' | 'POC' | 'VAL';
+          price: number;
+          color: string;
+          dashed: boolean;
+        }> = [
+          { label: 'VAH', price: auction.vah, color: COLOR_CYAN, dashed: true },
+          { label: 'POC', price: auction.poc, color: COLOR_GOLD, dashed: false },
+          { label: 'VAL', price: auction.val, color: COLOR_CYAN, dashed: true },
+        ];
+        for (const al of auctionLines) {
+          const yA = series.priceToCoordinate(al.price);
+          if (yA === null || yA < 2 || yA > plotHeight - 2) continue;
+          ctx.save();
+          ctx.strokeStyle = al.color;
+          ctx.globalAlpha = al.label === 'POC' ? 0.78 : 0.62;
+          ctx.lineWidth = al.label === 'POC' ? 1.15 : 0.95;
+          ctx.setLineDash(al.dashed ? [3, 3] : []);
+          ctx.beginPath();
+          ctx.moveTo(0, yA);
+          ctx.lineTo(plotWidth, yA);
+          ctx.stroke();
+
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 0.95;
+          ctx.font = "700 8.5px 'JetBrains Mono', monospace";
+          const txt = `${al.label} ${al.price.toFixed(0)}`;
+          const tw = ctx.measureText(txt).width + 8;
+          ctx.fillStyle = 'rgba(3, 3, 3, 0.86)';
+          ctx.fillRect(6, Math.max(2, yA - 7), tw, 13);
+          ctx.fillStyle = al.color;
+          ctx.fillText(txt, 10, Math.max(11, yA + 2.5));
+          ctx.restore();
+        }
+      }
+    }
+
+    // 3) Structure lines: for the last 8 breaks draw a dashed horizontal line from broken pivot
+    //    to break candle, with "CHoCH" or "BOS" centered on the line (above for bullish, below for bearish;
+    //    green = bullish, dark red = bearish, CHoCH brighter than BOS)
     if (curShowBosChoch && curStructures.length > 0) {
+      const visibleSpecs = getVisibleStructureLineSpecs(curStructures, 8);
       ctx.save();
       ctx.font = "700 9px 'JetBrains Mono', monospace";
-      for (const st of curStructures) {
-        const y = series.priceToCoordinate(st.price);
-        if (y === null || y < 2 || y > plotHeight - 2) continue;
-        const x1 = resolveTimeToX(chart, curCandles, st.pivotTime, plotWidth);
-        const x2 = resolveTimeToX(chart, curCandles, st.breakTime, plotWidth);
-        if (x2 <= x1 + 4) continue;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
 
-        const color =
-          st.dir === 'BULL'
-            ? 'rgba(46, 230, 160, 0.45)'
-            : 'rgba(255, 93, 108, 0.45)';
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([3, 3]);
+      for (const spec of visibleSpecs) {
+        const y = series.priceToCoordinate(spec.level);
+        if (y === null || y < 6 || y > plotHeight - 6) continue;
+        const x1 = resolveTimeToX(chart, curCandles, spec.pivotTime, plotWidth);
+        const x2 = resolveTimeToX(chart, curCandles, spec.breakTime, plotWidth);
+        if (x2 <= x1 + 6) continue;
+
+        ctx.strokeStyle = spec.strokeColor;
+        ctx.lineWidth = spec.lineWidth;
+        ctx.setLineDash([4, 3]);
         ctx.beginPath();
         ctx.moveTo(x1, y);
         ctx.lineTo(x2, y);
         ctx.stroke();
 
         ctx.setLineDash([]);
-        ctx.fillStyle = color;
         const midX = (x1 + x2) / 2;
-        ctx.fillText(st.kind, midX - 10, y - 3);
+        const textY = spec.labelPlacement === 'ABOVE' ? y - 7 : y + 8;
+        const tw = ctx.measureText(spec.text).width + 6;
+        ctx.fillStyle = 'rgba(3, 3, 3, 0.82)';
+        ctx.fillRect(midX - tw / 2, textY - 5.5, tw, 11);
+        ctx.fillStyle = spec.textColor;
+        ctx.fillText(spec.text, midX, textY);
       }
       ctx.restore();
     }
 
-    // 2) Swing-Pivot Zones for selected TF only (starting at pivot candle time and extending to right edge)
-    // Consumed zones (pctLeft < 15 or 3+ retests) are hidden; far zones fill empty slots (dimmed); max 3 SELL above + 3 BUY below.
-    const tfOnlyZones = curZones.filter((z) => z.tf === curTf);
-    const nonConsumedZones = tfOnlyZones.filter(
-      (z) =>
-        (curShowConsumedZones || (!z.consumed && z.pctLeft >= 15 && z.retests < 3)) ||
-        z.id === curHighlightedId
-    );
-    const rankChartZone = (a: RedSniperZone, b: RedSniperZone) => {
-      const aFar = Boolean(a.isFar);
-      const bFar = Boolean(b.isFar);
-      if (aFar !== bFar) return aFar ? 1 : -1;
-      return a.distancePts - b.distancePts || b.power - a.power;
-    };
-    const eligibleSells = nonConsumedZones
-      .filter((z) => z.side === 'SELL')
-      .sort(rankChartZone)
-      .slice(0, 3);
-    const eligibleBuys = nonConsumedZones
-      .filter((z) => z.side === 'BUY')
-      .sort(rankChartZone)
-      .slice(0, 3);
-    const eligibleForBox = [...eligibleSells, ...eligibleBuys].slice(
-      0,
-      Math.max(3, Math.min(8, curMaxZones || 6))
-    );
-    const boxIds = new Set(eligibleForBox.map((z) => z.id));
-    if (curHighlightedId) {
-      boxIds.add(curHighlightedId);
-    }
-
-    interface VisibleZoneDraw {
-      zone: RedSniperZone;
-      xStart: number;
-      boxTop: number;
-      boxBot: number;
-      boxH: number;
-      labelY: number;
-      showFullLabel: boolean;
-      isHighlighted: boolean;
-      isDimmed: boolean;
-    }
-
-    const visibleZones: VisibleZoneDraw[] = [];
-    const clippedTopZones: RedSniperZone[] = [];
-    const clippedBottomZones: RedSniperZone[] = [];
-
-    for (const z of nonConsumedZones) {
-      if (!boxIds.has(z.id)) {
-        if (z.bottom >= effectiveLivePrice) {
-          clippedTopZones.push(z);
-        } else {
-          clippedBottomZones.push(z);
-        }
-        continue;
-      }
-
-      const yTopRaw = series.priceToCoordinate(z.top);
-      const yBotRaw = series.priceToCoordinate(z.bottom);
-      if (yTopRaw === null || yBotRaw === null) continue;
-
-      const yMin = Math.min(yTopRaw, yBotRaw);
-      const yMax = Math.max(yTopRaw, yBotRaw);
-
-      if (yMax < 0) {
-        clippedTopZones.push(z);
-        continue;
-      }
-      if (yMin > plotHeight) {
-        clippedBottomZones.push(z);
-        continue;
-      }
-
-      const boxTop = Math.max(0, yMin);
-      const boxBot = Math.min(plotHeight, yMax);
-      const boxH = Math.max(3, boxBot - boxTop);
-      const xStart = resolveTimeToX(chart, curCandles, z.time, plotWidth);
-      const labelAboveY =
-        boxTop >= 13
-          ? boxTop - 4
-          : Math.min(plotHeight - 4, boxBot + 11);
-      const refAtr = Math.max(0.5, z.atr14 || curAtr || 2.0);
-      const isDimmed = Boolean(z.isFar || z.distancePts > 6 * refAtr);
-
-      visibleZones.push({
-        zone: z,
-        xStart,
-        boxTop,
-        boxBot,
-        boxH,
-        labelY: labelAboveY,
-        showFullLabel: false,
-        isHighlighted: z.id === curHighlightedId,
-        isDimmed,
-      });
-    }
-
-    // Short one-line label above box start ("SELL · FRESH · PWR 83 · 100%") with no overlap
-    const byPowerDesc = [...visibleZones].sort((a, b) => {
-      if (a.isHighlighted !== b.isHighlighted) return a.isHighlighted ? -1 : 1;
-      if (a.isDimmed !== b.isDimmed) return a.isDimmed ? 1 : -1;
-      return b.zone.power - a.zone.power;
-    });
-    const occupiedYs: number[] = [];
-    for (const vz of byPowerDesc) {
-      if (vz.isHighlighted) {
-        vz.showFullLabel = true;
-        occupiedYs.push(vz.labelY);
-        continue;
-      }
-      const collides = occupiedYs.some((oy) => Math.abs(oy - vz.labelY) < 13);
-      if (!collides) {
-        vz.showFullLabel = true;
-        occupiedYs.push(vz.labelY);
-      } else {
-        vz.showFullLabel = false;
-      }
-    }
-
-    for (const vz of visibleZones) {
-      const {
-        zone: z,
-        xStart,
-        boxTop,
-        boxH,
-        labelY,
-        showFullLabel,
-        isHighlighted,
-        isDimmed,
-      } = vz;
-      const isSell = z.side === 'SELL';
-      const strokeColor = isSell ? '#ff4d66' : '#2fe08a';
-      const fillColor = isHighlighted
-        ? isSell
-          ? 'rgba(255, 77, 102, 0.24)'
-          : 'rgba(47, 224, 138, 0.24)'
-        : isSell
-        ? 'rgba(255, 77, 102, 0.11)'
-        : 'rgba(47, 224, 138, 0.11)';
-
-      const boxW = Math.max(24, plotWidth - xStart);
-
-      ctx.save();
-      ctx.globalAlpha = isDimmed && !isHighlighted ? 0.45 : 1.0;
-      ctx.fillStyle = fillColor;
-      ctx.fillRect(xStart, boxTop, boxW, boxH);
-
-      ctx.strokeStyle = isHighlighted ? '#ffffff' : strokeColor;
-      ctx.lineWidth = isHighlighted ? 2.0 : z.minor ? 0.9 : 1.25;
-      ctx.setLineDash([]);
-      ctx.strokeRect(
-        xStart + 0.5,
-        boxTop + 0.5,
-        Math.max(1, boxW - 1),
-        Math.max(1, boxH - 1)
-      );
-
-      // Small strength bar at the right end of each box
-      const barW = 34;
-      const barH = 4;
-      const barX = plotWidth - barW - 6;
-      const barY = Math.max(
-        2,
-        Math.min(plotHeight - barH - 2, boxTop + Math.max(1, (boxH - barH) / 2))
-      );
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
-      ctx.fillRect(barX, barY, barW, barH);
-      ctx.fillStyle = strokeColor;
-      ctx.fillRect(
-        barX,
-        barY,
-        Math.round((barW * Math.min(100, z.power)) / 100),
-        barH
-      );
-
-      // Short one-line label above box start: "SELL · FRESH · PWR 83 · 100%" (or thinner minor label)
-      if (showFullLabel) {
-        const text =
-          z.chartLabel ||
-          `${z.side} · ${z.isAPlus ? 'A+ · ' : ''}${z.minor ? 'minor · ' : ''}${z.status} · PWR ${z.power} · ${z.pctLeft}%`;
-        ctx.font = z.minor
-          ? "500 8.5px 'JetBrains Mono', monospace"
-          : "700 9.5px 'JetBrains Mono', monospace";
-        ctx.shadowColor = '#08080b';
-        ctx.shadowBlur = 3;
-        ctx.fillStyle = isHighlighted
-          ? '#ffffff'
-          : z.isAPlus
-          ? '#ffd97a'
-          : strokeColor;
-        const textW = ctx.measureText(text).width;
-        const labelX = Math.max(4, Math.min(barX - textW - 8, xStart + 2));
-        ctx.fillText(text, labelX, labelY);
-      }
-      ctx.restore();
-    }
-
-    // 3) Off-screen clipped zone edge markers at top / bottom of plot
-    if (clippedTopZones.length > 0) {
-      const topZ = [...clippedTopZones].sort((a, b) => a.bottom - b.bottom)[0];
-      const tag = `▲ ${topZ.side} ${topZ.bottom.toFixed(0)}-${topZ.top.toFixed(0)} · PWR ${topZ.power}`;
-      ctx.save();
-      ctx.font = "700 9.5px 'JetBrains Mono', monospace";
-      const tw = ctx.measureText(tag).width + 12;
-      const tx = plotWidth - tw - 8;
-      ctx.fillStyle = 'rgba(8, 8, 11, 0.88)';
-      ctx.fillRect(tx, 4, tw, 16);
-      ctx.strokeStyle = topZ.side === 'SELL' ? '#ff4d66' : '#2fe08a';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(tx, 4, tw, 16);
-      ctx.fillStyle = topZ.side === 'SELL' ? '#ff4d66' : '#2fe08a';
-      ctx.fillText(tag, tx + 6, 15);
-      ctx.restore();
-    }
-
-    if (clippedBottomZones.length > 0) {
-      const botZ = [...clippedBottomZones].sort((a, b) => b.top - a.top)[0];
-      const tag = `▼ ${botZ.side} ${botZ.bottom.toFixed(0)}-${botZ.top.toFixed(0)} · PWR ${botZ.power}`;
-      ctx.save();
-      ctx.font = "700 9.5px 'JetBrains Mono', monospace";
-      const tw = ctx.measureText(tag).width + 12;
-      const tx = plotWidth - tw - 8;
-      const ty = plotHeight - 20;
-      ctx.fillStyle = 'rgba(8, 8, 11, 0.88)';
-      ctx.fillRect(tx, ty, tw, 16);
-      ctx.strokeStyle = botZ.side === 'SELL' ? '#ff4d66' : '#2fe08a';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(tx, ty, tw, 16);
-      ctx.fillStyle = botZ.side === 'SELL' ? '#ff4d66' : '#2fe08a';
-      ctx.fillText(tag, tx + 6, ty + 11);
-      ctx.restore();
-    }
-
-    // 4) Open trade lines (ENTRY, STOP before BE, hidden at BE, TRAIL when trailed past entry, T1, T2, T3)
+    // 4) Open trade lines (drawn before zone boxes so they never cross zone label text)
     for (const tr of curOpenTrades) {
       if (tr.tf !== curTf) continue;
       const lines: Array<{
@@ -465,7 +357,7 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
         {
           price: tr.entry,
           label: tr.beMoved ? `${tr.side} ENTRY (BE)` : `${tr.side} ENTRY`,
-          color: '#00e5ff',
+          color: COLOR_CYAN,
           dashed: false,
         },
       ];
@@ -474,14 +366,14 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
         lines.push({
           price: tr.sl,
           label: 'STOP',
-          color: '#ff4d66',
+          color: COLOR_SELL_STROKE,
           dashed: true,
         });
       } else if (tr.isTrailing) {
         lines.push({
           price: tr.sl,
           label: 'TRAIL',
-          color: '#2ee6a0',
+          color: COLOR_BUY_STROKE,
           dashed: true,
         });
       }
@@ -490,7 +382,7 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
         lines.push({
           price: tr.tp1,
           label: 'T1 (1R)',
-          color: '#2ee6a0',
+          color: COLOR_BUY_STROKE,
           dashed: true,
         });
       }
@@ -498,14 +390,14 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
         lines.push({
           price: tr.tp2,
           label: 'T2 (2R)',
-          color: '#2ee6a0',
+          color: COLOR_BUY_STROKE,
           dashed: true,
         });
       }
       lines.push({
         price: tr.tp3,
         label: tr.tp3IsLiquidity ? 'T3 (LIQ)' : 'T3 (3R)',
-        color: '#f2b94b',
+        color: COLOR_GOLD,
         dashed: false,
       });
 
@@ -524,41 +416,359 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
         ctx.setLineDash([]);
         ctx.font = "700 9px 'JetBrains Mono', monospace";
         ctx.fillStyle = ln.color;
-        ctx.shadowColor = '#08080b';
+        ctx.shadowColor = '#030303';
         ctx.shadowBlur = 3;
-        ctx.fillText(`${ln.label} ${ln.price.toFixed(2)}`, 8, Math.max(10, y - 3));
+        ctx.fillText(
+          `${ln.label} ${ln.price.toFixed(2)}`,
+          8,
+          Math.max(10, y - 3)
+        );
         ctx.restore();
       }
     }
 
-    // 5) Gold live price line
+    // 5) Order Block Zone Boxes (starts at extreme OB candle and extends to right edge;
+    //    TRUE price height with minimum 14px, no stacking shift;
+    //    label INSIDE the box, vertically centered, ONE line, font 9px, NO line crossing the text;
+    //    if two labels collide vertically (|a.labelY - b.labelY| < 12), hide the lower-PWR label)
+    const tfOnlyZones = curZones.filter((z) => z.tf === curTf);
+    const filteredByAPlus = curShowAPlusOnly
+      ? tfOnlyZones.filter((z) => z.isAPlus || z.id === curHighlightedId)
+      : tfOnlyZones;
+    const nonConsumedZones = filteredByAPlus.filter(
+      (z) =>
+        !curHideConsumed ||
+        (!z.consumed && z.pctLeft >= 10 && z.retests < 4) ||
+        z.id === curHighlightedId
+    );
+
+    const perSideCap = Math.max(3, Math.min(5, Math.round(curZonesPerSide || 5)));
+    const byCreationNewest = (a: RedSniperZone, b: RedSniperZone) =>
+      b.originIndex - a.originIndex || b.time - a.time;
+
+    const eligibleSells = nonConsumedZones
+      .filter((z) => z.side === 'SELL')
+      .sort(byCreationNewest)
+      .slice(0, perSideCap);
+    const eligibleBuys = nonConsumedZones
+      .filter((z) => z.side === 'BUY')
+      .sort(byCreationNewest)
+      .slice(0, perSideCap);
+    const eligibleForBox = [...eligibleSells, ...eligibleBuys];
+    const boxIds = new Set(eligibleForBox.map((z) => z.id));
+    if (curHighlightedId) {
+      boxIds.add(curHighlightedId);
+    }
+
+    const extraClippedTop: RedSniperZone[] = [];
+    const extraClippedBot: RedSniperZone[] = [];
+    const candidateZonesForLayout: RedSniperZone[] = [];
+
+    for (const z of nonConsumedZones) {
+      if (!boxIds.has(z.id)) {
+        if (z.bottom >= effectiveLivePrice) {
+          extraClippedTop.push(z);
+        } else {
+          extraClippedBot.push(z);
+        }
+        continue;
+      }
+      candidateZonesForLayout.push(z);
+    }
+
+    const layoutRes = layoutChartZoneBoxes({
+      zones: candidateZonesForLayout,
+      priceToY: (price) => series.priceToCoordinate(price),
+      timeToX: (time) => resolveTimeToX(chart, curCandles, time, plotWidth),
+      plotWidth,
+      plotHeight,
+      highlightedZoneId: curHighlightedId,
+      defaultAtr: curAtr,
+      minBoxHeightPx: MIN_ZONE_BOX_HEIGHT_PX,
+    });
+    const stackedBoxes = layoutRes.boxes;
+    const clippedTopZones = [...extraClippedTop, ...layoutRes.clippedTopZones];
+    const clippedBottomZones = [
+      ...extraClippedBot,
+      ...layoutRes.clippedBottomZones,
+    ];
+    renderedZoneBoxesRef.current = stackedBoxes;
+
+    const labelProtectedRects: Array<{
+      left: number;
+      right: number;
+      top: number;
+      bottom: number;
+    }> = [];
+
+    for (const zb of stackedBoxes) {
+      const {
+        zone: z,
+        xStart,
+        boxTop,
+        boxH,
+        boxW,
+        labelText,
+        labelX,
+        labelY,
+        showLabel,
+        pwrBarX,
+        pwrBarY,
+        pwrBarW,
+        pwrBarMaxW,
+        pwrBarH,
+        isHighlighted,
+        isDimmed,
+        isAPlus,
+      } = zb;
+
+      const isSell = z.side === 'SELL';
+      const strokeColor = isSell ? COLOR_SELL_STROKE : COLOR_BUY_STROKE;
+      const textColor = isSell ? COLOR_SELL_TEXT : COLOR_BUY_TEXT;
+      const fillColor = isHighlighted
+        ? isSell
+          ? COLOR_SELL_FILL_HIGH
+          : COLOR_BUY_FILL_HIGH
+        : isSell
+        ? COLOR_SELL_FILL
+        : COLOR_BUY_FILL;
+
+      ctx.save();
+      ctx.globalAlpha = isDimmed && !isHighlighted ? 0.55 : 1.0;
+
+      // Soft glow on A+ zones
+      if (isAPlus || isHighlighted) {
+        ctx.shadowColor = isHighlighted
+          ? 'rgba(217, 172, 74, 0.65)'
+          : isSell
+          ? 'rgba(216, 58, 76, 0.65)'
+          : 'rgba(47, 208, 143, 0.65)';
+        ctx.shadowBlur = 12;
+      }
+
+      ctx.fillStyle = fillColor;
+      ctx.fillRect(xStart, boxTop, boxW, boxH);
+
+      ctx.strokeStyle = isHighlighted
+        ? COLOR_GOLD
+        : isAPlus
+        ? isSell
+          ? '#ff5c6f'
+          : '#49ebb0'
+        : strokeColor;
+      ctx.lineWidth = isHighlighted ? 2.0 : isAPlus ? 1.5 : 1.2;
+      ctx.setLineDash([]);
+      ctx.strokeRect(
+        xStart + 0.5,
+        boxTop + 0.5,
+        Math.max(1, boxW - 1),
+        Math.max(1, boxH - 1)
+      );
+
+      // Reset shadow before drawing inner PWR bar and label
+      ctx.shadowBlur = 0;
+
+      // Small PWR bar on the bottom edge of the box
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      ctx.fillRect(pwrBarX, pwrBarY, pwrBarMaxW, pwrBarH);
+      ctx.fillStyle = isAPlus ? COLOR_GOLD : strokeColor;
+      ctx.fillRect(pwrBarX, pwrBarY, pwrBarW, pwrBarH);
+
+      // Single-line 9px label INSIDE the box, vertically centered, with dark backdrop so NO line crosses the text
+      if (showLabel !== false) {
+        const text = labelText || formatZoneChartLabel(z);
+        ctx.font = "700 9px 'JetBrains Mono', monospace";
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'left';
+
+        const maxAvailTextW = Math.max(40, plotWidth - labelX - 8);
+        const measuredW = Math.min(maxAvailTextW, ctx.measureText(text).width);
+        const pillPadX = 4;
+        const pillH = Math.min(13, Math.max(10, boxH - 2));
+        const pillLeft = Math.max(xStart + 2, labelX - pillPadX);
+        const pillTop = Math.max(boxTop + 1, labelY - pillH / 2);
+        const pillW = Math.min(
+          Math.max(12, boxW - 4),
+          measuredW + pillPadX * 2
+        );
+
+        ctx.fillStyle = 'rgba(3, 3, 3, 0.88)';
+        ctx.fillRect(pillLeft, pillTop, pillW, pillH);
+
+        labelProtectedRects.push({
+          left: pillLeft - 2,
+          right: pillLeft + pillW + 2,
+          top: pillTop - 1,
+          bottom: pillTop + pillH + 1,
+        });
+
+        ctx.fillStyle = isHighlighted
+          ? COLOR_GOLD
+          : z.isAPlus
+          ? COLOR_GOLD
+          : textColor;
+        ctx.fillText(text, labelX, labelY, maxAvailTextW);
+      }
+
+      ctx.restore();
+    }
+
+    // 6) Off-screen clipped zone edge markers at top / bottom of plot
+    if (clippedTopZones.length > 0) {
+      const topZ = [...clippedTopZones].sort((a, b) => a.bottom - b.bottom)[0];
+      const tag = `▲ ${formatZoneChartLabel(topZ)}`;
+      ctx.save();
+      ctx.font = "700 9px 'JetBrains Mono', monospace";
+      const tw = ctx.measureText(tag).width + 12;
+      const tx = Math.max(4, plotWidth - tw - 8);
+      ctx.fillStyle = 'rgba(3, 3, 3, 0.92)';
+      ctx.fillRect(tx, 4, tw, 16);
+      ctx.strokeStyle =
+        topZ.side === 'SELL' ? COLOR_SELL_STROKE : COLOR_BUY_STROKE;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(tx, 4, tw, 16);
+      ctx.fillStyle = topZ.side === 'SELL' ? COLOR_SELL_TEXT : COLOR_BUY_TEXT;
+      ctx.fillText(tag, tx + 6, 15);
+      ctx.restore();
+    }
+
+    if (clippedBottomZones.length > 0) {
+      const botZ = [...clippedBottomZones].sort((a, b) => b.top - a.top)[0];
+      const tag = `▼ ${formatZoneChartLabel(botZ)}`;
+      ctx.save();
+      ctx.font = "700 9px 'JetBrains Mono', monospace";
+      const tw = ctx.measureText(tag).width + 12;
+      const tx = Math.max(4, plotWidth - tw - 8);
+      const ty = plotHeight - 20;
+      ctx.fillStyle = 'rgba(3, 3, 3, 0.92)';
+      ctx.fillRect(tx, ty, tw, 16);
+      ctx.strokeStyle =
+        botZ.side === 'SELL' ? COLOR_SELL_STROKE : COLOR_BUY_STROKE;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(tx, ty, tw, 16);
+      ctx.fillStyle = botZ.side === 'SELL' ? COLOR_SELL_TEXT : COLOR_BUY_TEXT;
+      ctx.fillText(tag, tx + 6, ty + 11);
+      ctx.restore();
+    }
+
+    // 7) NOW line across plot — breaks around any zone label rect so NO line ever crosses label text
+    let yNowCoord: number | null = null;
     if (effectiveLivePrice > 0) {
       const yNow = series.priceToCoordinate(effectiveLivePrice);
       if (yNow !== null && yNow >= 0 && yNow <= plotHeight) {
+        yNowCoord = yNow;
         ctx.save();
-        ctx.strokeStyle = '#f2b94b';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([]);
-        ctx.beginPath();
-        ctx.moveTo(0, yNow);
-        ctx.lineTo(plotWidth, yNow);
-        ctx.stroke();
+        ctx.strokeStyle = COLOR_GOLD;
+        ctx.lineWidth = 1.25;
+        ctx.setLineDash([4, 3]);
 
-        const tagText = `NOW ${effectiveLivePrice.toFixed(2)}`;
-        ctx.font = "700 9.5px 'JetBrains Mono', monospace";
-        const tw = ctx.measureText(tagText).width + 10;
-        const tx = Math.max(4, plotWidth - tw - 4);
-        const ty = Math.max(2, Math.min(plotHeight - 16, yNow - 8));
-        ctx.fillStyle = '#f2b94b';
-        ctx.fillRect(tx, ty, tw, 15);
-        ctx.fillStyle = '#08080b';
-        ctx.fillText(tagText, tx + 5, ty + 11);
+        // Collect horizontal intervals blocked by zone label text at yNow
+        const blockedSpans = labelProtectedRects
+          .filter((r) => yNow >= r.top && yNow <= r.bottom)
+          .sort((a, b) => a.left - b.left);
+
+        let curX = 0;
+        ctx.beginPath();
+        for (const span of blockedSpans) {
+          if (span.left > curX) {
+            ctx.moveTo(curX, yNow);
+            ctx.lineTo(span.left, yNow);
+          }
+          curX = Math.max(curX, span.right);
+        }
+        if (curX < plotWidth) {
+          ctx.moveTo(curX, yNow);
+          ctx.lineTo(plotWidth, yNow);
+        }
+        ctx.stroke();
         ctx.restore();
       }
+    }
+
+    // End plot-area clip so the gold NOW price tag can render directly on the right price axis
+    ctx.restore();
+
+    // 8) Gold NOW price tag on the right price axis (plus fallback badge at right plot edge)
+    if (effectiveLivePrice > 0 && yNowCoord !== null) {
+      ctx.save();
+      const priceText = effectiveLivePrice.toFixed(2);
+      ctx.font = "700 9.5px 'JetBrains Mono', monospace";
+      const tagH = 16;
+      const tagY = Math.max(2, Math.min(plotHeight - tagH - 2, yNowCoord - tagH / 2));
+      const axisW = Math.max(48, fullW - plotWidth - 2);
+
+      // Gold price tag on the right axis
+      ctx.fillStyle = COLOR_GOLD;
+      ctx.fillRect(plotWidth + 1, tagY, axisW, tagH);
+      ctx.fillStyle = '#030303';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      ctx.fillText(priceText, plotWidth + 5, tagY + tagH / 2);
+
+      // Small "NOW" pill just left of the axis
+      const nowPillW = 30;
+      ctx.fillStyle = 'rgba(3, 3, 3, 0.9)';
+      ctx.fillRect(plotWidth - nowPillW - 2, tagY, nowPillW, tagH);
+      ctx.strokeStyle = COLOR_GOLD;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(plotWidth - nowPillW - 2, tagY, nowPillW, tagH);
+      ctx.fillStyle = COLOR_GOLD;
+      ctx.textAlign = 'center';
+      ctx.fillText('NOW', plotWidth - nowPillW / 2 - 2, tagY + tagH / 2);
+      ctx.restore();
     }
 
     ctx.restore();
   }, []);
+
+  const handleResetView = useCallback(() => {
+    const chart = chartRef.current;
+    const curCandles = propsRef.current.candles;
+    if (!chart || !curCandles || curCandles.length === 0) return;
+    const len = curCandles.length;
+    chart.priceScale('right').applyOptions({ autoScale: true });
+    chart.timeScale().applyOptions({ rightOffset: 6, barSpacing: 8 });
+    chart.timeScale().setVisibleLogicalRange({
+      from: Math.max(0, len - 100),
+      to: len - 1 + 6,
+    });
+    requestAnimationFrame(redrawOverlay);
+  }, [redrawOverlay]);
+
+  const handleContainerTouchEnd = useCallback(
+    (e: React.TouchEvent<HTMLDivElement>) => {
+      if (e.touches.length > 0) return;
+      const now = Date.now();
+      if (now - lastTapMsRef.current < 300) {
+        handleResetView();
+        lastTapMsRef.current = 0;
+      } else {
+        lastTapMsRef.current = now;
+      }
+    },
+    [handleResetView]
+  );
+
+  const handleContainerClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (!onSelectZone || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      for (const zb of renderedZoneBoxesRef.current) {
+        if (
+          x >= zb.xStart &&
+          x <= zb.xStart + zb.boxW &&
+          y >= zb.boxTop &&
+          y <= zb.boxBot
+        ) {
+          onSelectZone(zb.zone.id);
+          break;
+        }
+      }
+    },
+    [onSelectZone]
+  );
 
   useEffect(() => {
     const el = containerRef.current;
@@ -568,23 +778,35 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
       width: el.clientWidth || 340,
       height: CHART_HEIGHT,
       layout: {
-        background: { type: ColorType.Solid, color: '#08080b' },
-        textColor: '#8e8779',
+        background: { type: ColorType.Solid, color: '#030303' },
+        textColor: '#9ca3af',
         fontFamily: "'JetBrains Mono', monospace",
         fontSize: 10,
       },
       grid: {
-        vertLines: { color: 'rgba(255, 255, 255, 0.03)' },
-        horzLines: { color: 'rgba(255, 255, 255, 0.03)' },
+        vertLines: { color: 'rgba(255, 255, 255, 0.028)' },
+        horzLines: { color: 'rgba(255, 255, 255, 0.028)' },
       },
       crosshair: { mode: CrosshairMode.Normal },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: false,
+      },
+      handleScale: {
+        mouseWheel: true,
+        pinch: true,
+        axisPressedMouseMove: { time: true, price: false },
+        axisDoubleClickReset: true,
+      },
       rightPriceScale: {
-        borderColor: '#1f1d18',
+        borderColor: 'rgba(139, 20, 32, 0.35)',
         autoScale: true,
         scaleMargins: { top: 0.04, bottom: 0.14 },
       },
       timeScale: {
-        borderColor: '#1f1d18',
+        borderColor: 'rgba(139, 20, 32, 0.35)',
         timeVisible: true,
         secondsVisible: false,
         rightOffset: 6,
@@ -593,12 +815,12 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
     });
 
     const candleSeries = chart.addCandlestickSeries({
-      upColor: '#2ee6a0',
-      downColor: '#ff5d6c',
-      borderUpColor: '#2ee6a0',
-      borderDownColor: '#ff5d6c',
-      wickUpColor: '#2ee6a0',
-      wickDownColor: '#ff5d6c',
+      upColor: COLOR_BUY_STROKE,
+      downColor: COLOR_SELL_STROKE,
+      borderUpColor: COLOR_BUY_STROKE,
+      borderDownColor: COLOR_SELL_STROKE,
+      wickUpColor: COLOR_BUY_STROKE,
+      wickDownColor: COLOR_SELL_STROKE,
       priceLineVisible: false,
       lastValueVisible: false,
       autoscaleInfoProvider: () => {
@@ -606,6 +828,7 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
           tf: curTf,
           candles: bars,
           atr14: curAtr,
+          zones: curZones,
           openTrades: curOpenTrades,
           pendingPlan: curPending,
           livePrice: curLive,
@@ -613,14 +836,10 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
 
         if (!bars || bars.length === 0) return null;
         const range = chart.timeScale().getVisibleLogicalRange();
-        const startIdx = Math.max(
-          0,
-          Math.floor(range ? range.from : bars.length - 100)
-        );
-        const endIdx = Math.min(
-          bars.length - 1,
-          Math.ceil(range ? range.to : bars.length - 1)
-        );
+        const rawStart = Math.floor(range ? range.from : bars.length - 100);
+        const rawEnd = Math.ceil(range ? range.to : bars.length - 1);
+        const startIdx = Math.max(0, Math.min(bars.length - 1, rawStart));
+        const endIdx = Math.max(startIdx, Math.min(bars.length - 1, rawEnd));
 
         let minPrice = Infinity;
         let maxPrice = -Infinity;
@@ -632,16 +851,32 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
         }
 
         if (!Number.isFinite(minPrice) || !Number.isFinite(maxPrice)) {
-          return null;
+          const lastBar = bars[bars.length - 1];
+          if (!lastBar) return null;
+          minPrice = lastBar.low;
+          maxPrice = lastBar.high;
         }
 
+        const candleMin = minPrice;
+        const candleMax = maxPrice;
         const refPrice =
           typeof curLive === 'number' && curLive > 0
             ? curLive
             : bars[bars.length - 1].close;
         const safeAtr = Math.max(0.5, curAtr || 2.5);
 
-        // Include open-trade levels for the active timeframe
+        // Phase 4 Autoscale rule: visible candles plus ONLY the zones that overlap
+        // the visible price range expanded by 1 ATR, so far zones never squash the candles.
+        const expandMin = candleMin - safeAtr;
+        const expandMax = candleMax + safeAtr;
+        for (const z of curZones) {
+          if (z.tf !== curTf) continue;
+          if (z.bottom <= expandMax && z.top >= expandMin) {
+            minPrice = Math.min(minPrice, z.bottom);
+            maxPrice = Math.max(maxPrice, z.top);
+          }
+        }
+
         for (const tr of curOpenTrades) {
           if (tr.tf !== curTf) continue;
           const pts = [tr.entry, tr.tp3];
@@ -656,7 +891,6 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
           }
         }
 
-        // Include pending-plan entry if within 1.5x ATR14
         if (
           curPending &&
           refPrice > 0 &&
@@ -676,7 +910,6 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
       },
     });
 
-    // Tick-volume histogram under the candles
     const volumeSeries = chart.addHistogramSeries({
       priceFormat: { type: 'volume' },
       priceScaleId: 'volScale',
@@ -727,7 +960,6 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
 
     const tfChanged = prevTfRef.current !== tf;
     if (tfChanged) {
-      // B.2) On timeframe change, clear overlay + trade lines immediately
       clearOverlayCanvas();
       cs.setData([]);
       vs.setData([]);
@@ -772,8 +1004,8 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
             time: c.time as UTCTimestamp,
             value: Number.isFinite(c.tickVolume) ? c.tickVolume : 0,
             color: isBuyDominant
-              ? 'rgba(46, 230, 160, 0.32)'
-              : 'rgba(255, 93, 108, 0.32)',
+              ? 'rgba(47, 208, 143, 0.32)'
+              : 'rgba(216, 58, 76, 0.32)',
           };
         })
       );
@@ -783,7 +1015,6 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
       if (tfChanged || loadedBarCountRef.current > 0) {
         prevTfRef.current = tf;
         const len = validBars.length;
-        // Reset price scale autoScale and visible range so previous timeframe candles never appear under the new scale
         chart.priceScale('right').applyOptions({ autoScale: true });
         chart.timeScale().applyOptions({ rightOffset: 6 });
         chart.timeScale().setVisibleLogicalRange({
@@ -793,7 +1024,6 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
       }
 
       if (tfChanged) {
-        // Redraw overlay only on the next animation frame after data/scale are applied
         const raf1 = requestAnimationFrame(() => {
           requestAnimationFrame(redrawOverlay);
         });
@@ -817,8 +1047,8 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
           time: last.time as UTCTimestamp,
           value: Number.isFinite(last.tickVolume) ? last.tickVolume : 0,
           color: isBuyDominant
-            ? 'rgba(46, 230, 160, 0.32)'
-            : 'rgba(255, 93, 108, 0.32)',
+            ? 'rgba(47, 208, 143, 0.32)'
+            : 'rgba(216, 58, 76, 0.32)',
         });
       } catch {
         // ignore transient ordering edge case
@@ -828,12 +1058,18 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
     requestAnimationFrame(redrawOverlay);
   }, [
     candles,
+    m5Candles,
     tf,
     atr14,
     zones,
     structures,
     showBosChoch,
+    showAuction,
+    showAPlusOnly,
     showFarZones,
+    showConsumedZones,
+    hideConsumed,
+    zonesPerSide,
     maxZones,
     highlightedZoneId,
     openTrades,
@@ -844,19 +1080,85 @@ export const RedSniperChart: React.FC<RedSniperChartProps> = ({
   ]);
 
   return (
-    <div className="relative w-full h-[430px] overflow-hidden bg-[#08080b]">
-      <div ref={containerRef} className="w-full h-full" />
+    <div className="relative w-full h-[420px] overflow-hidden bg-[#030303]">
+      {/* Phase 3 Chart Toggle Buttons: Structure, Auction, A+ only, Reset */}
+      <div className="absolute top-2.5 left-2.5 z-20 flex flex-wrap items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => onToggleStructure?.()}
+          className="rs-label cursor-pointer rounded-md px-2.5 py-1 text-[10px] font-bold transition-colors"
+          style={{
+            backgroundColor: showBosChoch
+              ? 'rgba(20, 120, 80, 0.36)'
+              : 'rgba(3, 3, 3, 0.85)',
+            border: `1px solid ${
+              showBosChoch ? '#2fd08f' : 'rgba(139, 20, 32, 0.55)'
+            }`,
+            color: showBosChoch ? '#7ff0c0' : '#9ca3af',
+          }}
+        >
+          Structure
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setShowAuction((v) => !v)}
+          className="rs-label cursor-pointer rounded-md px-2.5 py-1 text-[10px] font-bold transition-colors"
+          style={{
+            backgroundColor: showAuction
+              ? 'rgba(90, 215, 255, 0.18)'
+              : 'rgba(3, 3, 3, 0.85)',
+            border: `1px solid ${
+              showAuction ? '#5ad7ff' : 'rgba(139, 20, 32, 0.55)'
+            }`,
+            color: showAuction ? '#5ad7ff' : '#9ca3af',
+          }}
+        >
+          Auction
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setShowAPlusOnly((v) => !v)}
+          className="rs-label cursor-pointer rounded-md px-2.5 py-1 text-[10px] font-bold transition-colors"
+          style={{
+            backgroundColor: showAPlusOnly
+              ? 'rgba(217, 172, 74, 0.22)'
+              : 'rgba(3, 3, 3, 0.85)',
+            border: `1px solid ${
+              showAPlusOnly ? '#d9ac4a' : 'rgba(139, 20, 32, 0.55)'
+            }`,
+            color: showAPlusOnly ? '#d9ac4a' : '#9ca3af',
+          }}
+        >
+          A+ only
+        </button>
+
+        <button
+          type="button"
+          onClick={handleResetView}
+          title="Reset chart zoom and pan (or double-tap chart)"
+          className="rs-label cursor-pointer rounded-md border border-[rgba(139,20,32,0.55)] bg-[#030303]/85 px-2.5 py-1 text-[10px] font-bold text-[#d1d5db] hover:border-[#d9ac4a] hover:text-[#d9ac4a]"
+        >
+          Reset
+        </button>
+      </div>
+
+      <div
+        ref={containerRef}
+        onDoubleClick={handleResetView}
+        onTouchEnd={handleContainerTouchEnd}
+        onClick={handleContainerClick}
+        className="w-full h-full"
+      />
       <canvas
         ref={canvasRef}
         className="pointer-events-none absolute inset-0 w-full h-full z-10"
         style={{ zIndex: 10 }}
       />
       {(!candles || candles.length === 0) && (
-        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-black/80">
-          <span
-            className="text-xs font-bold tracking-[0.2em] text-[#ff2d45]"
-            style={{ fontFamily: "'Orbitron', sans-serif" }}
-          >
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-[#030303]/85">
+          <span className="rs-heading text-xs font-bold tracking-[0.2em] text-[#d9ac4a]">
             {isConnected ? 'NO DATA' : 'WAITING FOR LIVE FEED'}
           </span>
         </div>

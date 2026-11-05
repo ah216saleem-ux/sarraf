@@ -95,6 +95,21 @@ export const RED_SNIPER_TIMEFRAMES: RedSniperTimeframe[] = [
   '1d',
 ];
 
+export const REQUIRED_MIN_BARS_BY_TF: Record<RedSniperTimeframe, number> = {
+  '1m': 5000,
+  '3m': 3000,
+  '5m': 5000,
+  '15m': 4000,
+  '30m': 3000,
+  '1h': 2500,
+  '4h': 1500,
+  '1d': 1000,
+};
+
+export function getRequiredMinBarsForTf(tf: RedSniperTimeframe): number {
+  return REQUIRED_MIN_BARS_BY_TF[tf] ?? 1000;
+}
+
 const DIRECT_FETCH_TIMEFRAMES: Exclude<RedSniperTimeframe, '3m'>[] = [
   '1m',
   '5m',
@@ -303,7 +318,7 @@ export function buildHigherTimeframeFrom1m(
   m1Bars: Candle[],
   tf: '3m' | '5m' | '15m' | '30m',
   existingBars: Candle[] = [],
-  maxBars: number = 2000
+  maxBars: number = 5000
 ): Candle[] {
   if (!m1Bars || m1Bars.length === 0) {
     return sortAndDedupeCandles(existingBars).slice(-maxBars);
@@ -377,28 +392,24 @@ export function buildHigherTimeframeFrom1m(
 export function build3mFrom1m(
   m1Bars: Candle[],
   existing3mBars: Candle[] = [],
-  maxBars: number = 2000
+  maxBars: number = 3000
 ): Candle[] {
   return buildHigherTimeframeFrom1m(m1Bars, '3m', existing3mBars, maxBars);
 }
 
 /**
  * Check if stored 1m bars cover the requested range for building 3m/5m/15m/30m.
+ * Phase 4 Rule 1: Use M1 aggregation ONLY as a fallback when direct bars are missing/empty.
  */
 export function doesM1CoverTimeframeRange(
   m1Bars: Candle[],
   directBars: Candle[],
   tf: '3m' | '5m' | '15m' | '30m',
-  targetBars: number = 400
+  _targetBars: number = 400
 ): boolean {
   if (!m1Bars || m1Bars.length === 0) return false;
   if (tf === '3m') return true;
   if (!directBars || directBars.length === 0) return true;
-  const agg = buildHigherTimeframeFrom1m(m1Bars, tf, [], 5000);
-  if (agg.length >= targetBars) return true;
-  if (agg.length >= directBars.length && agg[0].time <= directBars[0].time) {
-    return true;
-  }
   return false;
 }
 
@@ -408,7 +419,7 @@ export function doesM1CoverTimeframeRange(
 export function reconcileOfficialBars(
   localBars: Candle[],
   officialBars: Candle[],
-  maxBars: number = 2000
+  maxBars: number = 5000
 ): Candle[] {
   if (!officialBars || officialBars.length === 0) return localBars;
 
@@ -501,20 +512,13 @@ export async function fetchBrokerOhlcWithDiagnostics(
   interval: Exclude<RedSniperTimeframe, '3m'>,
   limit: number
 ): Promise<{ bars: Candle[]; diagnostics: TimeframeHistoryLog }> {
-  const targetBars =
-    limit <= 20
-      ? limit
-      : interval === '4h'
-      ? Math.max(400, limit)
-      : interval === '1d'
-      ? Math.max(300, limit)
-      : Math.max(400, limit);
-
+  const requiredMin = REQUIRED_MIN_BARS_BY_TF[interval] ?? 1000;
+  const targetBars = limit <= 20 ? limit : Math.max(requiredMin, limit);
   const requestedBars = limit <= 20 ? limit : Math.max(1000, targetBars);
   const returnedBarsPerPage: number[] = [];
   const fromToUsed: HistoryFromToLogEntry[] = [];
 
-  // Page 1: Try larger limit (1000) to capture maximum available bars in one request
+  // Page 1: Request maximum available bars from broker
   let collected = await fetchBrokerOhlcPage(interval, requestedBars);
   returnedBarsPerPage.push(collected.length);
   fromToUsed.push({
@@ -544,8 +548,8 @@ export async function fetchBrokerOhlcWithDiagnostics(
         returnedBarsPerPage,
         fromToUsed,
         historyLimitReached:
-          limit > 20 && sliced.length < targetBars
-            ? `history limit reached: ${sliced.length} bars`
+          limit > 20 && sliced.length < requiredMin
+            ? `HISTORY SHORT (${sliced.length} bars, min ${requiredMin})`
             : null,
       },
     };
@@ -554,13 +558,13 @@ export async function fetchBrokerOhlcWithDiagnostics(
   // If fewer than targetBars candles were returned, paginate backward using chunked from/to windows
   const periodSec = getTimeframeSeconds(interval);
   let attempts = 0;
-  while (collected.length < targetBars && attempts < 3) {
+  while (collected.length < targetBars && attempts < 4) {
     attempts++;
     const oldestSec = collected[0]?.time;
     if (!oldestSec || oldestSec <= 0) break;
 
     const toSec = attempts === 1 ? oldestSec - periodSec : oldestSec;
-    const chunkBars = attempts === 1 ? 250 : 500 * attempts;
+    const chunkBars = attempts === 1 ? 500 : 1000 * attempts;
     const fromIso = new Date((toSec - chunkBars * periodSec) * 1000).toISOString();
     const toIso = new Date(toSec * 1000).toISOString();
 
@@ -588,10 +592,10 @@ export async function fetchBrokerOhlcWithDiagnostics(
     collected = sortAndDedupeCandles([...strictlyOlder, ...collected]);
   }
 
-  const finalBars = collected.slice(-Math.max(targetBars, 500));
+  const finalBars = collected.slice(-Math.max(targetBars, 5000));
   const historyLimitReached =
-    finalBars.length < targetBars
-      ? `history limit reached: ${finalBars.length} bars`
+    finalBars.length < requiredMin
+      ? `HISTORY SHORT (${finalBars.length} bars, min ${requiredMin})`
       : null;
   const oldestTime = finalBars.length > 0 ? finalBars[0].time : null;
 
@@ -616,22 +620,23 @@ export async function fetchBrokerOhlcWithDiagnostics(
 
 /**
  * 1) SERVER CANDLE STORE FIRST:
- * Query GET /api/redsniper/candles?tf=...&limit=5000 first, and fall back to biquote only if it is empty.
+ * Query GET /api/redsniper/candles?tf=...&limit=5000 first, and merge with broker if store has fewer than required minimum bars.
  */
 export async function fetchStoreCandlesFirstWithFallback(
   interval: Exclude<RedSniperTimeframe, '3m'>,
   limit: number = 5000
 ): Promise<{ bars: Candle[]; diagnostics: TimeframeHistoryLog }> {
-  const targetBars =
-    interval === '1m'
-      ? Math.min(5000, limit)
-      : interval === '1d'
-      ? Math.max(300, Math.min(2000, limit))
-      : Math.max(400, Math.min(2000, limit));
+  const requiredMin = REQUIRED_MIN_BARS_BY_TF[interval] ?? 1000;
+  const targetBars = Math.max(requiredMin, Math.min(5000, limit));
+  const reqLimit = Math.max(limit, targetBars);
+
+  let storeBars: Candle[] = [];
+  let storeBuiltFromM1 = false;
+  let storeSource: 'store' | 'broker' = 'store';
 
   try {
     const res = await fetch(
-      `/api/redsniper/candles?tf=${encodeURIComponent(interval)}&limit=${limit}`,
+      `/api/redsniper/candles?tf=${encodeURIComponent(interval)}&limit=${reqLimit}`,
       { headers: { Accept: 'application/json' }, credentials: 'include' }
     );
     if (res.ok) {
@@ -647,49 +652,74 @@ export async function fetchStoreCandlesFirstWithFallback(
           const c = normalizeRedSniperCandle(r, interval);
           if (c) normalized.push(c);
         }
-        const deduped = sortAndDedupeCandles(normalized).slice(-limit);
-        if (deduped.length > 0) {
-          const oldestTime = deduped[0].time;
-          const builtFromM1 = Boolean(json?.builtFromM1);
-          const source: 'store' | 'broker' =
-            json?.source === 'broker' ? 'broker' : 'store';
-          return {
-            bars: deduped,
-            diagnostics: {
-              tf: interval,
-              source,
-              barsLoaded: deduped.length,
-              oldestCandleTime: oldestTime,
-              oldestCandleIso: new Date(oldestTime * 1000).toISOString(),
-              builtFromM1,
-              targetBars,
-              requestedBars: limit,
-              finalBarsLoaded: deduped.length,
-              returnedBarsPerPage: [deduped.length],
-              fromToUsed: [
-                {
-                  page: 1,
-                  limit,
-                  from: new Date(oldestTime * 1000).toISOString(),
-                  to: new Date(deduped[deduped.length - 1].time * 1000).toISOString(),
-                  returnedBars: deduped.length,
-                  newOlderBarsAdded: deduped.length,
-                },
-              ],
-              historyLimitReached:
-                deduped.length < 400
-                  ? `history limit reached: ${deduped.length} bars`
-                  : null,
-            },
-          };
-        }
+        storeBars = sortAndDedupeCandles(normalized).slice(-reqLimit);
+        storeBuiltFromM1 = Boolean(json?.builtFromM1);
+        storeSource = json?.source === 'broker' ? 'broker' : 'store';
       }
     }
   } catch {
-    // Fall back to broker if server store is unreachable or empty
+    // Fall back to broker if server store is unreachable
   }
 
-  return fetchBrokerOhlcWithDiagnostics(interval, 500);
+  // If store already meets requiredMin, return immediately
+  if (storeBars.length >= requiredMin) {
+    const oldestTime = storeBars[0].time;
+    return {
+      bars: storeBars,
+      diagnostics: {
+        tf: interval,
+        source: storeSource,
+        barsLoaded: storeBars.length,
+        oldestCandleTime: oldestTime,
+        oldestCandleIso: new Date(oldestTime * 1000).toISOString(),
+        builtFromM1: storeBuiltFromM1,
+        targetBars: requiredMin,
+        requestedBars: reqLimit,
+        finalBarsLoaded: storeBars.length,
+        returnedBarsPerPage: [storeBars.length],
+        fromToUsed: [
+          {
+            page: 1,
+            limit: reqLimit,
+            from: new Date(oldestTime * 1000).toISOString(),
+            to: new Date(storeBars[storeBars.length - 1].time * 1000).toISOString(),
+            returnedBars: storeBars.length,
+            newOlderBarsAdded: storeBars.length,
+          },
+        ],
+        historyLimitReached: null,
+      },
+    };
+  }
+
+  // Otherwise also fetch broker history and merge with store so we get maximum depth
+  const brokerRes = await fetchBrokerOhlcWithDiagnostics(interval, targetBars);
+  const merged = sortAndDedupeCandles([...brokerRes.bars, ...storeBars]).slice(-reqLimit);
+
+  if (merged.length > 0) {
+    const oldestTime = merged[0].time;
+    const isShort = merged.length < requiredMin;
+    return {
+      bars: merged,
+      diagnostics: {
+        ...brokerRes.diagnostics,
+        tf: interval,
+        source: storeBars.length >= brokerRes.bars.length && storeBars.length > 0 ? storeSource : 'broker',
+        barsLoaded: merged.length,
+        oldestCandleTime: oldestTime,
+        oldestCandleIso: new Date(oldestTime * 1000).toISOString(),
+        builtFromM1: storeBars.length > 0 && brokerRes.bars.length === 0 ? storeBuiltFromM1 : false,
+        targetBars: requiredMin,
+        requestedBars: reqLimit,
+        finalBarsLoaded: merged.length,
+        historyLimitReached: isShort
+          ? `HISTORY SHORT (${merged.length} bars, min ${requiredMin})`
+          : null,
+      },
+    };
+  }
+
+  return brokerRes;
 }
 
 export async function fetchBrokerOhlc(
@@ -714,6 +744,7 @@ const EMPTY_BARS_MAP: RedSniperBarsMap = {
 function makeEmptyDiagnosticsMap(): RedSniperHistoryDiagnosticsMap {
   const out = {} as RedSniperHistoryDiagnosticsMap;
   for (const tf of RED_SNIPER_TIMEFRAMES) {
+    const minReq = REQUIRED_MIN_BARS_BY_TF[tf] ?? 1000;
     out[tf] = {
       tf,
       source: 'store',
@@ -721,8 +752,8 @@ function makeEmptyDiagnosticsMap(): RedSniperHistoryDiagnosticsMap {
       oldestCandleTime: null,
       oldestCandleIso: null,
       builtFromM1: false,
-      targetBars: tf === '4h' ? 400 : tf === '1d' ? 300 : tf === '3m' ? 160 : 400,
-      requestedBars: tf === '3m' ? 0 : 5000,
+      targetBars: minReq,
+      requestedBars: tf === '3m' ? 0 : Math.max(5000, minReq),
       finalBarsLoaded: 0,
       returnedBarsPerPage: [],
       fromToUsed: [],
@@ -982,7 +1013,7 @@ export function useRedSniperFeed(): RedSniperFeedState {
               buyVol: side === 'BUY' ? rawTickVol : 0,
               sellVol: side === 'SELL' ? rawTickVol : 0,
             });
-            const maxRetention = tf === '1m' ? 5000 : 2000;
+            const maxRetention = Math.max(5000, REQUIRED_MIN_BARS_BY_TF[tf] ?? 5000);
             if (tfBars.length > maxRetention) {
               tfBars.splice(0, tfBars.length - maxRetention);
             }
@@ -1081,15 +1112,17 @@ export function useRedSniperFeed(): RedSniperFeedState {
     }
   }, [applyIncomingQuote]);
 
-  // 1. Initial Load: Fetch from server candle store first (/api/redsniper/candles?tf=..&limit=5000),
-  // fall back to biquote only if empty, and build 3m, 5m, 15m, 30m from stored M1 when M1 covers the range.
+  // 1. Initial Load: Fetch from server candle store + broker up to required depth per TF.
+  // Use M1 aggregation ONLY as a fallback when a direct TF has 0 bars.
   useEffect(() => {
     let isCancelled = false;
 
     async function loadHistory() {
       setIsLoading(true);
       const results = await Promise.all(
-        DIRECT_FETCH_TIMEFRAMES.map((tf) => fetchStoreCandlesFirstWithFallback(tf, 5000))
+        DIRECT_FETCH_TIMEFRAMES.map((tf) =>
+          fetchStoreCandlesFirstWithFallback(tf, REQUIRED_MIN_BARS_BY_TF[tf] ?? 5000)
+        )
       );
 
       if (isCancelled) return;
@@ -1103,33 +1136,36 @@ export function useRedSniperFeed(): RedSniperFeedState {
       const d1Res = results[6];
 
       const m1 = m1Res.bars;
-      const m3 = build3mFrom1m(m1, [], 2000);
+      const m3 = build3mFrom1m(m1, [], REQUIRED_MIN_BARS_BY_TF['3m']);
 
-      // Build 5m, 15m, 30m from stored M1 when stored M1 covers the requested range
-      const useM1For5m =
-        m1Res.diagnostics.source === 'store' &&
-        doesM1CoverTimeframeRange(m1, m5Res.bars, '5m', 400);
+      // Phase 4 Rule 1: Use M1 aggregation ONLY as a fallback when direct TF candles are empty
+      const useM1For5m = m5Res.bars.length === 0 && m1.length > 0;
       const m5 = useM1For5m
-        ? buildHigherTimeframeFrom1m(m1, '5m', m5Res.bars, 2000)
+        ? buildHigherTimeframeFrom1m(m1, '5m', [], REQUIRED_MIN_BARS_BY_TF['5m'])
         : m5Res.bars;
 
-      const useM1For15m =
-        m1Res.diagnostics.source === 'store' &&
-        doesM1CoverTimeframeRange(m1, m15Res.bars, '15m', 400);
+      const useM1For15m = m15Res.bars.length === 0 && m1.length > 0;
       const m15 = useM1For15m
-        ? buildHigherTimeframeFrom1m(m1, '15m', m15Res.bars, 2000)
+        ? buildHigherTimeframeFrom1m(m1, '15m', [], REQUIRED_MIN_BARS_BY_TF['15m'])
         : m15Res.bars;
 
-      const useM1For30m =
-        m1Res.diagnostics.source === 'store' &&
-        doesM1CoverTimeframeRange(m1, m30Res.bars, '30m', 400);
+      const useM1For30m = m30Res.bars.length === 0 && m1.length > 0;
       const m30 = useM1For30m
-        ? buildHigherTimeframeFrom1m(m1, '30m', m30Res.bars, 2000)
+        ? buildHigherTimeframeFrom1m(m1, '30m', [], REQUIRED_MIN_BARS_BY_TF['30m'])
         : m30Res.bars;
 
       const h1 = h1Res.bars;
       const h4 = h4Res.bars;
       const d1 = d1Res.bars;
+
+      console.log('[RED SNIPER HISTORY] Startup barsLoaded per TF:', {
+        '5m': `${m5.length}/${REQUIRED_MIN_BARS_BY_TF['5m']}`,
+        '15m': `${m15.length}/${REQUIRED_MIN_BARS_BY_TF['15m']}`,
+        '30m': `${m30.length}/${REQUIRED_MIN_BARS_BY_TF['30m']}`,
+        '1h': `${h1.length}/${REQUIRED_MIN_BARS_BY_TF['1h']}`,
+        '4h': `${h4.length}/${REQUIRED_MIN_BARS_BY_TF['4h']}`,
+        '1d': `${d1.length}/${REQUIRED_MIN_BARS_BY_TF['1d']}`,
+      });
 
       const nextDiag = makeEmptyDiagnosticsMap();
       for (const r of results) {
@@ -1144,13 +1180,15 @@ export function useRedSniperFeed(): RedSniperFeedState {
         oldestCandleTime: oldestM3,
         oldestCandleIso: oldestM3 ? new Date(oldestM3 * 1000).toISOString() : null,
         builtFromM1: true,
-        targetBars: 160,
+        targetBars: REQUIRED_MIN_BARS_BY_TF['3m'],
         requestedBars: m1Res.diagnostics.requestedBars,
         finalBarsLoaded: m3.length,
         returnedBarsPerPage: [m3.length],
         fromToUsed: m1Res.diagnostics.fromToUsed,
         historyLimitReached:
-          m3.length < 160 ? `history limit reached: ${m3.length} bars` : null,
+          m3.length < REQUIRED_MIN_BARS_BY_TF['3m']
+            ? `HISTORY SHORT (${m3.length} bars, min ${REQUIRED_MIN_BARS_BY_TF['3m']})`
+            : null,
       };
 
       if (useM1For5m && m5.length > 0) {
@@ -1324,17 +1362,17 @@ export function useRedSniperFeed(): RedSniperFeedState {
       const current = barsRef.current;
       const reconciled1m = reconcileOfficialBars(current['1m'], m1Last.slice(-3), 5000);
       const recent1mFor3m = reconcileOfficialBars(current['1m'], m1Last, 5000).slice(-15);
-      const reconciled3m = build3mFrom1m(recent1mFor3m, current['3m'], 2000);
+      const reconciled3m = build3mFrom1m(recent1mFor3m, current['3m'], 3000);
 
       const nextMap: RedSniperBarsMap = {
         '1m': reconciled1m,
         '3m': reconciled3m,
-        '5m': reconcileOfficialBars(current['5m'], m5Last, 2000),
-        '15m': reconcileOfficialBars(current['15m'], m15Last, 2000),
-        '30m': reconcileOfficialBars(current['30m'], m30Last, 2000),
-        '1h': reconcileOfficialBars(current['1h'], h1Last, 2000),
-        '4h': reconcileOfficialBars(current['4h'], h4Last, 2000),
-        '1d': reconcileOfficialBars(current['1d'], d1Last, 2000),
+        '5m': reconcileOfficialBars(current['5m'], m5Last, 5000),
+        '15m': reconcileOfficialBars(current['15m'], m15Last, 5000),
+        '30m': reconcileOfficialBars(current['30m'], m30Last, 5000),
+        '1h': reconcileOfficialBars(current['1h'], h1Last, 5000),
+        '4h': reconcileOfficialBars(current['4h'], h4Last, 5000),
+        '1d': reconcileOfficialBars(current['1d'], d1Last, 5000),
       };
 
       barsRef.current = nextMap;

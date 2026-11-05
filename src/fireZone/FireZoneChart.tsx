@@ -238,6 +238,18 @@ export const FireZoneChart: React.FC<Props> = ({
         horzLines: { color: 'rgba(255, 255, 255, 0.03)' },
       },
       crosshair: { mode: CrosshairMode.Normal },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: false,
+      },
+      handleScale: {
+        mouseWheel: true,
+        pinch: true,
+        axisPressedMouseMove: { time: true, price: false },
+        axisDoubleClickReset: true,
+      },
       rightPriceScale: {
         borderColor: '#1f1d18',
         autoScale: true,

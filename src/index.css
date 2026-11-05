@@ -325,3 +325,141 @@
   }
 }
 
+/* ============================================================================
+   RED SNIPER DESIGN SYSTEM TOKENS (Dark Default + Light Mode Tokens)
+   ============================================================================ */
+.rs-shell {
+  --rs-bg: #030303;
+  --rs-card-bg: rgba(11, 8, 10, 0.76);
+  --rs-card-sub: rgba(6, 6, 8, 0.78);
+  --rs-border: rgba(139, 20, 32, 0.55);
+  --rs-border-soft: rgba(139, 20, 32, 0.32);
+  --rs-text: #f3f4f6;
+  --rs-text-muted: #9ca3af;
+  --rs-text-dim: #6b7280;
+  --rs-gold: #d9ac4a;
+  --rs-cyan: #5ad7ff;
+  --rs-sell: #d83a4c;
+  --rs-sell-text: #ff8a96;
+  --rs-sell-fill: rgba(139, 0, 0, 0.42);
+  --rs-buy: #2fd08f;
+  --rs-buy-text: #7ff0c0;
+  --rs-buy-fill: rgba(20, 120, 80, 0.32);
+  --rs-tf-active: #7a1422;
+  --rs-grid-line: rgba(255, 255, 255, 0.026);
+  --rs-top-glow: rgba(139, 20, 32, 0.24);
+  --rs-inner-glow: rgba(216, 58, 76, 0.08);
+  font-family: "Chakra Petch", sans-serif;
+  background-color: var(--rs-bg);
+  color: var(--rs-text);
+  position: relative;
+  isolation: isolate;
+}
+
+html.light .rs-shell,
+.rs-shell[data-theme="light"] {
+  --rs-bg: #f6f4f0;
+  --rs-card-bg: rgba(255, 255, 255, 0.86);
+  --rs-card-sub: rgba(248, 245, 240, 0.92);
+  --rs-border: rgba(139, 20, 32, 0.42);
+  --rs-border-soft: rgba(139, 20, 32, 0.22);
+  --rs-text: #141416;
+  --rs-text-muted: #4b5563;
+  --rs-text-dim: #6b7280;
+  --rs-gold: #9a6e12;
+  --rs-cyan: #0284c7;
+  --rs-sell: #c81e32;
+  --rs-sell-text: #9f1222;
+  --rs-sell-fill: rgba(216, 58, 76, 0.14);
+  --rs-buy: #0d9462;
+  --rs-buy-text: #065f40;
+  --rs-buy-fill: rgba(47, 208, 143, 0.16);
+  --rs-tf-active: #7a1422;
+  --rs-grid-line: rgba(20, 20, 22, 0.045);
+  --rs-top-glow: rgba(139, 20, 32, 0.1);
+  --rs-inner-glow: rgba(139, 20, 32, 0.04);
+}
+
+.rs-bg-backdrop {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background-color: var(--rs-bg);
+  background-image:
+    radial-gradient(ellipse 75% 38% at 50% 0%, var(--rs-top-glow) 0%, transparent 72%),
+    linear-gradient(to right, var(--rs-grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--rs-grid-line) 1px, transparent 1px);
+  background-size: 100% 100%, 40px 40px, 40px 40px;
+}
+
+@keyframes rsScanlineMove {
+  0% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(100vh);
+  }
+}
+
+.rs-scanline {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 140px;
+  pointer-events: none;
+  z-index: 1;
+  background: linear-gradient(
+    180deg,
+    rgba(216, 58, 76, 0) 0%,
+    rgba(216, 58, 76, 0.035) 50%,
+    rgba(216, 58, 76, 0) 100%
+  );
+  animation: rsScanlineMove 18s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rs-scanline {
+    display: none !important;
+    animation: none !important;
+  }
+}
+
+.rs-card {
+  background: var(--rs-card-bg);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-radius: 14px;
+  border: 1px solid var(--rs-border);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 0 22px var(--rs-inner-glow);
+}
+
+.rs-subcard {
+  background: var(--rs-card-sub);
+  border-radius: 10px;
+  border: 1px solid var(--rs-border-soft);
+}
+
+.rs-heading {
+  font-family: "Chakra Petch", sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--rs-gold);
+}
+
+.rs-label {
+  font-family: "Chakra Petch", sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.rs-mono {
+  font-family: "JetBrains Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+

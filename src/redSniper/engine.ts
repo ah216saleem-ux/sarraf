@@ -4,8 +4,6 @@ import {
   RedSniperTimeframe,
   RED_SNIPER_TIMEFRAMES,
 } from './feed';
-import { findPivots } from '../fireZone/engineCore';
-import type { Candle as FireZoneCandle, PivotLevel } from '../fireZone/types';
 
 export const RED_SNIPER_ZONE_ENGINE_VERSION = 'zones-v3';
 
@@ -23,14 +21,23 @@ export type ZoneDroppedReason =
   | 'consumed'
   | 'dead:closeBeyond';
 
+export let INDICATOR_PARITY_SHIFT = true;
+
+export function setIndicatorParityShift(val: boolean): void {
+  INDICATOR_PARITY_SHIFT = Boolean(val);
+  resetZoneCacheStats();
+}
+
 export interface RedSniperSettings {
-  maxZonesPerTf: number; // 3-8, default 6 (3 nearest SELL + 3 nearest BUY)
+  maxZonesPerTf: number; // legacy total cap, default 5
+  zonesPerSide: number; // 3-5, default 5 (newest N alive zones per side by creation order)
+  hideConsumed: boolean; // default false (do NOT hide tested/consumed zones unless enabled)
   zoneMode: ZoneMode; // 'WICK' | 'BODY', default 'WICK'
   retestMode: RetestMode; // 'CANDLE' | 'ATR' | 'TOUCH_CANDLES'
   retestModeOverride: boolean; // false = AUTO per-TF default (ATR away-gated)
   retestGapAtr: number; // 0.1-0.75, default 0.25
   heightCapAtr: number; // 0.5-3.0, default 1.2
-  deadAtr: number; // 0.0-1.0, default 0.25
+  deadAtr: number; // 0.0-1.0, default 0.0 (close beyond bottom/top)
   farAtr: number; // 10-60, default 25
   slBuffer: number; // $1-$3, default $1.5
   maxRiskPoints: number; // default $15 (0 = off)
@@ -40,7 +47,7 @@ export interface RedSniperSettings {
   riskPct: number; // default 1.5
   showBosChoch: boolean; // default false
   showFarZones: boolean; // default false
-  showConsumedZones: boolean; // default false (hide pctLeft=0 or 3+ retests from chart, list, and bot)
+  showConsumedZones: boolean; // default true (mirrors !hideConsumed)
   weightScore: number; // default 0.40
   weightVolume: number; // default 0.25
   weightFreshness: number; // default 0.20
@@ -50,13 +57,15 @@ export interface RedSniperSettings {
 export const RED_SNIPER_SETTINGS_STORAGE_KEY = 'redSniperSettings.v3';
 
 export const DEFAULT_RED_SNIPER_SETTINGS: RedSniperSettings = {
-  maxZonesPerTf: 6,
+  maxZonesPerTf: 5,
+  zonesPerSide: 5,
+  hideConsumed: false,
   zoneMode: 'WICK',
   retestMode: 'ATR',
   retestModeOverride: false,
   retestGapAtr: 0.25,
   heightCapAtr: 1.2,
-  deadAtr: 0.25,
+  deadAtr: 0,
   farAtr: 25,
   slBuffer: 1.5,
   maxRiskPoints: 15,
@@ -66,7 +75,7 @@ export const DEFAULT_RED_SNIPER_SETTINGS: RedSniperSettings = {
   riskPct: 1.5,
   showBosChoch: false,
   showFarZones: false,
-  showConsumedZones: false,
+  showConsumedZones: true,
   weightScore: 0.4,
   weightVolume: 0.25,
   weightFreshness: 0.2,
@@ -74,14 +83,14 @@ export const DEFAULT_RED_SNIPER_SETTINGS: RedSniperSettings = {
 };
 
 export const PIVOT_LENGTH_BY_TF: Record<RedSniperTimeframe, number> = {
-  '1m': 10,
-  '3m': 10,
-  '5m': 10,
-  '15m': 8,
-  '30m': 8,
+  '1m': 5,
+  '3m': 5,
+  '5m': 5,
+  '15m': 5,
+  '30m': 5,
   '1h': 5,
   '4h': 5,
-  '1d': 3,
+  '1d': 5,
 };
 
 export function getPivotLengthForTf(tf: RedSniperTimeframe): number {
@@ -89,18 +98,18 @@ export function getPivotLengthForTf(tf: RedSniperTimeframe): number {
 }
 
 export const MINOR_PIVOT_LENGTH_BY_TF: Record<RedSniperTimeframe, number> = {
-  '1m': 3,
-  '3m': 3,
-  '5m': 3,
-  '15m': 3,
-  '30m': 3,
-  '1h': 2,
-  '4h': 2,
-  '1d': 2,
+  '1m': 5,
+  '3m': 5,
+  '5m': 5,
+  '15m': 5,
+  '30m': 5,
+  '1h': 5,
+  '4h': 5,
+  '1d': 5,
 };
 
 export function getMinorPivotLengthForTf(tf: RedSniperTimeframe): number {
-  return MINOR_PIVOT_LENGTH_BY_TF[tf] ?? 3;
+  return MINOR_PIVOT_LENGTH_BY_TF[tf] ?? 5;
 }
 
 export const LOOKBACK_BY_TF: Record<RedSniperTimeframe, number> = {
@@ -129,6 +138,21 @@ export const TF_ORDER_RANK: Record<RedSniperTimeframe, number> = {
   '1d': 8,
 };
 
+export const NEXT_HIGHER_TF: Record<RedSniperTimeframe, RedSniperTimeframe> = {
+  '1m': '5m',
+  '3m': '5m',
+  '5m': '15m',
+  '15m': '30m',
+  '30m': '1h',
+  '1h': '4h',
+  '4h': '1d',
+  '1d': '1d',
+};
+
+export function getNextHigherTf(tf: RedSniperTimeframe): RedSniperTimeframe {
+  return NEXT_HIGHER_TF[tf] ?? '1h';
+}
+
 export interface ZoneDebugCounts {
   pivotsFound: number;
   confirmedPivots: number;
@@ -142,6 +166,11 @@ export interface ZoneDebugCounts {
 export interface StructureEvent {
   id: string;
   tf: RedSniperTimeframe;
+  bull: boolean;
+  choch: boolean;
+  pivotIndex: number;
+  level: number;
+  breakIndex: number;
   dir: 'BULL' | 'BEAR';
   kind: StructureKind;
   pivotIdx: number;
@@ -149,14 +178,20 @@ export interface StructureEvent {
   price: number;
   breakIdx: number;
   breakTime: number;
+  locIndex?: number;
 }
 
 export interface RawBaseZone {
   tf: RedSniperTimeframe;
+  bull: boolean;
   supply: boolean;
   time: number;
+  originIndex: number;
+  eIndex?: number;
+  eVolume?: number;
   startIdx: number;
   endIdx: number;
+  breakIndex?: number;
   top: number;
   bottom: number;
   untrimmedTop: number;
@@ -164,6 +199,7 @@ export interface RawBaseZone {
   trimmed: boolean;
   weak: boolean;
   minor?: boolean;
+  choch: boolean;
   bosConfirmed?: boolean;
   dep: number;
   baseN: number;
@@ -171,6 +207,9 @@ export interface RawBaseZone {
   independentRetests: number;
   touchCandles: number;
   pctLeft: number;
+  pwr: number;
+  checks: string[];
+  key: string;
   consumed?: boolean;
   sweep: boolean;
   entryConfirmed?: boolean;
@@ -192,6 +231,9 @@ export interface FindZonesOptions {
   minH?: number;
   mode?: ZoneMode;
   maxZones?: number;
+  zonesPerSide?: number;
+  hideConsumed?: boolean;
+  parityShift?: boolean;
   retestMode?: RetestMode;
   retestGapAtr?: number;
   retestTolAtr?: number;
@@ -202,6 +244,7 @@ export interface FindZonesOptions {
   showConsumedZones?: boolean;
   formingCandleIncluded?: boolean;
   livePrice?: number | null;
+  htfBias?: TfBias;
 }
 
 export interface ZoneDebugEntry {
@@ -236,7 +279,9 @@ export interface ZoneDebugEntry {
 
 export interface RedSniperZone {
   id: string;
+  key: string;
   tf: RedSniperTimeframe;
+  bull: boolean;
   side: ZoneSide; // 'BUY' | 'SELL'
   supply: boolean;
   top: number; // HI
@@ -245,15 +290,22 @@ export interface RedSniperZone {
   proximal: number; // edge nearest price (bottom for SELL, top for BUY)
   distal: number; // far edge (top for SELL, bottom for BUY)
   width: number; // top - bottom
-  time: number; // pivot candle time (c[startIdx].time)
+  time: number; // OB extreme candle time (c[originIndex].time)
+  originIndex: number;
+  eIndex?: number;
+  eVolume?: number;
   startIdx: number;
   endIdx: number;
   baseN: number;
+  choch: boolean;
+  tests: number;
   retests: number;
   independentRetests: number;
   touchCandles: number;
   touches: number;
   pctLeft: number;
+  pwr: number;
+  checks: string[];
   consumed: boolean;
   sweep: boolean;
   entryConfirmed?: boolean;
@@ -290,9 +342,9 @@ export interface TimeframeAnalysis {
   bias: TfBias;
   retestModeUsed: RetestMode;
   structures: StructureEvent[];
-  zones: RedSniperZone[]; // Selected non-consumed zones for this TF (max 3 SELL + 3 BUY)
-  chartZones: RedSniperZone[]; // Selected non-consumed zones for chart
-  debugAliveZones: ZoneDebugEntry[]; // All alive zones (including consumed) BEFORE selection + dead:closeBeyond entries
+  zones: RedSniperZone[]; // Selected zones for this TF (newest N per side)
+  chartZones: RedSniperZone[]; // Selected zones for chart (same list as zones)
+  debugAliveZones: ZoneDebugEntry[]; // All alive zones BEFORE selection + dead:closeBeyond entries
   debugCounts: ZoneDebugCounts;
 }
 
@@ -384,6 +436,60 @@ export interface PendingTradePlan {
   insideZone: boolean;
   htfBlocked: boolean;
   maxRiskSkipped: boolean;
+  statusBadge?: string;
+  structureChip?: 'CHoCH' | 'BOS';
+  scoreChip?: string;
+  scoreCount?: number;
+  cautionWarning?: string | null;
+}
+
+export const MIN_ZONE_BOX_HEIGHT_PX = 14;
+
+export interface ChartZoneBoxLayout {
+  zone: RedSniperZone;
+  xStart: number;
+  xEnd: number;
+  boxW: number;
+  boxTop: number;
+  boxBot: number;
+  boxH: number;
+  labelText: string;
+  labelX: number;
+  labelY: number;
+  labelInsideBox: boolean;
+  showLabel: boolean;
+  pwrBarX: number;
+  pwrBarY: number;
+  pwrBarW: number;
+  pwrBarMaxW: number;
+  pwrBarH: number;
+  isAPlus: boolean;
+  isHighlighted: boolean;
+  isDimmed: boolean;
+}
+
+export interface StructureLineRenderSpec {
+  id: string;
+  bull: boolean;
+  choch: boolean;
+  text: 'CHoCH' | 'BOS';
+  pivotIndex: number;
+  breakIndex: number;
+  pivotTime: number;
+  breakTime: number;
+  level: number;
+  labelPlacement: 'ABOVE' | 'BELOW';
+  strokeColor: string;
+  textColor: string;
+  lineWidth: number;
+}
+
+export interface AuctionProfileResult {
+  poc: number;
+  vah: number;
+  val: number;
+  totalVolume: number;
+  binsCount: number;
 }
 
 export interface PerformanceMetrics {
@@ -424,7 +530,9 @@ export type BotLogEventType =
   | 'ZONE_NEW'
   | 'ZONE_NEAR'
   | 'ZONE_DEAD'
-  | 'ZONE_DETECTED';
+  | 'ZONE_DETECTED'
+  | 'NEW'
+  | 'BROKEN';
 
 export type BotLogCategory = 'trade' | 'zone';
 
@@ -444,7 +552,14 @@ export function isTradeLogType(type: string): boolean {
 }
 
 export function isZoneLogType(type: string): boolean {
-  return ['ZONE_NEW', 'ZONE_NEAR', 'ZONE_DEAD', 'ZONE_DETECTED'].includes(type);
+  return [
+    'ZONE_NEW',
+    'ZONE_NEAR',
+    'ZONE_DEAD',
+    'ZONE_DETECTED',
+    'NEW',
+    'BROKEN',
+  ].includes(type);
 }
 
 export interface BotLogEntry {
@@ -470,19 +585,12 @@ export function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
 }
 
-/**
- * Helper for independent retest calculation (away-gated by retestGapAtr * ATR).
- */
 export function resolveIndependentRetestModeForTf(
   _tf: RedSniperTimeframe
 ): 'CANDLE' | 'ATR' {
   return 'ATR';
 }
 
-/**
- * Default retest mode across all timeframes uses ATR-based away gap (retestGapAtr * ATR)
- * so 1H/4H/1D do not count every touching candle as a separate test.
- */
 export function resolveDefaultRetestModeForTf(_tf: RedSniperTimeframe): RetestMode {
   return 'ATR';
 }
@@ -492,7 +600,6 @@ export function resolveDefaultRetestModeForTf(_tf: RedSniperTimeframe): RetestMo
  * - FRESH = 0 retests
  * - TESTED = retests >= 1 and pctLeft >= 60 (and retests < 3)
  * - DEEP = pctLeft < 60 or retests >= 3
- * A zone with 0% left or 3 retests must never print TESTED.
  */
 export function resolveZoneStatus(retests: number, pctLeft: number): ZoneStatus {
   if (retests <= 0) return 'FRESH';
@@ -501,7 +608,7 @@ export function resolveZoneStatus(retests: number, pctLeft: number): ZoneStatus 
 }
 
 /**
- * Trade entry confirmation on closed candle (Rule 9):
+ * Trade entry confirmation on closed candle:
  * Sweep into the zone then a close back inside or outside the proximal edge (not on a plain touch).
  */
 export function isZoneEntryConfirmed(
@@ -528,11 +635,24 @@ export function sanitizeRedSniperSettings(
   if (!raw || typeof raw !== 'object') {
     return { ...DEFAULT_RED_SNIPER_SETTINGS };
   }
+  const hideConsumed =
+    typeof raw.hideConsumed === 'boolean'
+      ? raw.hideConsumed
+      : typeof raw.showConsumedZones === 'boolean'
+      ? !raw.showConsumedZones
+      : DEFAULT_RED_SNIPER_SETTINGS.hideConsumed;
+  const zonesPerSide =
+    typeof raw.zonesPerSide === 'number' && Number.isFinite(raw.zonesPerSide)
+      ? clamp(Math.round(raw.zonesPerSide), 3, 5)
+      : DEFAULT_RED_SNIPER_SETTINGS.zonesPerSide;
+
   return {
     maxZonesPerTf:
       typeof raw.maxZonesPerTf === 'number' && Number.isFinite(raw.maxZonesPerTf)
-        ? clamp(Math.round(raw.maxZonesPerTf), 3, 8)
+        ? clamp(Math.round(raw.maxZonesPerTf), 1, 8)
         : DEFAULT_RED_SNIPER_SETTINGS.maxZonesPerTf,
+    zonesPerSide,
+    hideConsumed,
     zoneMode:
       raw.zoneMode === 'WICK' || raw.zoneMode === 'BODY'
         ? raw.zoneMode
@@ -596,10 +716,7 @@ export function sanitizeRedSniperSettings(
       typeof raw.showFarZones === 'boolean'
         ? raw.showFarZones
         : DEFAULT_RED_SNIPER_SETTINGS.showFarZones,
-    showConsumedZones:
-      typeof raw.showConsumedZones === 'boolean'
-        ? raw.showConsumedZones
-        : DEFAULT_RED_SNIPER_SETTINGS.showConsumedZones,
+    showConsumedZones: !hideConsumed,
     weightScore:
       typeof raw.weightScore === 'number' && Number.isFinite(raw.weightScore)
         ? Number(clamp(raw.weightScore, 0.05, 0.9).toFixed(2))
@@ -664,7 +781,6 @@ export function atrSeries(
       Math.abs(c[i].high - c[i - 1].close),
       Math.abs(c[i].low - c[i - 1].close)
     );
-    // Cap gaps and news spikes exceeding 3x prior ATR
     const cappedTr = runningAtr > 0 ? Math.min(rawTr, 3.0 * runningAtr) : rawTr;
 
     if (i < n) {
@@ -676,395 +792,6 @@ export function atrSeries(
     a[i] = runningAtr;
   }
   return a;
-}
-
-/**
- * Swing-pivot based zone candidate scanner on CLOSED candles only:
- * 1. Origin = swing pivot using findPivots (primary L: 1m/3m/5m = 10, 15m/30m = 8, 1H/4H = 5, 1D = 3;
- *    fill pass L = round(L/2) tagged minor=true).
- *    Pivot high -> SELL zone, pivot low -> BUY zone.
- * 2. BOS/CHoCH rule: kept as a ranking bonus (+2 score). Primary pass requires BOS confirmation;
- *    fill pass allows unconfirmed pivots to fill empty slots up to 3 per side.
- * 3. Box = pivot candle: SELL from body-top to high, BUY from low to body-bottom.
- *    Height clamped to 0.5 - 1.2 x ATR (ATR measured at pivot time, Wilder, gaps > 3xATR capped).
- * 4. Lifecycle on CLOSED candles only:
- *    - Dead when a close is beyond the distal edge by > deadAtr x ATR.
- *    - A wick into the zone = retest, counted only after price moved away by retestGapAtr x ATR.
- *    - Near-consumed: pctLeft < 15 or retests >= 3 is marked consumed = true.
- * 5. Lookback per TF: 1m-5m = 300, 15m-30m = 250, 1H-4H-1D = 200 closed candles.
- */
-function scanCandidatesPass(
-  closedBars: Array<Pick<Candle, 'time' | 'open' | 'high' | 'low' | 'close'>>,
-  tf: RedSniperTimeframe,
-  A: number[],
-  params: {
-    depMult: number;
-    maxBase: number;
-    minH: number;
-    mode: ZoneMode;
-    retestMode: RetestMode;
-    retestGapAtr: number;
-    retestTolAtr: number;
-    heightCapAtr: number;
-    deadAtr: number;
-    weak: boolean;
-    minor?: boolean;
-    pivotLengthOverride?: number;
-    requireBosConfirm?: boolean;
-  }
-): {
-  alive: RawBaseZone[];
-  dead: RawBaseZone[];
-  pivotsFound: number;
-  confirmedPivots: number;
-} {
-  const n = closedBars.length;
-  if (n < 5) {
-    return { alive: [], dead: [], pivotsFound: 0, confirmedPivots: 0 };
-  }
-
-  const targetL = params.pivotLengthOverride ?? getPivotLengthForTf(tf);
-  // Use exact target pivot length whenever enough bars exist; adapt gracefully for tiny unit-test arrays
-  const effectiveL =
-    n >= 2 * targetL + 3
-      ? targetL
-      : Math.max(1, Math.min(targetL, Math.floor((n - 3) / 3)));
-
-  const fzCandles: FireZoneCandle[] = closedBars.map((b) => ({
-    time: b.time,
-    open: b.open,
-    high: b.high,
-    low: b.low,
-    close: b.close,
-    volume: 1,
-  }));
-
-  const rawPivots = findPivots(fzCandles, effectiveL as PivotLevel);
-  const minorL = Math.max(1, Math.floor(effectiveL / 2));
-  const minorPivots =
-    minorL < effectiveL ? findPivots(fzCandles, minorL as PivotLevel) : rawPivots;
-
-  // Per-TF lookback: 1m-5m = 300, 15m-30m = 250, 1H-4H-1D = 200 closed candles
-  const lookbackBars = getLookbackForTf(tf);
-  const minPivotIdx = Math.max(0, n - lookbackBars);
-
-  const alive: RawBaseZone[] = [];
-  const deadList: RawBaseZone[] = [];
-  let pivotsFound = 0;
-  let confirmedPivots = 0;
-  const requireBos = params.requireBosConfirm ?? true;
-  const isMinorPass = Boolean(params.minor ?? params.weak);
-
-  for (const pivot of rawPivots) {
-    const pIdx = pivot.index;
-    if (pIdx < minPivotIdx || pIdx >= n - 1) continue;
-    pivotsFound++;
-
-    const supply = pivot.type === 'HIGH';
-    const pBar = closedBars[pIdx];
-    const pivotAtr = Math.max(0.1, A[pIdx] || 2.0);
-
-    // Find previous opposite pivot for BOS/CHoCH confirmation check
-    let oppLevelPrice: number | null = null;
-    for (let m = minorPivots.length - 1; m >= 0; m--) {
-      const mp = minorPivots[m];
-      if (mp.index < pIdx && mp.type === (supply ? 'LOW' : 'HIGH')) {
-        oppLevelPrice = mp.price;
-        break;
-      }
-    }
-    if (oppLevelPrice === null) {
-      for (let m = rawPivots.length - 1; m >= 0; m--) {
-        const rp = rawPivots[m];
-        if (rp.index < pIdx && rp.type === (supply ? 'LOW' : 'HIGH')) {
-          oppLevelPrice = rp.price;
-          break;
-        }
-      }
-    }
-    if (oppLevelPrice === null) {
-      const lookStart = Math.max(0, pIdx - effectiveL);
-      if (pIdx > lookStart) {
-        let ext = supply ? Infinity : -Infinity;
-        for (let k = lookStart; k < pIdx; k++) {
-          if (supply) ext = Math.min(ext, closedBars[k].low);
-          else ext = Math.max(ext, closedBars[k].high);
-        }
-        if (Number.isFinite(ext)) oppLevelPrice = ext;
-      }
-    }
-
-    let confirmIdx = -1;
-    let maxMove = 0;
-    for (let k = pIdx + 1; k < n; k++) {
-      const xk = closedBars[k];
-      const ak = A[k] || pivotAtr;
-      const moveFromPivot = supply
-        ? pBar.high - xk.low
-        : xk.high - pBar.low;
-      if (moveFromPivot > maxMove) maxMove = moveFromPivot;
-
-      const invalidatedBeforeConfirm = supply
-        ? xk.close > pBar.high + params.deadAtr * ak
-        : xk.close < pBar.low - params.deadAtr * ak;
-      if (invalidatedBeforeConfirm && confirmIdx === -1) {
-        break;
-      }
-
-      if (oppLevelPrice !== null) {
-        const brokeOppositeClose = supply
-          ? xk.close < oppLevelPrice
-          : xk.close > oppLevelPrice;
-        if (brokeOppositeClose) {
-          confirmIdx = k;
-          break;
-        }
-      }
-    }
-
-    const bosConfirmed = confirmIdx !== -1;
-    if (bosConfirmed) {
-      confirmedPivots++;
-    }
-
-    // BOS rule: keep as ranking bonus (+score). Unconfirmed pivots may be used ONLY in the fill pass.
-    if (requireBos && !bosConfirmed) {
-      continue;
-    }
-
-    // 3) Box = pivot candle: SELL from body-top to high, BUY from low to body-bottom.
-    // Height clamped to 0.5 - 1.2 x ATR (ATR measured at pivot time, Wilder, gaps > 3xATR capped).
-    const bodyTop = Math.max(pBar.open, pBar.close);
-    const bodyBot = Math.min(pBar.open, pBar.close);
-
-    const untrimmedTop = Number(
-      (supply ? pBar.high : params.mode === 'BODY' ? bodyTop : bodyBot).toFixed(2)
-    );
-    const untrimmedBottom = Number(
-      (supply ? (params.mode === 'BODY' ? bodyBot : bodyTop) : pBar.low).toFixed(2)
-    );
-
-    const rawHeight = Math.max(0, untrimmedTop - untrimmedBottom);
-    // Minor zones keep their raw height floor (params.minH) so noise minor wicks < 0.5xATR are not inflated
-    const minClampedH = isMinorPass
-      ? params.minH
-      : Math.max(params.minH, 0.5 * pivotAtr);
-    const maxCapMult = clamp(params.heightCapAtr || 1.2, 0.5, 1.2);
-    const maxClampedH = Math.max(minClampedH, maxCapMult * pivotAtr);
-
-    const trimmed = rawHeight > maxClampedH + 1e-6;
-    const finalHeight = clamp(rawHeight, minClampedH, maxClampedH);
-
-    let boxTop: number;
-    let boxBottom: number;
-    if (supply) {
-      boxTop = Number(pBar.high.toFixed(2));
-      boxBottom = Number((pBar.high - finalHeight).toFixed(2));
-    } else {
-      boxBottom = Number(pBar.low.toFixed(2));
-      boxTop = Number((pBar.low + finalHeight).toFixed(2));
-    }
-
-    // Measure displacement (departure ATR) away from the zone after the pivot
-    let impulseMove = 0;
-    for (let k = pIdx + 1; k < n; k++) {
-      const m = supply ? boxBottom - closedBars[k].low : closedBars[k].high - boxTop;
-      if (m > impulseMove) impulseMove = m;
-    }
-    const depAtr = Number(Math.max(0, impulseMove / pivotAtr).toFixed(2));
-
-    // 4) Lifecycle on CLOSED candles only:
-    // - Zone is dead when a close is beyond the distal edge by > deadAtr x ATR.
-    // - A wick into the zone = retest, counted ONLY after price moved away by retestGapAtr x ATR.
-    const h = Math.max(0.01, boxTop - boxBottom);
-    let independentRetests = 0;
-    let touchCandles = 0;
-    let pen = 0;
-    let dead = false;
-    let deadCandleTime: number | undefined;
-    let deadBeyondAtr: number | undefined;
-    let sweep = false;
-    let entryConfirmed = false;
-
-    let away = false;
-
-    for (let k = pIdx + 1; k < n; k++) {
-      const x = closedBars[k];
-      const ak = Math.max(0.1, A[k] || pivotAtr);
-
-      // Dead rule: ONLY a close beyond distal edge by > deadAtr * ATR kills the zone
-      const beyondDistal = supply ? x.close - boxTop : boxBottom - x.close;
-      if (beyondDistal > params.deadAtr * ak) {
-        dead = true;
-        deadCandleTime = x.time;
-        deadBeyondAtr = Number((beyondDistal / ak).toFixed(2));
-        break;
-      }
-
-      const gapReq =
-        params.retestMode === 'CANDLE' ? 0 : params.retestGapAtr * ak;
-      const closedOutside = supply ? x.close < boxBottom : x.close > boxTop;
-      const distFromProximal = supply ? boxBottom - x.low : x.high - boxTop;
-      const movedAwayEnough = closedOutside && distFromProximal >= gapReq;
-
-      const tol =
-        params.retestTolAtr > 0 ? params.retestTolAtr * ak : 0;
-      const rawTouchBox = supply
-        ? x.high >= boxBottom && x.low <= boxTop
-        : x.low <= boxTop && x.high >= boxBottom;
-      const wickIntoZone = supply
-        ? x.high >= boxBottom - tol && x.low <= boxTop
-        : x.low <= boxTop + tol && x.high >= boxBottom;
-
-      if (away) {
-        if (wickIntoZone) {
-          independentRetests++;
-          touchCandles++;
-          away = false;
-
-          const isSweepCandle = supply
-            ? x.high > boxTop && x.close <= boxTop
-            : x.low < boxBottom && x.close >= boxBottom;
-          if (isSweepCandle) {
-            sweep = true;
-          }
-
-          const bodyEdge = supply
-            ? Math.max(x.open, x.close)
-            : Math.min(x.open, x.close);
-          const isSingleRejectionSweep =
-            isSweepCandle &&
-            independentRetests === 1 &&
-            (supply ? bodyEdge < boxTop : bodyEdge > boxBottom);
-
-          const rawPen = isSingleRejectionSweep
-            ? clamp(
-                supply
-                  ? (bodyEdge - boxBottom) / h
-                  : (boxTop - bodyEdge) / h,
-                0.05,
-                0.85
-              )
-            : supply
-            ? (x.high - boxBottom) / h
-            : (boxTop - x.low) / h;
-          pen = Math.max(pen, clamp(rawPen, 0.01, 1));
-
-          if (
-            isZoneEntryConfirmed(
-              { side: supply ? 'SELL' : 'BUY', bottom: boxBottom, top: boxTop },
-              x
-            )
-          ) {
-            entryConfirmed = true;
-          }
-        }
-      } else {
-        // Still departing or inside an active retest visit
-        if (independentRetests > 0 && rawTouchBox) {
-          touchCandles++;
-          const isSweepCandle = supply
-            ? x.high > boxTop && x.close <= boxTop
-            : x.low < boxBottom && x.close >= boxBottom;
-          if (isSweepCandle) {
-            sweep = true;
-          }
-
-          const bodyEdge = supply
-            ? Math.max(x.open, x.close)
-            : Math.min(x.open, x.close);
-          const isSingleRejectionSweep =
-            isSweepCandle &&
-            independentRetests === 1 &&
-            touchCandles === 1 &&
-            (supply ? bodyEdge < boxTop : bodyEdge > boxBottom);
-
-          const rawPen = isSingleRejectionSweep
-            ? clamp(
-                supply
-                  ? (bodyEdge - boxBottom) / h
-                  : (boxTop - bodyEdge) / h,
-                0.05,
-                0.85
-              )
-            : supply
-            ? (x.high - boxBottom) / h
-            : (boxTop - x.low) / h;
-          pen = Math.max(pen, clamp(rawPen, 0.01, 1));
-
-          if (
-            isZoneEntryConfirmed(
-              { side: supply ? 'SELL' : 'BUY', bottom: boxBottom, top: boxTop },
-              x
-            )
-          ) {
-            entryConfirmed = true;
-          }
-        }
-
-        if (movedAwayEnough && (!rawTouchBox || independentRetests === 0)) {
-          away = true;
-        }
-      }
-    }
-
-    const activeTests =
-      params.retestMode === 'TOUCH_CANDLES' ? touchCandles : independentRetests;
-
-    const pctLeft =
-      activeTests === 0
-        ? 100
-        : Math.min(99, Math.max(0, Math.round(100 * (1 - pen))));
-    // Issue 2: Hide from chart, list, and bot any zone with pctLeft < 15 or retests >= 3 (keep in debugAliveZones as 'consumed')
-    const consumed = pctLeft < 15 || activeTests >= 3;
-    const state = resolveZoneStatus(activeTests, pctLeft);
-    // BOS rule: ranking bonus (+2 score when bosConfirmed, +0 when unconfirmed in fill pass)
-    const bosBonus = bosConfirmed ? 2 : 0;
-    const score =
-      (depAtr >= 3 ? 4 : depAtr >= 2 ? 3 : 2) +
-      (activeTests === 0 ? 4 : activeTests === 1 ? 2 : activeTests === 2 ? 1 : 0) +
-      bosBonus;
-
-    const z: RawBaseZone = {
-      tf,
-      supply,
-      time: pBar.time,
-      startIdx: pIdx,
-      endIdx: pIdx,
-      top: boxTop,
-      bottom: boxBottom,
-      untrimmedTop,
-      untrimmedBottom,
-      trimmed,
-      weak: isMinorPass,
-      minor: isMinorPass,
-      bosConfirmed,
-      dep: depAtr,
-      baseN: 1,
-      tests: activeTests,
-      independentRetests,
-      touchCandles,
-      pctLeft,
-      consumed,
-      sweep,
-      entryConfirmed,
-      pivotAtr,
-      state,
-      score,
-    };
-
-    if (dead) {
-      z.dead = true;
-      z.deadCandleTime = deadCandleTime;
-      z.deadBeyondAtr = deadBeyondAtr;
-      z.droppedReason = 'dead:closeBeyond';
-      deadList.push(z);
-    } else {
-      alive.push(z);
-    }
-  }
-
-  return { alive, dead: deadList, pivotsFound, confirmedPivots };
 }
 
 /**
@@ -1083,7 +810,7 @@ export function computeSameSideOverlapRatio(
 }
 
 /**
- * Returns true if two zones overlap in price (same-side OR BUY/SELL).
+ * Returns true if two zones overlap in price.
  */
 export function doZonesOverlap(
   a: Pick<RawBaseZone, 'bottom' | 'top'>,
@@ -1092,10 +819,256 @@ export function doZonesOverlap(
   return Math.min(a.top, b.top) >= Math.max(a.bottom, b.bottom) - 1e-6;
 }
 
+interface InternalPivotRecord {
+  idx: number;
+  time: number;
+  level: number;
+}
+
+/**
+ * Phase 4 Rule 2 & 3:
+ * - Scan ALL loaded closed bars (no lookback cap).
+ * - Use ONLY internal pivot length 5 for order blocks (remove length-10 merge).
+ * - Strict pivot detection: a pivot high is strictly greater than the 5 bars on each side (low mirrors).
+ * - Keep a list of pivot highs and a list of pivot lows (newest first).
+ * - Bullish break = a candle CLOSE crosses above the newest pivot high in the list.
+ *   On break: trend flip -> CHoCH, else BOS; then clear the pivot-high list. Require at least 2 pivot lows ever stored.
+ * - Bearish break mirrors this.
+ */
+export function scanMergedStructuresOnClosedBars(
+  closedBars: Array<Pick<Candle, 'time' | 'open' | 'high' | 'low' | 'close'>>,
+  tf: RedSniperTimeframe
+): { events: StructureEvent[]; pivotsFound: number } {
+  const n = closedBars.length;
+  if (n < 11) return { events: [], pivotsFound: 0 };
+
+  const L = 5;
+  let pivotHighs: InternalPivotRecord[] = [];
+  let pivotLows: InternalPivotRecord[] = [];
+  let totalPivotHighsEver = 0;
+  let totalPivotLowsEver = 0;
+  let trend: 1 | -1 | 0 = 0;
+  let pivotsFound = 0;
+  const events: StructureEvent[] = [];
+
+  for (let i = L * 2; i < n; i++) {
+    const pIdx = i - L;
+    const pBar = closedBars[pIdx];
+    let isStrictHigh = true;
+    let isStrictLow = true;
+
+    for (let k = pIdx - L; k <= pIdx + L; k++) {
+      if (k === pIdx) continue;
+      if (closedBars[k].high >= pBar.high) {
+        isStrictHigh = false;
+      }
+      if (closedBars[k].low <= pBar.low) {
+        isStrictLow = false;
+      }
+      if (!isStrictHigh && !isStrictLow) break;
+    }
+
+    if (isStrictHigh) {
+      pivotsFound++;
+      totalPivotHighsEver++;
+      pivotHighs.unshift({ idx: pIdx, time: pBar.time, level: pBar.high });
+    }
+    if (isStrictLow) {
+      pivotsFound++;
+      totalPivotLowsEver++;
+      pivotLows.unshift({ idx: pIdx, time: pBar.time, level: pBar.low });
+    }
+
+    const bar = closedBars[i];
+    const prevClose = i > 0 ? closedBars[i - 1].close : bar.open;
+
+    // Bullish break: CLOSE crosses above the newest pivot high in the list; require >= 2 pivot lows ever stored
+    if (pivotHighs.length > 0 && totalPivotLowsEver >= 2) {
+      const newestPH = pivotHighs[0];
+      if (prevClose <= newestPH.level && bar.close > newestPH.level) {
+        const choch = trend === -1;
+        const kind: StructureKind = choch ? 'CHoCH' : 'BOS';
+        events.push({
+          id: `${tf}-BULL-${newestPH.time}-${bar.time}`,
+          tf,
+          bull: true,
+          choch,
+          pivotIndex: newestPH.idx,
+          level: newestPH.level,
+          breakIndex: i,
+          dir: 'BULL',
+          kind,
+          pivotIdx: newestPH.idx,
+          pivotTime: newestPH.time,
+          price: newestPH.level,
+          breakIdx: i,
+          breakTime: bar.time,
+          locIndex: newestPH.idx,
+        });
+        trend = 1;
+        pivotHighs = [];
+      }
+    }
+
+    // Bearish break: CLOSE crosses below the newest pivot low in the list; require >= 2 pivot highs ever stored
+    if (pivotLows.length > 0 && totalPivotHighsEver >= 2) {
+      const newestPL = pivotLows[0];
+      if (prevClose >= newestPL.level && bar.close < newestPL.level) {
+        const choch = trend === 1;
+        const kind: StructureKind = choch ? 'CHoCH' : 'BOS';
+        events.push({
+          id: `${tf}-BEAR-${newestPL.time}-${bar.time}`,
+          tf,
+          bull: false,
+          choch,
+          pivotIndex: newestPL.idx,
+          level: newestPL.level,
+          breakIndex: i,
+          dir: 'BEAR',
+          kind,
+          pivotIdx: newestPL.idx,
+          pivotTime: newestPL.time,
+          price: newestPL.level,
+          breakIdx: i,
+          breakTime: bar.time,
+          locIndex: newestPL.idx,
+        });
+        trend = -1;
+        pivotLows = [];
+      }
+    }
+  }
+
+  return {
+    events,
+    pivotsFound,
+  };
+}
+
+/**
+ * Evaluate the 6-check score and PWR formula:
+ * 1. CHoCH (the break was a CHoCH)
+ * 2. Higher-TF trend agrees (use the next higher TF)
+ * 3. Premium/Discount (bull below range midpoint, bear above)
+ * 4. FVG after the OB
+ * 5. Fresh (no retest)
+ * 6. Volume above 1.2x the 30-bar average
+ * PWR = min(96, 40 + 9 * checks.length). A+ = 4 or more checks.
+ */
+export function evaluateZoneSixChecksAndPwr(params: {
+  closedBars: Array<Pick<Candle, 'open' | 'high' | 'low' | 'close'> & { tickVolume?: number }>;
+  bull: boolean;
+  choch: boolean;
+  originIndex: number;
+  eIndex?: number;
+  eVolume?: number;
+  breakIndex: number;
+  top: number;
+  bottom: number;
+  tests: number;
+  rangeMid: number;
+  htfBias: TfBias;
+}): { checks: string[]; pwr: number; isAPlus: boolean } {
+  const {
+    closedBars,
+    bull,
+    choch,
+    originIndex,
+    eIndex,
+    eVolume,
+    breakIndex,
+    top,
+    bottom,
+    tests,
+    rangeMid,
+    htfBias,
+  } = params;
+
+  const checks: string[] = [];
+
+  // 1) CHoCH
+  if (choch) {
+    checks.push('CHoCH');
+  }
+
+  // 2) Higher-TF trend agrees (next higher TF)
+  const expectedBias: TfBias = bull ? 'BULL' : 'BEAR';
+  if (htfBias === expectedBias) {
+    checks.push('HTF');
+  }
+
+  // 3) Premium / Discount (bull below range midpoint, bear above)
+  const obMid = (top + bottom) / 2;
+  if (bull ? obMid <= rangeMid : obMid >= rangeMid) {
+    checks.push(bull ? 'DISC' : 'PREM');
+  }
+
+  // 4) FVG after the OB
+  const n = closedBars.length;
+  const fvgSearchStart = Math.max(0, Math.min(originIndex, eIndex ?? originIndex));
+  const fvgSearchEnd = Math.min(n - 3, Math.max(originIndex, breakIndex + 1));
+  let hasFvg = false;
+  for (let k = fvgSearchStart; k <= fvgSearchEnd; k++) {
+    const c0 = closedBars[k];
+    const c2 = closedBars[k + 2];
+    if (!c0 || !c2) continue;
+    if (bull && c2.low > c0.high) {
+      hasFvg = true;
+      break;
+    }
+    if (!bull && c2.high < c0.low) {
+      hasFvg = true;
+      break;
+    }
+  }
+  if (hasFvg) {
+    checks.push('FVG');
+  }
+
+  // 5) Fresh (no retest)
+  if (tests === 0) {
+    checks.push('FRESH');
+  }
+
+  // 6) Volume above 1.2x the 30-bar average (using stored volume of candle E and OB impulse)
+  const refIdx = eIndex ?? originIndex;
+  const avgStart = Math.max(0, refIdx - 30);
+  const avgEnd = refIdx - 1;
+  let volSum = 0;
+  let volCount = 0;
+  for (let j = avgStart; j <= avgEnd; j++) {
+    const tv = closedBars[j]?.tickVolume;
+    if (typeof tv === 'number' && Number.isFinite(tv) && tv > 0) {
+      volSum += tv;
+      volCount++;
+    }
+  }
+  if (volCount > 0) {
+    const avg30 = volSum / volCount;
+    let maxObVol = typeof eVolume === 'number' && Number.isFinite(eVolume) ? eVolume : 0;
+    const obVolEnd = Math.min(n - 1, Math.max(originIndex + 1, breakIndex));
+    for (let j = Math.max(0, Math.min(refIdx, originIndex)); j <= obVolEnd; j++) {
+      const tv = closedBars[j]?.tickVolume;
+      if (typeof tv === 'number' && Number.isFinite(tv) && tv > maxObVol) {
+        maxObVol = tv;
+      }
+    }
+    if (avg30 > 0 && maxObVol > 1.2 * avg30) {
+      checks.push('VOL');
+    }
+  }
+
+  const pwr = Math.min(96, 40 + 9 * checks.length);
+  const isAPlus = checks.length >= 4;
+
+  return { checks, pwr, isAPlus };
+}
+
 interface CachedZoneAuditResult {
   selected: RawBaseZone[];
   allAliveBeforeSelection: RawBaseZone[];
   deadBeforeSelection: RawBaseZone[];
+  structures: StructureEvent[];
   retestModeUsed: RetestMode;
   atr14: number;
   closedRefPrice: number;
@@ -1144,73 +1117,93 @@ function computeClosedBarsSignature(
 }
 
 function computeZoneSettingsHash(S: {
-  depMult: number;
-  maxBase: number;
-  minH: number;
   mode: ZoneMode;
-  maxZones: number;
+  zonesPerSide: number;
+  parityShift: boolean;
   retestMode: RetestMode;
   retestGapAtr: number;
   retestTolAtr: number;
-  heightCapAtr: number;
   deadAtr: number;
   farAtr: number;
-  enableWeakRetry: boolean;
-  showConsumedZones: boolean;
+  hideConsumed: boolean;
   formingCandleIncluded: boolean;
+  htfBias: TfBias;
 }): string {
-  return `${S.mode}|${S.maxZones}|${S.retestMode}|${S.retestGapAtr}|${S.retestTolAtr}|${S.heightCapAtr}|${S.deadAtr}|${S.farAtr}|${S.enableWeakRetry ? 1 : 0}|${S.showConsumedZones ? 1 : 0}|${S.formingCandleIncluded ? 1 : 0}|${S.depMult}|${S.maxBase}|${S.minH}`;
+  return `${S.mode}|${S.zonesPerSide}|${S.parityShift ? 1 : 0}|${S.retestMode}|${S.retestGapAtr}|${S.retestTolAtr}|${S.deadAtr}|${S.farAtr}|${S.hideConsumed ? 1 : 0}|${S.formingCandleIncluded ? 1 : 0}|${S.htfBias}`;
 }
 
 /**
- * Full zone detection + cross-side overlap removal + 3+3 selection pipeline on CLOSED candles.
- * - Lookback: 1m-5m 300, 15m-30m 250, 1H-4H-1D 200 closed candles.
- * - Primary pass uses TF pivot length L with BOS confirmation.
- * - Minor pass (L = 3 for 1m-5m, 3 for 15m-30m, 2 for 1H+): always runs so recent swings
- *   from the last 10 candles can form zones.
- *   A minor zone may win the nearest slot ONLY if:
- *     height >= 0.5 * ATR AND displacement >= 1.0 * ATR after the pivot AND pctLeft >= 50.
- *   Otherwise it can only fill remaining slots (< 3 per side).
- * - Results are cached per (tf, lastClosedCandleTime, settingsHash) so live ticks never rescan.
+ * Phase 4 Order Block & Structure zone detection on ALL CLOSED candles (no lookback cap):
+ * 1) STRUCTURE: internal pivot length 5 only, strict >/< 5 bars on each side, pivot lists (newest first),
+ *    break when close crosses newest pivot (requiring >= 2 opposite pivots ever stored), clear broken side's pivot list.
+ * 2) ORDER BLOCK construction with INDICATOR_PARITY_SHIFT (default true):
+ *    - Scan bars loc + 1 .. breakBar. Bullish: extreme = lowest low (ties -> most recent). Bearish: extreme = highest high (ties -> most recent).
+ *    - Let E be candle ONE BAR BEFORE extreme when parityShift=true, or extreme itself when false.
+ *    - Bullish: bottom = extreme.low, top = hl2(E). Bearish: top = extreme.high, bottom = hl2(E).
+ *    - Refine using candle E (hlcc4 check).
+ *    - Zone start time = extreme candle time. Store volume of candle E.
+ * 3) OVERLAP RULE: compare ONLY with the most recent still-alive OB of the same side:
+ *    - Bullish: drop new if new.bottom < prev.top.
+ *    - Bearish: drop new if new.top > prev.bottom.
+ * 4) MITIGATION: bullish OB deleted when close < bottom; bearish OB deleted when close > top. Nothing else removes a zone.
+ *    Do NOT hide tested zones by default (hideConsumed default false).
+ * 5) SELECTION: show the NEWEST N alive zones per side by creation order (zonesPerSide default 5, allowed 3-5).
  */
 export function findZonesWithAudit(
-  c: Array<Pick<Candle, 'time' | 'open' | 'high' | 'low' | 'close'>>,
+  c: Array<Pick<Candle, 'time' | 'open' | 'high' | 'low' | 'close'> & { tickVolume?: number }>,
   tf: RedSniperTimeframe,
   o: FindZonesOptions = {}
 ): {
   selected: RawBaseZone[];
   allAliveBeforeSelection: RawBaseZone[];
   deadBeforeSelection: RawBaseZone[];
+  structures?: StructureEvent[];
   retestModeUsed: RetestMode;
   atr14: number;
   livePrice: number;
   debugCounts: ZoneDebugCounts;
 } {
   const defaultRetestMode = resolveDefaultRetestModeForTf(tf);
+  const hideConsumed =
+    typeof o.hideConsumed === 'boolean'
+      ? o.hideConsumed
+      : typeof o.showConsumedZones === 'boolean'
+      ? !o.showConsumedZones
+      : false;
+  const zonesPerSide = clamp(
+    typeof o.zonesPerSide === 'number'
+      ? o.zonesPerSide
+      : typeof o.maxZones === 'number'
+      ? o.maxZones
+      : 5,
+    1,
+    5
+  );
+  const parityShift =
+    typeof o.parityShift === 'boolean' ? o.parityShift : INDICATOR_PARITY_SHIFT;
+
   const S = {
-    depMult: o.depMult ?? 1.5,
-    maxBase: o.maxBase ?? 1,
-    minH: o.minH ?? 0.3,
     mode: o.mode ?? ('WICK' as ZoneMode),
-    maxZones: o.maxZones ?? 6,
+    zonesPerSide,
+    parityShift,
     retestMode: o.retestMode ?? defaultRetestMode,
     retestGapAtr: o.retestGapAtr ?? 0.25,
-    retestTolAtr: o.retestTolAtr ?? 0.1,
-    heightCapAtr: o.heightCapAtr ?? 1.2,
-    deadAtr: o.deadAtr ?? 0.25,
+    retestTolAtr: o.retestTolAtr ?? 0.0,
+    deadAtr: o.deadAtr ?? 0.0,
     farAtr: clamp(o.farAtr ?? 25, 10, 60),
-    // Default true so the minor pivot pass (L=3 for 1m-30m, L=2 for 1H+) always runs
-    enableWeakRetry: o.enableWeakRetry ?? true,
-    showConsumedZones: o.showConsumedZones ?? false,
+    hideConsumed,
+    showConsumedZones: !hideConsumed,
     formingCandleIncluded: o.formingCandleIncluded ?? true,
+    htfBias: o.htfBias ?? ('NEUT' as TfBias),
   };
 
   const totalBars = c ? c.length : 0;
-  if (totalBars < 5) {
+  if (totalBars < 12) {
     return {
       selected: [],
       allAliveBeforeSelection: [],
       deadBeforeSelection: [],
+      structures: [],
       retestModeUsed: S.retestMode,
       atr14: 2.0,
       livePrice: totalBars > 0 ? c[totalBars - 1].close : 0,
@@ -1226,8 +1219,7 @@ export function findZonesWithAudit(
     };
   }
 
-  // When formingCandleIncluded is true (default), ignore the forming (last) candle so zones never repaint intra-bar.
-  // When formingCandleIncluded is false (e.g. replay passing closed-only bars), keep all passed bars.
+  // Use CLOSED candles only (never the forming candle when formingCandleIncluded is true)
   const closedBars =
     S.formingCandleIncluded && totalBars > 1 ? c.slice(0, totalBars - 1) : c;
   const closedN = closedBars.length;
@@ -1249,6 +1241,7 @@ export function findZonesWithAudit(
       selected: cached.selected,
       allAliveBeforeSelection: cached.allAliveBeforeSelection,
       deadBeforeSelection: cached.deadBeforeSelection,
+      structures: cached.structures,
       retestModeUsed: cached.retestModeUsed,
       atr14: cached.atr14,
       livePrice: px,
@@ -1259,6 +1252,317 @@ export function findZonesWithAudit(
 
   const A = atrSeries(closedBars);
   const atr14 = Math.max(0.1, A[closedN - 1] || 2.0);
+  const farThreshold = S.farAtr * atr14;
+
+  // Range midpoint over TF lookback window for Premium/Discount check
+  const lookbackStart = Math.max(0, closedN - getLookbackForTf(tf));
+  let rangeHigh = -Infinity;
+  let rangeLow = Infinity;
+  for (let i = lookbackStart; i < closedN; i++) {
+    if (closedBars[i].high > rangeHigh) rangeHigh = closedBars[i].high;
+    if (closedBars[i].low < rangeLow) rangeLow = closedBars[i].low;
+  }
+  const rangeMid =
+    Number.isFinite(rangeHigh) && Number.isFinite(rangeLow)
+      ? (rangeHigh + rangeLow) / 2
+      : closedRefPrice;
+
+  // Scan ALL loaded closed bars using internal pivot length 5 only
+  const { events: structures, pivotsFound } = scanMergedStructuresOnClosedBars(
+    closedBars,
+    tf
+  );
+
+  const breaksByBar = new Map<number, StructureEvent[]>();
+  for (const ev of structures) {
+    const list = breaksByBar.get(ev.breakIndex) || [];
+    list.push(ev);
+    breaksByBar.set(ev.breakIndex, list);
+  }
+
+  interface LiveObTracker {
+    zone: RawBaseZone;
+    away: boolean;
+    maxPen: number;
+  }
+
+  const liveTrackers: LiveObTracker[] = [];
+  const deadOBs: RawBaseZone[] = [];
+  const skippedOverlapOBs: RawBaseZone[] = [];
+  let overlapDroppedCount = 0;
+
+  // Walk ALL closed bars chronologically (0 .. closedN - 1, no lookback cap)
+  for (let i = 0; i < closedN; i++) {
+    const bar = closedBars[i];
+    const ak = Math.max(0.1, A[i] || atr14);
+    const deadOffset = S.deadAtr > 0 ? S.deadAtr * ak : 0;
+
+    // 1) Update existing live OBs on bar i (Mitigation + Retests)
+    for (let tIdx = liveTrackers.length - 1; tIdx >= 0; tIdx--) {
+      const tr = liveTrackers[tIdx];
+      const z = tr.zone;
+      if (i <= (z.breakIndex ?? z.endIdx)) continue;
+
+      // Phase 4 Rule 6) MITIGATION:
+      // Bullish OB deleted when close < bottom; Bearish OB deleted when close > top. Nothing else removes a zone.
+      const mitigated = z.bull
+        ? bar.close < z.bottom - deadOffset
+        : bar.close > z.top + deadOffset;
+
+      if (mitigated) {
+        const beyondDist = z.bull ? z.bottom - bar.close : bar.close - z.top;
+        z.dead = true;
+        z.deadCandleTime = bar.time;
+        z.deadBeyondAtr = Number(Math.max(0.01, beyondDist / ak).toFixed(2));
+        z.droppedReason = 'dead:closeBeyond';
+        deadOBs.push(z);
+        liveTrackers.splice(tIdx, 1);
+        continue;
+      }
+
+      // Retest & penetration tracking (informational: FRESH/TESTED and tests count)
+      const h = Math.max(0.01, z.top - z.bottom);
+      const tol = S.retestTolAtr > 0 ? S.retestTolAtr * ak : 0;
+      const gapReq = S.retestMode === 'CANDLE' ? 0 : S.retestGapAtr * ak;
+      const closedOutside = z.bull ? bar.close > z.top : bar.close < z.bottom;
+      const distOutside = z.bull ? bar.low - z.top : z.bottom - bar.high;
+      const movedAway =
+        (z.bull ? bar.low > z.top : bar.high < z.bottom) ||
+        (closedOutside && distOutside >= gapReq);
+
+      const touchedZone = z.bull
+        ? bar.low <= z.top + tol && bar.high >= z.bottom
+        : bar.high >= z.bottom - tol && bar.low <= z.top;
+
+      if (tr.away) {
+        if (touchedZone) {
+          z.tests++;
+          z.independentRetests++;
+          z.touchCandles++;
+          tr.away = false;
+
+          const isSweep = z.bull
+            ? bar.low < z.bottom && bar.close >= z.bottom
+            : bar.high > z.top && bar.close <= z.top;
+          if (isSweep) z.sweep = true;
+
+          const rawPen = z.bull
+            ? (z.top - bar.low) / h
+            : (bar.high - z.bottom) / h;
+          tr.maxPen = Math.max(tr.maxPen, clamp(rawPen, 0.01, 1));
+          z.pctLeft = Math.max(0, Math.round(100 * (1 - tr.maxPen)));
+
+          if (
+            isZoneEntryConfirmed(
+              { side: z.bull ? 'BUY' : 'SELL', bottom: z.bottom, top: z.top },
+              bar
+            )
+          ) {
+            z.entryConfirmed = true;
+          }
+        }
+      } else {
+        if (z.independentRetests > 0 && touchedZone) {
+          z.touchCandles++;
+          const isSweep = z.bull
+            ? bar.low < z.bottom && bar.close >= z.bottom
+            : bar.high > z.top && bar.close <= z.top;
+          if (isSweep) z.sweep = true;
+
+          const rawPen = z.bull
+            ? (z.top - bar.low) / h
+            : (bar.high - z.bottom) / h;
+          tr.maxPen = Math.max(tr.maxPen, clamp(rawPen, 0.01, 1));
+          z.pctLeft = Math.max(0, Math.round(100 * (1 - tr.maxPen)));
+
+          if (
+            isZoneEntryConfirmed(
+              { side: z.bull ? 'BUY' : 'SELL', bottom: z.bottom, top: z.top },
+              bar
+            )
+          ) {
+            z.entryConfirmed = true;
+          }
+        }
+        if (movedAway) {
+          tr.away = true;
+        }
+      }
+
+      if (S.retestMode === 'TOUCH_CANDLES') {
+        z.tests = z.touchCandles;
+      }
+
+      z.consumed = z.pctLeft < 10 || z.tests >= 4;
+      z.state = resolveZoneStatus(z.tests, z.pctLeft);
+    }
+
+    // 2) Phase 4 Rule 4: ORDER-BLOCK CONSTRUCTION on structure break at bar i
+    const eventsAtI = breaksByBar.get(i);
+    if (!eventsAtI || eventsAtI.length === 0) continue;
+
+    for (const ev of eventsAtI) {
+      const loc = Math.max(0, ev.locIndex ?? ev.pivotIndex);
+      const searchStart = Math.min(i, loc + 1);
+      const searchEnd = Math.min(closedN - 1, i);
+      let extremeIdx = searchStart;
+
+      // Scan bars loc + 1 .. breakBar. Ties -> most recent bar (<= for bull, >= for bear).
+      if (ev.bull) {
+        let minLow = Infinity;
+        for (let k = searchStart; k <= searchEnd; k++) {
+          if (closedBars[k].low <= minLow) {
+            minLow = closedBars[k].low;
+            extremeIdx = k;
+          }
+        }
+      } else {
+        let maxHigh = -Infinity;
+        for (let k = searchStart; k <= searchEnd; k++) {
+          if (closedBars[k].high >= maxHigh) {
+            maxHigh = closedBars[k].high;
+            extremeIdx = k;
+          }
+        }
+      }
+
+      // Let E be the candle ONE BAR BEFORE the extreme candle when parityShift=true (or extreme itself when false)
+      const eIdx = S.parityShift ? Math.max(0, extremeIdx - 1) : extremeIdx;
+      const extremeCandle = closedBars[extremeIdx];
+      const eCandle = closedBars[eIdx];
+      const eHl2 = (eCandle.high + eCandle.low) / 2;
+      const eHlcc4 =
+        (eCandle.high + eCandle.low + 2 * eCandle.close) / 4;
+
+      let rawTop: number;
+      let rawBottom: number;
+      let trimmed = false;
+
+      if (ev.bull) {
+        rawBottom = extremeCandle.low;
+        rawTop = eHl2 >= rawBottom ? eHl2 : (extremeCandle.high + extremeCandle.low) / 2;
+        const mid = (rawTop + rawBottom) / 2;
+        if (mid < Math.min(eCandle.open, eCandle.close) && rawTop > eHlcc4) {
+          rawTop = mid;
+          trimmed = true;
+        }
+      } else {
+        rawTop = extremeCandle.high;
+        rawBottom = eHl2 <= rawTop ? eHl2 : (extremeCandle.high + extremeCandle.low) / 2;
+        const mid = (rawTop + rawBottom) / 2;
+        if (mid > Math.max(eCandle.open, eCandle.close) && rawBottom < eHlcc4) {
+          rawBottom = mid;
+          trimmed = true;
+        }
+      }
+
+      if (rawTop - rawBottom < 0.05) {
+        if (ev.bull) rawTop = rawBottom + 0.05;
+        else rawBottom = rawTop - 0.05;
+      }
+
+      const boxTop = Number(rawTop.toFixed(2));
+      const boxBottom = Number(rawBottom.toFixed(2));
+      const pivotAtr = Math.max(0.1, A[extremeIdx] || atr14);
+
+      // Measure departure in ATR units from OB to break bar
+      const depMove = ev.bull
+        ? Math.max(0, closedBars[i].high - boxTop)
+        : Math.max(0, boxBottom - closedBars[i].low);
+      const depAtr = Number((depMove / pivotAtr).toFixed(2));
+
+      const originIndex = extremeIdx;
+      const eVolume =
+        typeof eCandle.tickVolume === 'number' && Number.isFinite(eCandle.tickVolume)
+          ? eCandle.tickVolume
+          : 0;
+      const key = `${tf}-${ev.bull ? 'BULL' : 'BEAR'}-${originIndex}-${boxBottom.toFixed(2)}-${boxTop.toFixed(2)}`;
+
+      const candidateZone: RawBaseZone = {
+        tf,
+        bull: ev.bull,
+        supply: !ev.bull,
+        time: extremeCandle.time, // Zone start time = the extreme candle time
+        originIndex,
+        eIndex: eIdx,
+        eVolume,
+        startIdx: originIndex,
+        endIdx: originIndex,
+        breakIndex: i,
+        top: boxTop,
+        bottom: boxBottom,
+        untrimmedTop: Number((ev.bull ? eHl2 : extremeCandle.high).toFixed(2)),
+        untrimmedBottom: Number((ev.bull ? extremeCandle.low : eHl2).toFixed(2)),
+        trimmed,
+        weak: false,
+        minor: false,
+        choch: ev.choch,
+        bosConfirmed: true,
+        dep: depAtr,
+        baseN: 1,
+        tests: 0,
+        independentRetests: 0,
+        touchCandles: 0,
+        pctLeft: 100,
+        pwr: 40,
+        checks: [],
+        key,
+        consumed: false,
+        sweep: false,
+        entryConfirmed: false,
+        pivotAtr,
+        state: 'FRESH',
+        score: 0,
+      };
+
+      // Phase 4 Rule 5: OVERLAP RULE
+      // Compare ONLY with the most recent still-alive OB of the same side:
+      // Bullish: drop the new one if new.bottom < prev.top
+      // Bearish: drop the new one if new.top > prev.bottom
+      let prevSameSide: RawBaseZone | null = null;
+      for (let t = liveTrackers.length - 1; t >= 0; t--) {
+        if (liveTrackers[t].zone.bull === ev.bull) {
+          prevSameSide = liveTrackers[t].zone;
+          break;
+        }
+      }
+
+      if (prevSameSide) {
+        const shouldDropByOverlap = ev.bull
+          ? candidateZone.bottom < prevSameSide.top
+          : candidateZone.top > prevSameSide.bottom;
+
+        if (shouldDropByOverlap) {
+          const r = Math.max(0.01, computeSameSideOverlapRatio(prevSameSide, candidateZone));
+          const overlapPct = Math.max(1, Math.round(r * 100));
+          overlapDroppedCount++;
+          skippedOverlapOBs.push({
+            ...candidateZone,
+            overlapPct,
+            overlapDecision: `dropped:overlap(${overlapPct}%)`,
+            droppedReason: 'overlap',
+          });
+          continue;
+        }
+      }
+
+      const breakBar = closedBars[i];
+      const alreadyOutside = ev.bull
+        ? breakBar.close > boxTop
+        : breakBar.close < boxBottom;
+
+      liveTrackers.push({
+        zone: {
+          ...candidateZone,
+          overlapPct: 0,
+          overlapDecision: 'kept:no-overlap',
+          droppedReason: 'kept',
+        },
+        away: alreadyOutside,
+        maxPen: 0,
+      });
+    }
+  }
 
   const getDist = (z: RawBaseZone): number => {
     if (closedRefPrice >= z.bottom && closedRefPrice <= z.top) return 0;
@@ -1267,283 +1571,71 @@ export function findZonesWithAudit(
       : closedRefPrice - z.top;
   };
 
-  const primaryL = getPivotLengthForTf(tf);
-  const pass1 = scanCandidatesPass(closedBars, tf, A, {
-    ...S,
-    weak: false,
-    minor: false,
-    pivotLengthOverride: primaryL,
-    requireBosConfirm: true,
-  });
-
-  // Filter to valid side relative to closed reference price (SELL above price, BUY below price)
-  const sideValidPass1 = pass1.alive.filter((z) =>
-    z.supply ? z.top >= closedRefPrice : z.bottom <= closedRefPrice
-  );
-
-  // Issue 2: Hide zones with pctLeft < 15 or retests >= 3 from chart, list and bot (still in debugAliveZones as 'consumed')
-  const allAlive: RawBaseZone[] = [];
-  const nonConsumedPass1: RawBaseZone[] = [];
-  let consumedHiddenCount = 0;
-  let overlapDroppedCount = 0;
-
-  for (const z of sideValidPass1) {
-    const isConsumed = Boolean(z.consumed || z.pctLeft < 15 || z.tests >= 3);
-    z.consumed = isConsumed;
-    if (isConsumed && !S.showConsumedZones) {
-      consumedHiddenCount++;
-      allAlive.push({
-        ...z,
-        overlapPct: 0,
-        overlapDecision: 'dropped:consumed',
-        droppedReason: 'consumed',
-      });
-    } else {
-      nonConsumedPass1.push(z);
-    }
-  }
-
-  // Sort primary candidates by freshness (fewer retests, higher pctLeft), higher score, and recency
-  nonConsumedPass1.sort((a, b) => {
-    if (a.tests !== b.tests) return a.tests - b.tests;
-    if (b.pctLeft !== a.pctLeft) return b.pctLeft - a.pctLeft;
-    if (b.score !== a.score) return b.score - a.score;
-    return b.time - a.time;
-  });
-
-  const dedupedAlive: RawBaseZone[] = [];
-
-  for (const z of nonConsumedPass1) {
-    let maxOverlapRatio = 0;
-    let overlapsExisting = false;
-    for (const orig of dedupedAlive) {
-      if (doZonesOverlap(orig, z)) {
-        overlapsExisting = true;
-        const ratio = Math.max(0.01, computeSameSideOverlapRatio(orig, z));
-        if (ratio > maxOverlapRatio) maxOverlapRatio = ratio;
-      }
-    }
-    const overlapPct = Math.max(overlapsExisting ? 1 : 0, Math.round(maxOverlapRatio * 100));
-    if (overlapsExisting) {
-      overlapDroppedCount++;
-      allAlive.push({
-        ...z,
-        overlapPct,
-        overlapDecision: `dropped:overlap(${overlapPct}%)`,
-        droppedReason: 'overlap',
-      });
-    } else {
-      const copy: RawBaseZone = {
-        ...z,
-        overlapPct: 0,
-        overlapDecision: 'kept:no-overlap',
-        droppedReason: 'kept',
-      };
-      dedupedAlive.push(copy);
-      allAlive.push(copy);
-    }
-  }
-
-  const maxPerSideSell = Math.min(3, Math.ceil(S.maxZones / 2));
-  const maxPerSideBuy = Math.min(3, Math.floor(S.maxZones / 2));
-
-  const fillDeadZones: RawBaseZone[] = [];
-
-  // Always run the minor pass (L = 3 for 1m-5m, 3 for 15m-30m, 2 for 1H+) when enableWeakRetry is true
-  // so swings from the last 10 candles can form zones for the nearest slot on each side and fill empty slots (< 3 per side).
-  if (S.enableWeakRetry) {
-    const minorL = getMinorPivotLengthForTf(tf);
-    const pass2Minor = scanCandidatesPass(closedBars, tf, A, {
-      ...S,
-      weak: true,
-      minor: true,
-      pivotLengthOverride: minorL,
-      requireBosConfirm: false,
+  // Compute 6-check score and PWR for all tracked OBs
+  const finalizeZoneScore = (z: RawBaseZone): void => {
+    const { checks, pwr } = evaluateZoneSixChecksAndPwr({
+      closedBars,
+      bull: z.bull,
+      choch: z.choch,
+      originIndex: z.originIndex,
+      eIndex: z.eIndex,
+      eVolume: z.eVolume,
+      breakIndex: z.breakIndex ?? z.endIdx,
+      top: z.top,
+      bottom: z.bottom,
+      tests: z.tests,
+      rangeMid,
+      htfBias: S.htfBias,
     });
-    fillDeadZones.push(...pass2Minor.dead);
-
-    const halfL = Math.max(1, Math.round(primaryL / 2));
-    const pass2Half =
-      halfL !== minorL
-        ? scanCandidatesPass(closedBars, tf, A, {
-            ...S,
-            weak: true,
-            minor: true,
-            pivotLengthOverride: halfL,
-            requireBosConfirm: false,
-          })
-        : { alive: [] as RawBaseZone[], dead: [] as RawBaseZone[] };
-    fillDeadZones.push(...pass2Half.dead);
-
-    const seenFillIdxs = new Set<string>(
-      allAlive.map((z) => `${z.supply ? 'S' : 'B'}-${z.startIdx}`)
-    );
-
-    const fillRawPool: RawBaseZone[] = [];
-    for (const fz of [...pass2Minor.alive, ...pass2Half.alive]) {
-      const key = `${fz.supply ? 'S' : 'B'}-${fz.startIdx}`;
-      if (seenFillIdxs.has(key)) continue;
-      seenFillIdxs.add(key);
-
-      // Only consider candidates on the valid side of price
-      const sideOk = fz.supply
-        ? fz.top >= closedRefPrice
-        : fz.bottom <= closedRefPrice;
-      if (!sideOk) continue;
-
-      const isConsumed = Boolean(fz.consumed || fz.pctLeft < 15 || fz.tests >= 3);
-      fz.consumed = isConsumed;
-      if (isConsumed && !S.showConsumedZones) {
-        consumedHiddenCount++;
-        allAlive.push({
-          ...fz,
-          overlapPct: 0,
-          overlapDecision: 'dropped:consumed',
-          droppedReason: 'consumed',
-        });
-        continue;
-      }
-      fillRawPool.push(fz);
-    }
-
-    // Rank minor candidates: closer to price first (so last-10-candles swings win nearest slot), then BOS-confirmed, fresher, higher score
-    fillRawPool.sort((a, b) => {
-      const distDiff = getDist(a) - getDist(b);
-      if (Math.abs(distDiff) > 1e-6) return distDiff;
-      if (Boolean(b.bosConfirmed) !== Boolean(a.bosConfirmed)) {
-        return b.bosConfirmed ? 1 : -1;
-      }
-      if (a.tests !== b.tests) return a.tests - b.tests;
-      if (b.pctLeft !== a.pctLeft) return b.pctLeft - a.pctLeft;
-      return b.score - a.score;
-    });
-
-    for (const fz of fillRawPool) {
-      let maxOverlapRatio = 0;
-      let overlapsExisting = false;
-      for (const orig of dedupedAlive) {
-        if (doZonesOverlap(orig, fz)) {
-          overlapsExisting = true;
-          const ratio = Math.max(0.01, computeSameSideOverlapRatio(orig, fz));
-          if (ratio > maxOverlapRatio) maxOverlapRatio = ratio;
-        }
-      }
-      const overlapPct = Math.max(
-        overlapsExisting ? 1 : 0,
-        Math.round(maxOverlapRatio * 100)
-      );
-      if (overlapsExisting) {
-        overlapDroppedCount++;
-        allAlive.push({
-          ...fz,
-          overlapPct,
-          overlapDecision: `dropped:overlap(${overlapPct}%)`,
-          droppedReason: 'overlap',
-        });
-      } else {
-        const copy: RawBaseZone = {
-          ...fz,
-          weak: true,
-          minor: true,
-          overlapPct: 0,
-          overlapDecision: 'kept:no-overlap(minor-fill)',
-          droppedReason: 'kept',
-        };
-        dedupedAlive.push(copy);
-        allAlive.push(copy);
-      }
-    }
-  }
-
-  // Selection per timeframe: up to 3 SELL above price + 3 BUY below price.
-  // - Nearest slot on each side: a minor zone (L=3 / L=2) may win the nearest slot ONLY if:
-  //     height >= 0.5 * ATR AND price moved away from it by >= 1.0 * ATR after the pivot (displacement) AND pctLeft >= 50.
-  //   Otherwise it can only fill remaining slots.
-  // - Remaining slots on each side (up to 3 total): prefer primary (!minor) before minor fill, near before far, nearest distance, higher score.
-  const farThreshold = S.farAtr * atr14;
-
-  const isMinorEligibleForNearestSlot = (z: RawBaseZone): boolean => {
-    if (!z.minor) return true;
-    const refAtr = Math.max(0.1, z.pivotAtr || atr14);
-    const height = z.top - z.bottom;
-    const rawHeight = z.untrimmedTop - z.untrimmedBottom;
-    const heightOk =
-      height >= 0.5 * refAtr - 1e-6 && rawHeight >= 0.5 * refAtr - 1e-6;
-    const dispOk = z.dep >= 1.0 - 1e-6;
-    const pctOk = z.pctLeft >= 50;
-    return heightOk && dispOk && pctOk;
-  };
-
-  const rankForSideSelection = (a: RawBaseZone, b: RawBaseZone): number => {
-    const aMinor = Boolean(a.minor);
-    const bMinor = Boolean(b.minor);
-    if (aMinor !== bMinor) return aMinor ? 1 : -1;
-
-    const aFar = getDist(a) > farThreshold;
-    const bFar = getDist(b) > farThreshold;
-    if (aFar !== bFar) return aFar ? 1 : -1;
-
-    const distDiff = getDist(a) - getDist(b);
-    if (Math.abs(distDiff) > 1e-6) return distDiff;
-    if (b.score !== a.score) return b.score - a.score;
-    return b.time - a.time;
-  };
-
-  const rankByNearest = (a: RawBaseZone, b: RawBaseZone): number => {
-    const aFar = getDist(a) > farThreshold;
-    const bFar = getDist(b) > farThreshold;
-    if (aFar !== bFar) return aFar ? 1 : -1;
-    const distDiff = getDist(a) - getDist(b);
-    if (Math.abs(distDiff) > 1e-6) return distDiff;
-    const aMinor = Boolean(a.minor);
-    const bMinor = Boolean(b.minor);
-    if (aMinor !== bMinor) return aMinor ? 1 : -1;
-    if (b.score !== a.score) return b.score - a.score;
-    return b.time - a.time;
-  };
-
-  const selectSideZones = (
-    candidates: RawBaseZone[],
-    maxCount: number
-  ): RawBaseZone[] => {
-    if (candidates.length === 0 || maxCount <= 0) return [];
-    const eligibleForNearest = candidates
-      .filter(isMinorEligibleForNearestSlot)
-      .sort(rankByNearest);
-
-    const picked: RawBaseZone[] = [];
-    if (eligibleForNearest.length > 0) {
-      picked.push(eligibleForNearest[0]);
-    }
-
-    const remaining = candidates
-      .filter((z) => z !== picked[0])
-      .sort(rankForSideSelection);
-
-    for (const z of remaining) {
-      if (picked.length >= maxCount) break;
-      picked.push(z);
-    }
-    return picked;
-  };
-
-  const sellCandidates = dedupedAlive.filter((z) => z.supply);
-  const buyCandidates = dedupedAlive.filter((z) => !z.supply);
-
-  const keptSells = selectSideZones(sellCandidates, maxPerSideSell);
-  const keptBuys = selectSideZones(buyCandidates, maxPerSideBuy);
-
-  const keptSet = new Set<RawBaseZone>([...keptSells, ...keptBuys]);
-
-  for (const z of allAlive) {
+    z.checks = checks;
+    z.pwr = pwr;
+    z.score = checks.length;
     const dist = getDist(z);
     z.farDecision =
       dist > farThreshold
         ? `FAR (>${S.farAtr}xATR)`
         : `NEAR (<=${S.farAtr}xATR)`;
+  };
+
+  const liveOBs = liveTrackers.map((t) => t.zone);
+  for (const z of liveOBs) finalizeZoneScore(z);
+  for (const z of skippedOverlapOBs) finalizeZoneScore(z);
+  for (const dz of deadOBs) {
+    finalizeZoneScore(dz);
+    dz.overlapPct = 0;
+    dz.overlapDecision = 'n/a:dead';
   }
 
-  for (const z of dedupedAlive) {
+  // Phase 4 Rule 6: Do NOT hide tested zones unless hideConsumed is true
+  const allAlive: RawBaseZone[] = [...skippedOverlapOBs];
+  const selectablePool: RawBaseZone[] = [];
+  let consumedHiddenCount = 0;
+
+  for (const z of liveOBs) {
+    const isConsumed = Boolean(z.consumed || z.pctLeft < 10 || z.tests >= 4);
+    z.consumed = isConsumed;
+    if (isConsumed && S.hideConsumed) {
+      consumedHiddenCount++;
+      allAlive.push({
+        ...z,
+        overlapDecision: 'dropped:consumed',
+        droppedReason: 'consumed',
+      });
+    } else {
+      selectablePool.push(z);
+      allAlive.push(z);
+    }
+  }
+
+  // Phase 4 Rule 7: SELECTION — Show the NEWEST N alive zones per side by creation order (not nearest)
+  const bullPool = selectablePool.filter((z) => z.bull);
+  const bearPool = selectablePool.filter((z) => !z.bull);
+
+  const keptBull = bullPool.slice(-S.zonesPerSide);
+  const keptBear = bearPool.slice(-S.zonesPerSide);
+  const keptSet = new Set<RawBaseZone>([...keptBull, ...keptBear]);
+
+  for (const z of selectablePool) {
     if (keptSet.has(z)) {
       z.droppedReason = 'kept';
     } else {
@@ -1551,38 +1643,22 @@ export function findZonesWithAudit(
     }
   }
 
-  // Include dead zones from both primary and minor/fill passes (deduplicated by side + pivot index)
-  const seenDeadIdxs = new Set<string>();
-  const combinedDead: RawBaseZone[] = [];
-  for (const dz of [...pass1.dead, ...fillDeadZones]) {
-    const key = `${dz.supply ? 'S' : 'B'}-${dz.startIdx}`;
-    if (seenDeadIdxs.has(key)) continue;
-    seenDeadIdxs.add(key);
-    combinedDead.push(dz);
-  }
+  const selectedBuy = keptBull.length;
+  const selectedSell = keptBear.length;
+  const keptZones: RawBaseZone[] = [...keptBull, ...keptBear];
 
-  const sideValidDead = combinedDead.sort((a, b) => b.top - a.top);
-  for (const dz of sideValidDead) {
-    const dist = getDist(dz);
-    dz.overlapPct = 0;
-    dz.overlapDecision = 'n/a:dead';
-    dz.farDecision =
-      dist > farThreshold
-        ? `FAR (>${S.farAtr}xATR)`
-        : `NEAR (<=${S.farAtr}xATR)`;
-  }
-
-  const selected = Array.from(keptSet).sort((a, b) => b.top - a.top);
+  const selected = [...keptZones].sort((a, b) => b.top - a.top);
   allAlive.sort((a, b) => b.top - a.top);
+  const sortedDead = [...deadOBs].sort((a, b) => b.top - a.top);
 
   const debugCounts: ZoneDebugCounts = {
-    pivotsFound: pass1.pivotsFound,
-    confirmedPivots: pass1.confirmedPivots,
-    deadCount: sideValidDead.length,
+    pivotsFound,
+    confirmedPivots: structures.length,
+    deadCount: sortedDead.length,
     consumedHidden: consumedHiddenCount,
     overlapDropped: overlapDroppedCount,
-    selectedBuy: keptBuys.length,
-    selectedSell: keptSells.length,
+    selectedBuy,
+    selectedSell,
   };
 
   if (zoneAuditCache.size > 64) {
@@ -1592,7 +1668,8 @@ export function findZonesWithAudit(
   zoneAuditCache.set(cacheKey, {
     selected,
     allAliveBeforeSelection: allAlive,
-    deadBeforeSelection: sideValidDead,
+    deadBeforeSelection: sortedDead,
+    structures,
     retestModeUsed: S.retestMode,
     atr14,
     closedRefPrice,
@@ -1602,7 +1679,8 @@ export function findZonesWithAudit(
   return {
     selected,
     allAliveBeforeSelection: allAlive,
-    deadBeforeSelection: sideValidDead,
+    deadBeforeSelection: sortedDead,
+    structures,
     retestModeUsed: S.retestMode,
     atr14,
     livePrice: px,
@@ -1611,7 +1689,7 @@ export function findZonesWithAudit(
 }
 
 export function findZones(
-  c: Array<Pick<Candle, 'time' | 'open' | 'high' | 'low' | 'close'>>,
+  c: Array<Pick<Candle, 'time' | 'open' | 'high' | 'low' | 'close'> & { tickVolume?: number }>,
   tf: RedSniperTimeframe,
   o: FindZonesOptions = {}
 ): RawBaseZone[] {
@@ -1639,7 +1717,6 @@ export function computeTfBias(bars: Candle[]): {
   if (!bars || bars.length < 20) {
     return { bias: 'NEUT', ema20: null, ema50: null };
   }
-  // Use closed candles (exclude forming candle if > 20) for stable bias
   const closed = bars.length > 20 ? bars.slice(0, bars.length - 1) : bars;
   const closes = closed.map((b) => b.close);
   const ema20Arr = computeEmaSeries(closes, 20);
@@ -1705,7 +1782,6 @@ export function computeMultiTimeframeVerdict(
 
 /**
  * Compute relative tickVolume on the zone base + leg-out candles vs the 20-bar average.
- * Returns null if tickVolume is missing for any bar in the base+leg-out window or if the 20-bar avg has no valid volume.
  */
 export function computeBaseAndLegRelativeTickVolume(
   bars: Array<Pick<Candle, 'tickVolume'>>,
@@ -1752,15 +1828,6 @@ export function computeBaseAndLegRelativeTickVolume(
   return Number((zoneAvgVol / avg20).toFixed(1));
 }
 
-/**
- * POWER 0-99 = round(100 * (
- *   0.40 * (score/10 capped 1) +
- *   0.25 * relativeTickVolume (zone base + leg-out candles tickVolume vs 20-bar average, cap 2.5x) +
- *   0.20 * freshness (pctLeft/100) +
- *   0.15 * HTF alignment (1H and 4H EMA20/EMA50 agree with the zone side)
- * ))
- * If tickVolume is missing, drop that term (0.25) and re-normalize (0.40 + 0.20 + 0.15 = 0.75).
- */
 export function computeZonePowerAndBreakdown(params: {
   side: ZoneSide;
   score: number;
@@ -1847,75 +1914,20 @@ export function computeZonePowerAndBreakdown(params: {
   };
 }
 
+/**
+ * Compute internal structure break events on CLOSED candles only (L=5 internal pivots).
+ */
 export function computeStructureEvents(
   tf: RedSniperTimeframe,
-  bars: Candle[]
+  bars: Candle[],
+  formingCandleIncluded: boolean = true
 ): StructureEvent[] {
-  const closed = bars && bars.length > 1 ? bars.slice(0, bars.length - 1) : bars || [];
-  const n = closed.length;
-  if (n < 15) return [];
-
-  const pivotLen = getPivotLengthForTf(tf);
-  const effLen = Math.min(pivotLen, Math.max(2, Math.floor((n - 3) / 3)));
-  let lastHigh: { idx: number; time: number; price: number; broken: boolean } | null = null;
-  let lastLow: { idx: number; time: number; price: number; broken: boolean } | null = null;
-  let trend: 1 | -1 | 0 = 0;
-  const events: StructureEvent[] = [];
-
-  for (let i = effLen * 2; i < n; i++) {
-    const pIdx = i - effLen;
-    const pBar = closed[pIdx];
-    let isHigh = true;
-    let isLow = true;
-
-    for (let k = pIdx - effLen; k <= pIdx + effLen; k++) {
-      if (k === pIdx) continue;
-      if (closed[k].high > pBar.high) isHigh = false;
-      if (closed[k].low < pBar.low) isLow = false;
-    }
-
-    if (isHigh) {
-      lastHigh = { idx: pIdx, time: pBar.time, price: pBar.high, broken: false };
-    }
-    if (isLow) {
-      lastLow = { idx: pIdx, time: pBar.time, price: pBar.low, broken: false };
-    }
-
-    const bar = closed[i];
-    if (lastHigh && !lastHigh.broken && bar.close > lastHigh.price) {
-      const kind: StructureKind = trend === -1 ? 'CHoCH' : 'BOS';
-      events.push({
-        id: `${tf}-BULL-${lastHigh.time}-${bar.time}`,
-        tf,
-        dir: 'BULL',
-        kind,
-        pivotIdx: lastHigh.idx,
-        pivotTime: lastHigh.time,
-        price: lastHigh.price,
-        breakIdx: i,
-        breakTime: bar.time,
-      });
-      lastHigh.broken = true;
-      trend = 1;
-    } else if (lastLow && !lastLow.broken && bar.close < lastLow.price) {
-      const kind: StructureKind = trend === 1 ? 'CHoCH' : 'BOS';
-      events.push({
-        id: `${tf}-BEAR-${lastLow.time}-${bar.time}`,
-        tf,
-        dir: 'BEAR',
-        kind,
-        pivotIdx: lastLow.idx,
-        pivotTime: lastLow.time,
-        price: lastLow.price,
-        breakIdx: i,
-        breakTime: bar.time,
-      });
-      lastLow.broken = true;
-      trend = -1;
-    }
-  }
-
-  return events.slice(-14);
+  if (!bars || bars.length < 12) return [];
+  const closed =
+    formingCandleIncluded && bars.length > 1
+      ? bars.slice(0, bars.length - 1)
+      : bars;
+  return scanMergedStructuresOnClosedBars(closed, tf).events;
 }
 
 export function getZoneDistancePts(
@@ -1928,10 +1940,6 @@ export function getZoneDistancePts(
   return Number((livePrice - zone.top).toFixed(2));
 }
 
-/**
- * FAR RULE: zones further than farAtr * ATR14 (default 25 * ATR14) are marked FAR,
- * hidden from chart boxes and from the bot, shown as edge markers.
- */
 export function isZoneNear(
   zone: RedSniperZone,
   livePrice: number,
@@ -1950,6 +1958,499 @@ export function computeZoneProximityScore(
   const scale = Math.max(1.5, zone.atr14 * 2);
   const proximity = 1 / (1 + dist / scale);
   return zone.power * proximity;
+}
+
+/**
+ * One-line label inside the box:
+ * "SELL • A+ • CHoCH • FRESH • PWR 85"
+ * (BUY/SELL, "A+" only if A+, CHoCH or BOS, FRESH or TESTED, PWR n).
+ */
+export function formatZoneChartLabel(
+  zone: Pick<
+    RedSniperZone,
+    'side' | 'bull' | 'isAPlus' | 'checks' | 'choch' | 'tests' | 'retests' | 'pwr' | 'power'
+  >
+): string {
+  const side: ZoneSide = zone.side || (zone.bull ? 'BUY' : 'SELL');
+  const isAPlus = Boolean(
+    zone.isAPlus || (Array.isArray(zone.checks) && zone.checks.length >= 4)
+  );
+  const structTag = zone.choch ? 'CHoCH' : 'BOS';
+  const testsCount =
+    typeof zone.tests === 'number'
+      ? zone.tests
+      : typeof zone.retests === 'number'
+      ? zone.retests
+      : 0;
+  const freshTag = testsCount <= 0 ? 'FRESH' : 'TESTED';
+  const pwrVal =
+    typeof zone.pwr === 'number' && Number.isFinite(zone.pwr)
+      ? zone.pwr
+      : zone.power;
+
+  const parts: string[] = [side];
+  if (isAPlus) {
+    parts.push('A+');
+  }
+  parts.push(structTag, freshTag, `PWR ${pwrVal}`);
+  return parts.join(' • ');
+}
+
+/**
+ * Structure Lines Specification:
+ * For the last 8 breaks draw a dashed horizontal line from the broken pivot to the break candle,
+ * with the text "CHoCH" or "BOS" centered on the line (above the line for bullish, below for bearish;
+ * green = bullish, dark red = bearish, CHoCH brighter than BOS).
+ */
+export function getVisibleStructureLineSpecs(
+  structures: ReadonlyArray<StructureEvent>,
+  maxBreaks: number = 8
+): StructureLineRenderSpec[] {
+  if (!structures || structures.length === 0) return [];
+  const cap = Math.max(1, maxBreaks);
+  const recent = structures.slice(-cap);
+  return recent.map((st) => {
+    const bull = Boolean(st.bull ?? st.dir === 'BULL');
+    const choch = Boolean(st.choch ?? st.kind === 'CHoCH');
+    const text: 'CHoCH' | 'BOS' = choch ? 'CHoCH' : 'BOS';
+    const level = typeof st.level === 'number' ? st.level : st.price;
+    const strokeColor = bull
+      ? choch
+        ? 'rgba(47, 208, 143, 0.95)'
+        : 'rgba(47, 208, 143, 0.52)'
+      : choch
+      ? 'rgba(216, 58, 76, 0.95)'
+      : 'rgba(139, 20, 32, 0.72)';
+    const textColor = bull
+      ? choch
+        ? '#7ff0c0'
+        : 'rgba(47, 208, 143, 0.85)'
+      : choch
+      ? '#ff8a96'
+      : 'rgba(216, 58, 76, 0.85)';
+    return {
+      id: st.id,
+      bull,
+      choch,
+      text,
+      pivotIndex: st.pivotIndex ?? st.pivotIdx,
+      breakIndex: st.breakIndex ?? st.breakIdx,
+      pivotTime: st.pivotTime,
+      breakTime: st.breakTime,
+      level,
+      labelPlacement: bull ? 'ABOVE' : 'BELOW',
+      strokeColor,
+      textColor,
+      lineWidth: choch ? 1.4 : 1.0,
+    };
+  });
+}
+
+/**
+ * Phase 4 Rule 8:
+ * - Draw zone boxes with TRUE price height (minimum 14px, no stacking shift).
+ * - Label inside the box, one line, font 9px, no line crossing the text.
+ * - If two labels collide vertically (|a.labelY - b.labelY| < 12), hide the lower-PWR label.
+ */
+export function layoutChartZoneBoxes(params: {
+  zones: ReadonlyArray<RedSniperZone>;
+  priceToY: (price: number) => number | null;
+  timeToX: (time: number) => number;
+  plotWidth: number;
+  plotHeight: number;
+  highlightedZoneId?: string | null;
+  defaultAtr?: number;
+  minBoxHeightPx?: number;
+  gapPx?: number;
+}): {
+  boxes: ChartZoneBoxLayout[];
+  clippedTopZones: RedSniperZone[];
+  clippedBottomZones: RedSniperZone[];
+} {
+  const {
+    zones,
+    priceToY,
+    timeToX,
+    plotWidth,
+    plotHeight,
+    highlightedZoneId = null,
+    defaultAtr = 2.0,
+    minBoxHeightPx = MIN_ZONE_BOX_HEIGHT_PX,
+  } = params;
+
+  const minH = Math.max(MIN_ZONE_BOX_HEIGHT_PX, minBoxHeightPx);
+  const clippedTopZones: RedSniperZone[] = [];
+  const clippedBottomZones: RedSniperZone[] = [];
+
+  const boxes: ChartZoneBoxLayout[] = [];
+
+  for (const z of zones) {
+    const yTopRaw = priceToY(z.top);
+    const yBotRaw = priceToY(z.bottom);
+    if (yTopRaw === null || yBotRaw === null) continue;
+
+    const rawMin = Math.min(yTopRaw, yBotRaw);
+    const rawMax = Math.max(yTopRaw, yBotRaw);
+
+    if (rawMax < 0) {
+      clippedTopZones.push(z);
+      continue;
+    }
+    if (rawMin > plotHeight) {
+      clippedBottomZones.push(z);
+      continue;
+    }
+
+    const clampedMin = Math.max(0, rawMin);
+    const clampedMax = Math.min(plotHeight, rawMax);
+    const rawH = Math.max(0, clampedMax - clampedMin);
+    const boxH = Math.max(minH, rawH);
+
+    // True price height (expanded symmetrically around midpoint only if rawH < minH, NO stacking shift)
+    let boxTop = rawH >= minH ? clampedMin : (clampedMin + clampedMax) / 2 - boxH / 2;
+    let boxBot = boxTop + boxH;
+
+    if (boxTop < 0) {
+      boxTop = 0;
+      boxBot = Math.min(plotHeight, boxH);
+    } else if (boxBot > plotHeight) {
+      boxBot = plotHeight;
+      boxTop = Math.max(0, plotHeight - boxH);
+    }
+
+    const xStart = Math.max(0, Math.min(plotWidth - 36, timeToX(z.time)));
+    const xEnd = plotWidth;
+    const boxW = Math.max(36, xEnd - xStart);
+    const refAtr = Math.max(0.5, z.atr14 || defaultAtr || 2.0);
+    const isDimmed = Boolean(z.isFar || z.distancePts > 6 * refAtr);
+    const isAPlus = Boolean(
+      z.isAPlus || (Array.isArray(z.checks) && z.checks.length >= 4)
+    );
+
+    const labelText = formatZoneChartLabel(z);
+    const labelY = boxTop + boxH / 2;
+    const labelX = xStart + 8;
+    const pwrBarH = 2;
+    const pwrBarY = boxBot - pwrBarH;
+    const pwrBarX = xStart;
+    const pwrBarMaxW = boxW;
+    const pwrVal = z.pwr ?? z.power;
+    const pwrBarW = Math.round((pwrBarMaxW * clamp(pwrVal, 0, 100)) / 100);
+
+    boxes.push({
+      zone: z,
+      xStart,
+      xEnd,
+      boxW,
+      boxTop,
+      boxBot,
+      boxH,
+      labelText,
+      labelX,
+      labelY,
+      labelInsideBox: labelY > boxTop && labelY < boxBot,
+      showLabel: true,
+      pwrBarX,
+      pwrBarY,
+      pwrBarW,
+      pwrBarMaxW,
+      pwrBarH,
+      isAPlus,
+      isHighlighted: z.id === highlightedZoneId,
+      isDimmed,
+    });
+  }
+
+  // If two labels collide vertically (|a.labelY - b.labelY| < 12), hide the lower-PWR label
+  const byPwrDesc = [...boxes].sort(
+    (a, b) =>
+      (b.zone.pwr ?? b.zone.power) - (a.zone.pwr ?? a.zone.power) ||
+      (b.isHighlighted ? 1 : 0) - (a.isHighlighted ? 1 : 0)
+  );
+  const acceptedLabelYs: number[] = [];
+  for (const b of byPwrDesc) {
+    const collides = acceptedLabelYs.some((y) => Math.abs(y - b.labelY) < 12);
+    if (collides) {
+      b.showLabel = false;
+    } else {
+      b.showLabel = true;
+      acceptedLabelYs.push(b.labelY);
+    }
+  }
+
+  boxes.sort((a, b) => a.boxTop - b.boxTop || b.zone.top - a.zone.top);
+
+  return { boxes, clippedTopZones, clippedBottomZones };
+}
+
+export interface ZoneComparisonMatch {
+  expectedPrice: number;
+  side: ZoneSide | 'ANY';
+  matched: boolean;
+  distancePts: number | null;
+  matchedZone: {
+    id: string;
+    tf: RedSniperTimeframe;
+    side: ZoneSide;
+    bottom: number;
+    top: number;
+    mid: number;
+    diffPts: number;
+    choch?: boolean;
+  } | null;
+}
+
+export interface ZoneComparisonReport {
+  tf: RedSniperTimeframe;
+  tolerancePts: number;
+  totalExpected: number;
+  expectedCount: number;
+  matchedCount: number;
+  missingCount: number;
+  matches: ZoneComparisonMatch[];
+  missingPrices: number[];
+}
+
+/**
+ * Phase 4 Rule 9: Compare detected zones against a list of expected zone prices
+ * (per TF, per side) and report which are matched within `tolerancePts` (default 3 points) and which are missing.
+ */
+export function compareZonesWithReference(
+  detectedZones: ReadonlyArray<
+    Pick<RedSniperZone, 'id' | 'tf' | 'side' | 'bottom' | 'top'> & { choch?: boolean }
+  >,
+  referenceInput: string | ReadonlyArray<number | { price: number; side?: ZoneSide }>,
+  tfOrSide: RedSniperTimeframe | ZoneSide = '15m',
+  tolerancePts: number = 3,
+  maybeTf?: RedSniperTimeframe
+): ZoneComparisonReport {
+  const defaultSide: ZoneSide | 'ANY' =
+    tfOrSide === 'BUY' || tfOrSide === 'SELL' ? tfOrSide : 'ANY';
+  const tf: RedSniperTimeframe =
+    maybeTf ??
+    (tfOrSide !== 'BUY' && tfOrSide !== 'SELL' ? tfOrSide : '15m');
+
+  const parsedExpected: Array<{ price: number; side: ZoneSide | 'ANY' }> = [];
+
+  if (typeof referenceInput === 'string') {
+    const lines = referenceInput.split(/[\r\n;]+/);
+    let currentSide: ZoneSide | 'ANY' = defaultSide;
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const upper = line.toUpperCase();
+      if (upper.includes('SELL') || upper.includes('BEAR')) {
+        currentSide = 'SELL';
+      } else if (upper.includes('BUY') || upper.includes('BULL')) {
+        currentSide = 'BUY';
+      }
+      const numMatches = line.match(/\d+(?:\.\d+)?/g);
+      if (numMatches) {
+        for (const nm of numMatches) {
+          const val = Number(nm);
+          if (Number.isFinite(val) && val > 100) {
+            parsedExpected.push({ price: val, side: currentSide });
+          }
+        }
+      }
+    }
+  } else if (Array.isArray(referenceInput)) {
+    for (const item of referenceInput) {
+      if (typeof item === 'number' && Number.isFinite(item)) {
+        parsedExpected.push({ price: item, side: defaultSide });
+      } else if (item && typeof item === 'object' && Number.isFinite(item.price)) {
+        parsedExpected.push({
+          price: item.price,
+          side: item.side === 'BUY' || item.side === 'SELL' ? item.side : defaultSide,
+        });
+      }
+    }
+  }
+
+  const matches: ZoneComparisonMatch[] = [];
+  const missingPrices: number[] = [];
+
+  for (const exp of parsedExpected) {
+    const candidates = detectedZones.filter(
+      (z) => exp.side === 'ANY' || z.side === exp.side
+    );
+
+    let bestZone: (Pick<RedSniperZone, 'id' | 'tf' | 'side' | 'bottom' | 'top'> & {
+      choch?: boolean;
+    }) | null = null;
+    let bestDiff = Infinity;
+
+    for (const z of candidates) {
+      const distToRange =
+        exp.price >= z.bottom && exp.price <= z.top
+          ? 0
+          : exp.price < z.bottom
+          ? z.bottom - exp.price
+          : exp.price - z.top;
+      if (distToRange < bestDiff) {
+        bestDiff = distToRange;
+        bestZone = z;
+      }
+    }
+
+    const nearestDist = Number.isFinite(bestDiff) ? Number(bestDiff.toFixed(2)) : null;
+
+    if (bestZone && bestDiff <= tolerancePts + 1e-6) {
+      const mid = Number(((bestZone.top + bestZone.bottom) / 2).toFixed(2));
+      matches.push({
+        expectedPrice: exp.price,
+        side: exp.side,
+        matched: true,
+        distancePts: nearestDist,
+        matchedZone: {
+          id: bestZone.id,
+          tf: bestZone.tf,
+          side: bestZone.side,
+          bottom: bestZone.bottom,
+          top: bestZone.top,
+          mid,
+          diffPts: Number(bestDiff.toFixed(2)),
+          choch: bestZone.choch,
+        },
+      });
+    } else {
+      missingPrices.push(exp.price);
+      matches.push({
+        expectedPrice: exp.price,
+        side: exp.side,
+        matched: false,
+        distancePts: nearestDist,
+        matchedZone: null,
+      });
+    }
+  }
+
+  const matchedCount = matches.filter((m) => m.matched).length;
+  return {
+    tf,
+    tolerancePts,
+    totalExpected: parsedExpected.length,
+    expectedCount: parsedExpected.length,
+    matchedCount,
+    missingCount: parsedExpected.length - matchedCount,
+    matches,
+    missingPrices,
+  };
+}
+
+/**
+ * Phase 3 Optional "Auction" Toggle:
+ * VAH / POC / VAL lines computed from the last 288 M5 candles.
+ * Spread each candle's volume over 1-point bins, POC = highest bin,
+ * value area = expand from POC until 70% of total volume.
+ */
+export function computeAuctionProfileFromM5(
+  m5Candles: ReadonlyArray<Pick<Candle, 'high' | 'low' | 'close'> & { tickVolume?: number }>,
+  lookback: number = 288
+): AuctionProfileResult | null {
+  if (!m5Candles || m5Candles.length === 0) return null;
+  const closed =
+    m5Candles.length > 1
+      ? m5Candles.slice(Math.max(0, m5Candles.length - 1 - lookback), m5Candles.length - 1)
+      : m5Candles.slice(-lookback);
+  if (closed.length === 0) return null;
+
+  let minLow = Infinity;
+  let maxHigh = -Infinity;
+  for (const c of closed) {
+    if (Number.isFinite(c.low) && c.low < minLow) minLow = c.low;
+    if (Number.isFinite(c.high) && c.high > maxHigh) maxHigh = c.high;
+  }
+  if (!Number.isFinite(minLow) || !Number.isFinite(maxHigh) || maxHigh < minLow) {
+    return null;
+  }
+
+  const minBin = Math.floor(minLow);
+  const maxBin = Math.floor(maxHigh);
+  const binsCount = Math.max(1, Math.min(5000, maxBin - minBin + 1));
+  const bins = new Float64Array(binsCount);
+  let totalVolume = 0;
+
+  for (const c of closed) {
+    const vol =
+      typeof c.tickVolume === 'number' && Number.isFinite(c.tickVolume) && c.tickVolume > 0
+        ? c.tickVolume
+        : 1;
+    const bStart = clamp(Math.floor(Math.min(c.low, c.high)) - minBin, 0, binsCount - 1);
+    const bEnd = clamp(Math.floor(Math.max(c.low, c.high)) - minBin, 0, binsCount - 1);
+    const span = Math.max(1, bEnd - bStart + 1);
+    const share = vol / span;
+    for (let b = bStart; b <= bEnd; b++) {
+      bins[b] += share;
+    }
+    totalVolume += vol;
+  }
+
+  if (totalVolume <= 0) return null;
+
+  let pocIdx = 0;
+  let maxBinVol = -1;
+  for (let i = 0; i < binsCount; i++) {
+    if (bins[i] > maxBinVol) {
+      maxBinVol = bins[i];
+      pocIdx = i;
+    }
+  }
+
+  const targetVol = 0.7 * totalVolume;
+  let lowIdx = pocIdx;
+  let highIdx = pocIdx;
+  let accumVol = bins[pocIdx];
+
+  while (accumVol < targetVol && (lowIdx > 0 || highIdx < binsCount - 1)) {
+    const downVol = lowIdx > 0 ? bins[lowIdx - 1] : -1;
+    const upVol = highIdx < binsCount - 1 ? bins[highIdx + 1] : -1;
+    if (upVol >= downVol && highIdx < binsCount - 1) {
+      highIdx++;
+      accumVol += bins[highIdx];
+    } else if (lowIdx > 0) {
+      lowIdx--;
+      accumVol += bins[lowIdx];
+    } else {
+      break;
+    }
+  }
+
+  const poc = Number((minBin + pocIdx + 0.5).toFixed(2));
+  const val = Number((minBin + lowIdx).toFixed(2));
+  const vah = Number((minBin + highIdx + 1).toFixed(2));
+
+  return {
+    poc,
+    vah: Math.max(poc, vah),
+    val: Math.min(poc, val),
+    totalVolume: Number(totalVolume.toFixed(2)),
+    binsCount,
+  };
+}
+
+/**
+ * Compute Equilibrium (EQ) level and range high/low over the timeframe lookback window.
+ */
+export function computeEquilibriumLevel(
+  candles: ReadonlyArray<Pick<Candle, 'high' | 'low'>>,
+  tf: RedSniperTimeframe = '5m'
+): { eq: number; rangeHigh: number; rangeLow: number } | null {
+  if (!candles || candles.length === 0) return null;
+  const closed = candles.length > 1 ? candles.slice(0, candles.length - 1) : candles;
+  const start = Math.max(0, closed.length - getLookbackForTf(tf));
+  let rangeHigh = -Infinity;
+  let rangeLow = Infinity;
+  for (let i = start; i < closed.length; i++) {
+    if (closed[i].high > rangeHigh) rangeHigh = closed[i].high;
+    if (closed[i].low < rangeLow) rangeLow = closed[i].low;
+  }
+  if (!Number.isFinite(rangeHigh) || !Number.isFinite(rangeLow)) return null;
+  return {
+    eq: Number(((rangeHigh + rangeLow) / 2).toFixed(2)),
+    rangeHigh: Number(rangeHigh.toFixed(2)),
+    rangeLow: Number(rangeLow.toFixed(2)),
+  };
 }
 
 export function computeBoxOverlapRatio(
@@ -2010,23 +2511,20 @@ export function mergeOverlappingMultiTfZones(
   return merged;
 }
 
-const A_PLUS_HTF_SET = new Set<RedSniperTimeframe>(['15m', '30m', '1h', '4h']);
+const A_PLUS_HTF_SET = new Set<RedSniperTimeframe>(['15m', '30m', '1h', '4h', '1d']);
 
 /**
- * Apply multi-timeframe confluence (Issue 3):
- * Give "A+" ONLY when ALL are true:
- * - Same side overlap with a HIGHER timeframe zone (15m/30m/1H/4H, strictly higher than current TF)
- * - pctLeft >= 50
- * - retests <= 1
- * Power +6 only for A+ (capped at 99).
+ * Annotates multi-timeframe confluence while preserving 6-check A+ (checks.length >= 4) and PWR formula.
  */
 export function applyMultiTimeframeConfluence(
   zone: RedSniperZone,
   htfZones: ReadonlyArray<Pick<RedSniperZone, 'tf' | 'side' | 'bottom' | 'top' | 'consumed' | 'pctLeft' | 'retests'>>
 ): RedSniperZone {
-  if (!htfZones || htfZones.length === 0) return zone;
-  if (zone.consumed || zone.pctLeft < 50 || zone.retests > 1) {
-    return zone;
+  const isPhase2APlus = Array.isArray(zone.checks) && zone.checks.length >= 4;
+  if (!htfZones || htfZones.length === 0) {
+    return isPhase2APlus !== Boolean(zone.isAPlus)
+      ? { ...zone, isAPlus: isPhase2APlus }
+      : zone;
   }
 
   const currentRank = TF_ORDER_RANK[zone.tf] ?? 1;
@@ -2035,32 +2533,29 @@ export function applyMultiTimeframeConfluence(
   for (const hz of htfZones) {
     if (!A_PLUS_HTF_SET.has(hz.tf)) continue;
     const htfRank = TF_ORDER_RANK[hz.tf] ?? 0;
-    if (htfRank <= currentRank) continue; // must be strictly higher timeframe than zone.tf
-    if (hz.side !== zone.side) continue; // must be same side
-    if (hz.consumed || (typeof hz.pctLeft === 'number' && hz.pctLeft < 15) || (typeof hz.retests === 'number' && hz.retests >= 3)) {
-      continue;
-    }
+    if (htfRank <= currentRank) continue;
+    if (hz.side !== zone.side) continue;
     if (doZonesOverlap(zone, hz)) {
       if (!matchingTfs.includes(hz.tf)) {
         matchingTfs.push(hz.tf);
       }
     }
   }
-  if (matchingTfs.length === 0) return zone;
 
-  const boostedPower = clamp(zone.power + 6, 0, 99);
-  const minorTag = zone.minor ? 'minor · ' : '';
-  const chartLabel = `${zone.side} · A+ · ${minorTag}${zone.status} · PWR ${boostedPower} · ${zone.pctLeft}%`;
-  const breakdown = zone.breakdown.includes('A+')
+  if (matchingTfs.length === 0) {
+    return isPhase2APlus !== Boolean(zone.isAPlus)
+      ? { ...zone, isAPlus: isPhase2APlus }
+      : zone;
+  }
+
+  const breakdown = zone.breakdown.includes('MTF')
     ? zone.breakdown
-    : `${zone.breakdown} · A+ (${matchingTfs.join('/')})`;
+    : `${zone.breakdown} · MTF (${matchingTfs.join('/')})`;
 
   return {
     ...zone,
-    isAPlus: true,
+    isAPlus: isPhase2APlus,
     confluenceTfs: matchingTfs,
-    power: boostedPower,
-    chartLabel,
     breakdown,
   };
 }
@@ -2078,13 +2573,14 @@ export function analyzeTimeframe(
   bias4h: TfBias,
   livePriceOverride?: number | null,
   settings: RedSniperSettings = DEFAULT_RED_SNIPER_SETTINGS,
-  formingCandleIncluded: boolean = true
+  formingCandleIncluded: boolean = true,
+  nextHigherTfBiasOverride?: TfBias
 ): TimeframeAnalysis {
   const effectiveRetestMode: RetestMode = settings.retestModeOverride
     ? settings.retestMode
     : resolveDefaultRetestModeForTf(tf);
 
-  if (!bars || bars.length < 5) {
+  if (!bars || bars.length < 12) {
     const { bias, ema20, ema50 } = computeTfBias(bars);
     return {
       tf,
@@ -2110,7 +2606,6 @@ export function analyzeTimeframe(
     };
   }
 
-  // Do NOT inject livePriceOverride into the forming candle (prevents intra-bar flicker/repaint)
   const closedBars =
     formingCandleIncluded && bars.length > 1
       ? bars.slice(0, bars.length - 1)
@@ -2119,6 +2614,11 @@ export function analyzeTimeframe(
   const closedRefPrice = closedBars[closedN - 1].close;
   const lastClosedCandleTime = closedBars[closedN - 1].time;
   const farAtr = clamp(settings.farAtr ?? 25, 10, 60);
+  const zonesPerSide = clamp(settings.zonesPerSide ?? 5, 3, 5);
+  const hideConsumed =
+    typeof settings.hideConsumed === 'boolean'
+      ? settings.hideConsumed
+      : !settings.showConsumedZones;
   const px =
     typeof livePriceOverride === 'number' &&
     Number.isFinite(livePriceOverride) &&
@@ -2126,26 +2626,31 @@ export function analyzeTimeframe(
       ? livePriceOverride
       : closedRefPrice;
 
+  // Next higher TF bias for the 6-check score
+  const effectiveHtfBias: TfBias =
+    nextHigherTfBiasOverride ??
+    (tf === '1h' || tf === '4h' || tf === '1d' ? bias4h : bias1h);
+
   const volFirst = closedBars[0]?.tickVolume ?? 0;
   const volLast = closedBars[closedN - 1]?.tickVolume ?? 0;
-  const tfSettingsHash = `${settings.zoneMode}|${settings.maxZonesPerTf}|${effectiveRetestMode}|${settings.retestGapAtr}|${settings.heightCapAtr}|${settings.deadAtr}|${farAtr}|${settings.showConsumedZones ? 1 : 0}|${formingCandleIncluded ? 1 : 0}|${settings.weightScore ?? 0.4}|${settings.weightVolume ?? 0.25}|${settings.weightFreshness ?? 0.2}|${settings.weightHtf ?? 0.15}|${bias1h}|${bias4h}|${volFirst}:${volLast}`;
+  const tfSettingsHash = `${settings.zoneMode}|${zonesPerSide}|${INDICATOR_PARITY_SHIFT ? 1 : 0}|${effectiveRetestMode}|${settings.retestGapAtr}|${settings.deadAtr}|${farAtr}|${hideConsumed ? 1 : 0}|${formingCandleIncluded ? 1 : 0}|${effectiveHtfBias}|${bias1h}|${bias4h}|${volFirst}:${volLast}`;
   const closedSig = computeClosedBarsSignature(closedBars);
   const tfCacheKey = `${tf}::${lastClosedCandleTime}::${tfSettingsHash}::${closedSig}`;
 
   const cachedTf = tfAnalysisCache.get(tfCacheKey);
   if (cachedTf) {
-    // Also touch findZonesWithAudit so zoneCacheHits increments consistently
     findZonesWithAudit(bars, tf, {
       mode: settings.zoneMode,
-      maxZones: settings.maxZonesPerTf,
+      zonesPerSide,
+      hideConsumed,
+      parityShift: INDICATOR_PARITY_SHIFT,
       retestMode: effectiveRetestMode,
       retestGapAtr: settings.retestGapAtr,
-      heightCapAtr: settings.heightCapAtr,
       deadAtr: settings.deadAtr,
       farAtr,
-      showConsumedZones: settings.showConsumedZones,
       formingCandleIncluded,
       livePrice: px,
+      htfBias: effectiveHtfBias,
     });
 
     const updateZoneForLivePx = (z: RedSniperZone): RedSniperZone => {
@@ -2156,11 +2661,7 @@ export function analyzeTimeframe(
     };
 
     const updatedZones = cachedTf.zones.map(updateZoneForLivePx);
-    const updatedChartZones = [...updatedZones]
-      .filter((z) => settings.showConsumedZones || (!z.consumed && z.pctLeft >= 15 && z.retests < 3))
-      .sort((a, b) => a.distancePts - b.distancePts || b.power - a.power)
-      .slice(0, clamp(settings.maxZonesPerTf ?? 6, 3, 8))
-      .sort((a, b) => b.top - a.top);
+    const updatedChartZones = [...updatedZones].sort((a, b) => b.top - a.top);
 
     return {
       ...cachedTf,
@@ -2171,37 +2672,48 @@ export function analyzeTimeframe(
   }
 
   const { bias, ema20, ema50 } = computeTfBias(bars);
-  const structures = computeStructureEvents(tf, bars);
 
   const audit = findZonesWithAudit(bars, tf, {
     mode: settings.zoneMode,
-    maxZones: settings.maxZonesPerTf,
+    zonesPerSide,
+    hideConsumed,
+    parityShift: INDICATOR_PARITY_SHIFT,
     retestMode: effectiveRetestMode,
     retestGapAtr: settings.retestGapAtr,
-    heightCapAtr: settings.heightCapAtr,
     deadAtr: settings.deadAtr,
     farAtr,
-    showConsumedZones: settings.showConsumedZones,
     formingCandleIncluded,
     livePrice: closedRefPrice,
+    htfBias: effectiveHtfBias,
   });
 
+  const structures = audit.structures ?? computeStructureEvents(tf, bars, formingCandleIncluded);
   const atr14 = Number(audit.atr14.toFixed(2));
 
   const toRedSniperZone = (rz: RawBaseZone): RedSniperZone => {
-    const side: ZoneSide = rz.supply ? 'SELL' : 'BUY';
+    const bull = Boolean(rz.bull ?? !rz.supply);
+    const side: ZoneSide = bull ? 'BUY' : 'SELL';
     const top = Number(rz.top.toFixed(2));
     const bottom = Number(rz.bottom.toFixed(2));
     const anchor = Number(((top + bottom) / 2).toFixed(2));
-    const proximal = rz.supply ? bottom : top;
-    const distal = rz.supply ? top : bottom;
+    const proximal = bull ? top : bottom;
+    const distal = bull ? bottom : top;
     const width = Number((top - bottom).toFixed(2));
     const distancePts = getZoneDistancePts({ bottom, top }, px);
     const isFar = distancePts > farAtr * atr14;
     const status = resolveZoneStatus(rz.tests, rz.pctLeft);
-    // Issue 2: Near-consumed (< 15% left or 3+ retests) is marked consumed
-    const consumed = Boolean(rz.consumed || rz.pctLeft < 15 || rz.tests >= 3);
-    const isMinor = Boolean(rz.minor || rz.weak);
+    const consumed = Boolean(rz.consumed || rz.pctLeft < 10 || rz.tests >= 4);
+    const originIndex = rz.originIndex ?? rz.startIdx;
+    const choch = Boolean(rz.choch);
+    const checks = Array.isArray(rz.checks) ? rz.checks : [];
+    const pwr =
+      typeof rz.pwr === 'number' && Number.isFinite(rz.pwr)
+        ? rz.pwr
+        : Math.min(96, 40 + 9 * checks.length);
+    const isAPlus = checks.length >= 4;
+    const key =
+      rz.key ||
+      `${tf}-${bull ? 'BULL' : 'BEAR'}-${originIndex}-${bottom.toFixed(2)}-${top.toFixed(2)}`;
 
     const volMult = computeBaseAndLegRelativeTickVolume(
       closedBars,
@@ -2209,35 +2721,35 @@ export function analyzeTimeframe(
       rz.endIdx
     );
 
-    const { power: rawPower, htfOk, htfLabel, breakdown: baseBreakdown } =
-      computeZonePowerAndBreakdown({
-        side,
-        score: rz.score,
-        retests: rz.tests,
-        pctLeft: rz.pctLeft,
-        departureAtr: rz.dep,
-        volMult,
-        bias1h,
-        bias4h,
-        weights: {
-          score: settings.weightScore,
-          volume: settings.weightVolume,
-          freshness: settings.weightFreshness,
-          htf: settings.weightHtf,
-        },
-      });
+    const targetBias: TfBias = bull ? 'BULL' : 'BEAR';
+    const htfOk = effectiveHtfBias === targetBias;
+    const htfLabel: 'HTF ok' | 'HTF 1/2' | 'HTF against' = htfOk
+      ? 'HTF ok'
+      : effectiveHtfBias === 'NEUT'
+      ? 'HTF 1/2'
+      : 'HTF against';
 
-    // Issue 1: Minor fill zones get power -5 and "minor" tag
-    const power = isMinor ? clamp(rawPower - 5, 1, 99) : rawPower;
-    const breakdown = isMinor ? `${baseBreakdown} · minor` : baseBreakdown;
-    const minorTag = isMinor ? 'minor · ' : '';
-    const chartLabel = `${side} · ${minorTag}${status} · PWR ${power} · ${rz.pctLeft}%`;
+    const checksLabel = checks.length > 0 ? checks.join('+') : 'NONE';
+    const breakdown = `${choch ? 'CHoCH' : 'BOS'} · checks(${checks.length}/6: ${checksLabel}) · tests ${rz.tests} · ${rz.pctLeft}% left · ${htfLabel}`;
+    const chartLabel = formatZoneChartLabel({
+      side,
+      bull,
+      isAPlus,
+      checks,
+      choch,
+      tests: rz.tests,
+      retests: rz.tests,
+      pwr,
+      power: pwr,
+    });
 
     return {
       id: `${tf}-${side}-${rz.time}-${bottom.toFixed(2)}-${top.toFixed(2)}`,
+      key,
       tf,
+      bull,
       side,
-      supply: rz.supply,
+      supply: !bull,
       top,
       bottom,
       anchor,
@@ -2245,27 +2757,34 @@ export function analyzeTimeframe(
       distal,
       width,
       time: rz.time,
+      originIndex,
+      eIndex: rz.eIndex,
+      eVolume: rz.eVolume,
       startIdx: rz.startIdx,
       endIdx: rz.endIdx,
       baseN: rz.baseN,
+      choch,
+      tests: rz.tests,
       retests: rz.tests,
       independentRetests: rz.independentRetests,
       touchCandles: rz.touchCandles,
       touches: rz.touchCandles,
       pctLeft: rz.pctLeft,
+      pwr,
+      checks,
       consumed,
       sweep: rz.sweep,
       entryConfirmed: Boolean(rz.entryConfirmed),
-      isAPlus: false,
+      isAPlus,
       trimmed: rz.trimmed,
-      weak: isMinor,
-      minor: isMinor,
-      bosConfirmed: rz.bosConfirmed,
+      weak: false,
+      minor: false,
+      bosConfirmed: true,
       isFar,
       distancePts,
       status,
-      score: rz.score,
-      power,
+      score: checks.length,
+      power: pwr,
       departureAtr: Number(rz.dep.toFixed(2)),
       volMult,
       htfOk,
@@ -2276,17 +2795,12 @@ export function analyzeTimeframe(
     };
   };
 
-  // Issue 2: Hide zones with pctLeft < 15 or 3+ retests from chart, list and bot
-  // Issue 1: Do not drop a zone only because it is far; far zones fill empty slots (dimmed)
+  // Phase 4 Rule 6 & 7: Use the exact selected list (newest N per side, do not hide tested zones unless hideConsumed=true)
   const zones: RedSniperZone[] = audit.selected
     .map(toRedSniperZone)
-    .filter((z) => settings.showConsumedZones || (!z.consumed && z.pctLeft >= 15 && z.retests < 3));
+    .filter((z) => !hideConsumed || (!z.consumed && z.pctLeft >= 10 && z.retests < 4));
 
-  const chartZones = [...zones]
-    .filter((z) => settings.showConsumedZones || (!z.consumed && z.pctLeft >= 15 && z.retests < 3))
-    .sort((a, b) => a.distancePts - b.distancePts || b.power - a.power)
-    .slice(0, clamp(settings.maxZonesPerTf ?? 6, 3, 8))
-    .sort((a, b) => b.top - a.top);
+  const chartZones = [...zones].sort((a, b) => b.top - a.top);
 
   const aliveDebugEntries: ZoneDebugEntry[] = audit.allAliveBeforeSelection.map(
     (rz) => {
@@ -2409,16 +2923,11 @@ export interface DeadAtrDiffZone {
 
 export interface DeadAtrComparisonBucket {
   deadAtr: number;
-  aliveCount: number; // total side-valid alive zones before selection
-  aliveAfterOverlapCount: number; // alive zones after overlap rule
+  aliveCount: number;
+  aliveAfterOverlapCount: number;
   aliveAtThisValueButDeadAt025: DeadAtrDiffZone[];
 }
 
-/**
- * DEAD-RULE COMPARISON TOOL (dev only, in the debug export):
- * For deadAtr in [0.25, 0.5, 0.75, 1.0] outputs the number of alive zones on the active timeframe
- * and the list of zones that are alive at that value but dead at 0.25 (LO-HI, side, retests, pctLeft).
- */
 export function computeDeadAtrComparison(
   bars: Candle[],
   tf: RedSniperTimeframe,
@@ -2448,7 +2957,6 @@ export function computeDeadAtrComparison(
     maxZones: settings.maxZonesPerTf,
     retestMode: effectiveRetestMode,
     retestGapAtr: settings.retestGapAtr,
-    heightCapAtr: settings.heightCapAtr,
     deadAtr: 0.25,
     farAtr: settings.farAtr,
     showConsumedZones: true,
@@ -2466,7 +2974,6 @@ export function computeDeadAtrComparison(
             maxZones: settings.maxZonesPerTf,
             retestMode: effectiveRetestMode,
             retestGapAtr: settings.retestGapAtr,
-            heightCapAtr: settings.heightCapAtr,
             deadAtr: deadVal,
             farAtr: settings.farAtr,
             showConsumedZones: true,
@@ -2493,7 +3000,7 @@ export function computeDeadAtrComparison(
               independentRetests: z.independentRetests,
               touchCandles: z.touchCandles,
               pctLeft: z.pctLeft,
-              consumed: Boolean(z.consumed || z.pctLeft < 15 || z.tests >= 3),
+              consumed: Boolean(z.consumed || z.pctLeft < 10 || z.tests >= 4),
               overlapDecision: z.overlapDecision ?? 'kept:no-overlap',
             }));
 
@@ -2518,9 +3025,15 @@ export function analyzeAllTimeframes(
   verdict: VerdictResult;
 } {
   const verdict = computeMultiTimeframeVerdict(barsMap);
-  const byTf = {} as Record<RedSniperTimeframe, TimeframeAnalysis>;
-
+  const biasByTf = {} as Record<RedSniperTimeframe, TfBias>;
   for (const tf of RED_SNIPER_TIMEFRAMES) {
+    biasByTf[tf] = computeTfBias(barsMap[tf] || []).bias;
+  }
+
+  const byTf = {} as Record<RedSniperTimeframe, TimeframeAnalysis>;
+  for (const tf of RED_SNIPER_TIMEFRAMES) {
+    const nextHtf = getNextHigherTf(tf);
+    const nextHtfBias = biasByTf[nextHtf] ?? verdict.bias1h;
     byTf[tf] = analyzeTimeframe(
       tf,
       barsMap[tf] || [],
@@ -2528,16 +3041,17 @@ export function analyzeAllTimeframes(
       verdict.bias4h,
       livePriceOverride,
       settings,
-      formingCandleIncluded
+      formingCandleIncluded,
+      nextHtfBias
     );
   }
 
-  // Issue 3: Multi-timeframe confluence pool = higher timeframes (15m, 30m, 1H, 4H)
   const htfConfluencePool: RedSniperZone[] = [
     ...(byTf['15m']?.zones || []),
     ...(byTf['30m']?.zones || []),
     ...(byTf['1h']?.zones || []),
     ...(byTf['4h']?.zones || []),
+    ...(byTf['1d']?.zones || []),
   ];
 
   const allZones: RedSniperZone[] = [];
@@ -2567,10 +3081,11 @@ export function computeTp3Target(
   entry: number,
   riskPoints: number,
   allZones: RedSniperZone[],
-  preferredTf: RedSniperTimeframe
+  preferredTf: RedSniperTimeframe,
+  rangeExtreme?: number | null
 ): { tp3: number; isLiquidity: boolean } {
-  const minTargetDist = 2.5 * riskPoints;
-  const maxTargetDist = 6.0 * riskPoints;
+  // Phase 3 rule: TP3 = nearest opposite zone or range extreme (min 2R, else 3R)
+  const minTargetDist = 2.0 * riskPoints;
 
   const oppSide: ZoneSide = side === 'BUY' ? 'SELL' : 'BUY';
   const candidates = allZones.filter((z) => z.side === oppSide);
@@ -2581,8 +3096,8 @@ export function computeTp3Target(
   for (const z of candidates) {
     const edge = side === 'BUY' ? z.bottom : z.top;
     const dist = side === 'BUY' ? edge - entry : entry - edge;
-    if (dist >= minTargetDist && dist <= maxTargetDist) {
-      const weightDist = z.tf === preferredTf ? dist * 0.9 : dist;
+    if (dist >= minTargetDist - 1e-6) {
+      const weightDist = z.tf === preferredTf ? dist * 0.98 : dist;
       if (weightDist < bestDist) {
         bestDist = weightDist;
         bestEdge = edge;
@@ -2594,6 +3109,13 @@ export function computeTp3Target(
     return { tp3: Number(bestEdge.toFixed(2)), isLiquidity: true };
   }
 
+  if (typeof rangeExtreme === 'number' && Number.isFinite(rangeExtreme)) {
+    const extDist = side === 'BUY' ? rangeExtreme - entry : entry - rangeExtreme;
+    if (extDist >= minTargetDist - 1e-6) {
+      return { tp3: Number(rangeExtreme.toFixed(2)), isLiquidity: true };
+    }
+  }
+
   const fallback =
     side === 'BUY'
       ? Number((entry + 3 * riskPoints).toFixed(2))
@@ -2601,6 +3123,15 @@ export function computeTp3Target(
   return { tp3: fallback, isLiquidity: false };
 }
 
+/**
+ * Phase 3 Trade Plan & Auto Sniper Builder:
+ * - Status badge: PENDING BUY/SELL LIMIT (x pts away) or IN ZONE (wait for M1 confirmation).
+ * - Entry = zone near edge (top for BUY, bottom for SELL).
+ * - Stop Loss = far edge +/- 0.1 ATR (bottom - 0.1*ATR for BUY, top + 0.1*ATR for SELL).
+ * - Lot from balance x risk %.
+ * - TP1 = 1R, TP2 = 2R, TP3 = nearest opposite zone or range extreme (min 2R, else 3R).
+ * - Chips: CHoCH/BOS, score x/6. Warning if score < 4 ("not A+, use caution").
+ */
 export function buildZoneTradeParameters(
   zone: RedSniperZone,
   entryPrice: number,
@@ -2608,29 +3139,26 @@ export function buildZoneTradeParameters(
   allZones: RedSniperZone[],
   bias1h: TfBias,
   bias4h: TfBias,
-  settings: RedSniperSettings = DEFAULT_RED_SNIPER_SETTINGS
+  settings: RedSniperSettings = DEFAULT_RED_SNIPER_SETTINGS,
+  rangeExtreme?: number | null
 ): PendingTradePlan {
   const side: 'BUY' | 'SELL' = zone.side;
-  const slBuffer = clamp(settings.slBuffer ?? 1.5, 1.0, 3.0);
   const riskPct = clamp(settings.riskPct ?? 1.5, 0.25, 10.0);
   const maxRiskPoints = Math.max(0, settings.maxRiskPoints ?? 15);
 
-  const distalEdge = side === 'BUY' ? zone.bottom : zone.top;
-  let sl =
-    side === 'BUY'
-      ? Number((distalEdge - slBuffer).toFixed(2))
-      : Number((distalEdge + slBuffer).toFixed(2));
+  const nearEdge = side === 'BUY' ? zone.top : zone.bottom;
+  const farEdge = side === 'BUY' ? zone.bottom : zone.top;
+  const atr = Math.max(0.1, zone.atr14 || 2.0);
+  const slOffset = Number((0.1 * atr).toFixed(2));
 
-  let riskPoints = side === 'BUY' ? entryPrice - sl : sl - entryPrice;
-  if (riskPoints < 2.0) {
-    riskPoints = 2.0;
-    sl =
-      side === 'BUY'
-        ? Number((entryPrice - 2.0).toFixed(2))
-        : Number((entryPrice + 2.0).toFixed(2));
-  } else {
-    riskPoints = Number(riskPoints.toFixed(2));
-  }
+  const entry = Number(nearEdge.toFixed(2));
+  const sl =
+    side === 'BUY'
+      ? Number((farEdge - slOffset).toFixed(2))
+      : Number((farEdge + slOffset).toFixed(2));
+
+  const rawRiskPoints = side === 'BUY' ? entry - sl : sl - entry;
+  const riskPoints = Number(Math.max(0.05, rawRiskPoints).toFixed(2));
 
   const maxRiskSkipped = maxRiskPoints > 0 && riskPoints > maxRiskPoints;
 
@@ -2639,26 +3167,44 @@ export function buildZoneTradeParameters(
 
   const tp1 =
     side === 'BUY'
-      ? Number((entryPrice + riskPoints).toFixed(2))
-      : Number((entryPrice - riskPoints).toFixed(2));
+      ? Number((entry + riskPoints).toFixed(2))
+      : Number((entry - riskPoints).toFixed(2));
   const tp2 =
     side === 'BUY'
-      ? Number((entryPrice + 2 * riskPoints).toFixed(2))
-      : Number((entryPrice - 2 * riskPoints).toFixed(2));
+      ? Number((entry + 2 * riskPoints).toFixed(2))
+      : Number((entry - 2 * riskPoints).toFixed(2));
   const { tp3, isLiquidity } = computeTp3Target(
     side,
-    entryPrice,
+    entry,
     riskPoints,
     allZones,
-    zone.tf
+    zone.tf,
+    rangeExtreme
   );
 
-  const insideZone = entryPrice >= zone.bottom && entryPrice <= zone.top;
+  const refPx =
+    typeof entryPrice === 'number' && Number.isFinite(entryPrice) && entryPrice > 0
+      ? entryPrice
+      : entry;
+  const insideZone = refPx >= zone.bottom && refPx <= zone.top;
   const distance = insideZone
     ? 0
-    : entryPrice < zone.bottom
-    ? Number((zone.bottom - entryPrice).toFixed(2))
-    : Number((entryPrice - zone.top).toFixed(2));
+    : refPx < zone.bottom
+    ? Number((zone.bottom - refPx).toFixed(2))
+    : Number((refPx - zone.top).toFixed(2));
+
+  const statusBadge = insideZone
+    ? 'IN ZONE (wait for M1 confirmation)'
+    : `PENDING ${side} LIMIT (${distance.toFixed(1)} pts away)`;
+
+  const scoreCount = Array.isArray(zone.checks)
+    ? zone.checks.length
+    : typeof zone.score === 'number'
+    ? zone.score
+    : 0;
+  const structureChip: 'CHoCH' | 'BOS' = zone.choch ? 'CHoCH' : 'BOS';
+  const scoreChip = `score ${scoreCount}/6`;
+  const cautionWarning = scoreCount < 4 ? 'not A+, use caution' : null;
 
   const htfBlocked =
     (side === 'BUY' && bias1h === 'BEAR' && bias4h === 'BEAR') ||
@@ -2667,7 +3213,7 @@ export function buildZoneTradeParameters(
   return {
     zone,
     side,
-    entry: Number(entryPrice.toFixed(2)),
+    entry,
     sl,
     tp1,
     tp2,
@@ -2679,6 +3225,11 @@ export function buildZoneTradeParameters(
     insideZone,
     htfBlocked,
     maxRiskSkipped,
+    statusBadge,
+    structureChip,
+    scoreChip,
+    scoreCount,
+    cautionWarning,
   };
 }
 
@@ -2967,7 +3518,7 @@ export function detectRuntimeZoneEvents(params: {
   const logs: BotLogEntry[] = [];
   const isoTime = new Date(nowMs).toISOString();
 
-  // 1) ZONE_NEW: only for zones created while app runs
+  // 1) ZONE_NEW (NEW): only for zones created while app runs
   for (const z of allZones) {
     if (!knownZoneIds.has(z.id)) {
       knownZoneIds.add(z.id);
@@ -2980,8 +3531,9 @@ export function detectRuntimeZoneEvents(params: {
         tf: z.tf,
         side: z.side,
         zoneId: z.id,
-        message: `ZONE_NEW: ${formatTfShort(z.tf)} ${z.side} ${z.bottom.toFixed(2)}-${z.top.toFixed(2)} · PWR ${z.power}`,
+        message: `NEW: ${formatTfShort(z.tf)} ${z.side} ${z.bottom.toFixed(2)}-${z.top.toFixed(2)} · PWR ${z.power}`,
         details: {
+          event: 'NEW',
           bottom: z.bottom,
           top: z.top,
           power: z.power,
@@ -3020,7 +3572,7 @@ export function detectRuntimeZoneEvents(params: {
     }
   }
 
-  // 3) ZONE_DEAD: logged once when zone dies
+  // 3) ZONE_DEAD (BROKEN): logged once when zone is mitigated by close beyond
   for (const dz of deadZones) {
     const dzId = `${dz.time}-${dz.side}-${dz.bottom.toFixed(2)}-${dz.top.toFixed(2)}`;
     if (deadLoggedZoneIds.has(dzId)) continue;
@@ -3033,8 +3585,9 @@ export function detectRuntimeZoneEvents(params: {
       category: 'zone',
       side: dz.side,
       zoneId: dzId,
-      message: `ZONE_DEAD: ${dz.side} ${dz.bottom.toFixed(2)}-${dz.top.toFixed(2)} (closed beyond distal + deadAtr)`,
+      message: `BROKEN: ${dz.side} ${dz.bottom.toFixed(2)}-${dz.top.toFixed(2)} (closed beyond zone)`,
       details: {
+        event: 'BROKEN',
         bottom: dz.bottom,
         top: dz.top,
         deadBeyondAtr: dz.deadBeyondAtr,
@@ -3193,14 +3746,14 @@ export function computeBotStatusLine(
 
   const minPwr = settings.minPowerToTrade ?? 50;
   const farAtr = clamp(settings.farAtr ?? 25, 10, 60);
-  // 2) FAR ZONES (> farAtr * ATR14) and 3) CONSUMED ZONES (pctLeft=0 when !showConsumedZones) are hidden from the bot
+  // FAR ZONES (> farAtr * ATR14) and CONSUMED ZONES (penetration > 90% / pctLeft < 10 or 4+ tests) are hidden from the bot
   const nearQualifying = allZones
     .filter(
       (z) =>
         !z.isFar &&
         (!z.minor || z.bosConfirmed === true) &&
-        (settings.showConsumedZones || (!z.consumed && z.pctLeft >= 15)) &&
-        z.retests < 3 &&
+        (settings.showConsumedZones || (!z.consumed && z.pctLeft >= 10)) &&
+        z.retests < 4 &&
         (z.status === 'FRESH' || z.status === 'TESTED') &&
         z.power >= minPwr &&
         isZoneNear(z, livePrice, farAtr)
@@ -3573,8 +4126,8 @@ export function stepAutoTraderOnTick(
         (z) =>
           !z.isFar &&
           (!z.minor || z.bosConfirmed === true) &&
-          (settings.showConsumedZones || (!z.consumed && z.pctLeft >= 15)) &&
-          z.retests < 3 &&
+          (settings.showConsumedZones || (!z.consumed && z.pctLeft >= 10)) &&
+          z.retests < 4 &&
           (z.status === 'FRESH' || z.status === 'TESTED') &&
           z.retests <= 1 &&
           z.power >= minPwr &&
@@ -3766,13 +4319,13 @@ export function computePerformanceMetrics(
       sessionR['LDN+NY'] = Number((sessionR['LDN+NY'] + t.r).toFixed(2));
   }
 
-  // 4) Refuse to show a confident summary when n < 10 trades or the window is shorter than 12 hours:
+  // Refuse to show a confident summary when n < 30 trades or the window is shorter than 12 hours:
   // label the summary "SMALL SAMPLE - NOT RELIABLE".
   const isShortWindow =
     typeof windowSeconds === 'number' &&
     Number.isFinite(windowSeconds) &&
     windowSeconds < 12 * 3600;
-  const isReliableSample = totalTrades >= 10 && !isShortWindow;
+  const isReliableSample = totalTrades >= 30 && !isShortWindow;
 
   let confidenceLabel: PerformanceMetrics['confidenceLabel'] =
     'SMALL SAMPLE - NOT RELIABLE';
@@ -3780,7 +4333,7 @@ export function computePerformanceMetrics(
 
   if (!isReliableSample) {
     confidenceLabel = 'SMALL SAMPLE - NOT RELIABLE';
-    confidencePct = Math.max(8, Math.round((Math.min(10, totalTrades) / 10) * 25));
+    confidencePct = Math.max(8, Math.round((Math.min(30, totalTrades) / 30) * 25));
   } else if (expectancyR < 0) {
     confidenceLabel = 'NEGATIVE';
     confidencePct = 20;

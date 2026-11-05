@@ -4056,7 +4056,26 @@ app.post('/api/auth/logout', (req, res) => {
   return res.json({ success: true, message: 'Session invalidated on server.' });
 });
 
+const SERVER_PID_FILE = '/tmp/sarraf_server.pid';
+
+function terminateStaleServerProcess() {
+  try {
+    if (fs.existsSync(SERVER_PID_FILE)) {
+      const oldPid = Number(fs.readFileSync(SERVER_PID_FILE, 'utf-8').trim());
+      if (Number.isFinite(oldPid) && oldPid > 1 && oldPid !== process.pid) {
+        try {
+          process.kill(oldPid, 'SIGTERM');
+        } catch {}
+      }
+    }
+    fs.writeFileSync(SERVER_PID_FILE, String(process.pid), 'utf-8');
+  } catch {}
+}
+
 async function startServer() {
+  process.env.DISABLE_HMR = 'true';
+  terminateStaleServerProcess();
+
   // 1. Verify DATA_DIR writability
   const dirCheck = checkDataDirectory();
 
@@ -4091,25 +4110,70 @@ async function startServer() {
   recordServerRestart('SYSTEM_STARTUP');
   triggerAdminTelegramAlert('SERVER_RESTARTED', `SARRAF Full-Stack Engine initialized and online on port ${PORT}.`);
 
-  // 5. Load settings from disk
+  // 5. Load settings & cached state from disk synchronously so routes are ready immediately
   loadSettingsFromDisk();
-
-  // 5b. Load last valid tick from disk
   loadLastTickFromDisk();
   setInterval(saveLastTickToDisk, 60 * 1000);
+  loadCandlesFromDisk();
+  loadSignalsFromDisk();
+  loadCommandSignalsFromDisk();
+  loadSpySignalsFromDisk();
 
-  // 5c. Initialize Red Sniper Store (Firestore in Cloud Run/prod, SQLite in dev/tests)
+  // Mount Vite middleware (with HMR & WebSocket server strictly disabled) or static assets BEFORE binding port 3000
+  if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        watch: null,
+      },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+    });
+  }
+
+  // Bind HTTP server on PORT immediately with EADDRINUSE retry protection
+  await new Promise<void>((resolve) => {
+    let retries = 0;
+    const tryListen = () => {
+      const server = app.listen(PORT, '0.0.0.0', () => {
+        console.log(`[SARRAF SERVER] Full-stack sarraf engine running on http://0.0.0.0:${PORT}`);
+        resolve();
+      });
+      server.on('error', (err: any) => {
+        if (err && err.code === 'EADDRINUSE') {
+          retries += 1;
+          try {
+            server.close();
+          } catch {}
+          if (retries <= 6) {
+            terminateStaleServerProcess();
+            setTimeout(tryListen, 400);
+          } else {
+            console.log(`[SARRAF SERVER] Port ${PORT} is already served by an active primary instance. Exiting duplicate process.`);
+            process.exit(0);
+          }
+          return;
+        }
+        console.warn('[SARRAF SERVER] HTTP server error:', err?.message || err);
+      });
+    };
+    tryListen();
+  });
+
+  // 5c. Initialize Red Sniper Store & seed memory asynchronously after port 3000 is open
   await initActiveStore().catch((err) => {
     console.warn('[RED SNIPER STORE] Startup init warning:', err?.message || err);
   });
   await seedRedSniperMemoryFromStore().catch(() => {});
 
-  // 6. Load candles and signal state BEFORE first upstream connection
-  loadCandlesFromDisk();
-  loadSignalsFromDisk();
-  loadCommandSignalsFromDisk();
-
-  // 7. On start, backfill the missing gap from the candle source before enabling the signal engine
+  // 7. Backfill missing candle gaps and bootstrap history
   await backfillCandleGaps();
   await bootstrapHistoricalCandles();
 
@@ -4138,7 +4202,6 @@ async function startServer() {
   });
 
   // 10b. Initialize SPY S&P 500 Options Feed & Signals
-  loadSpySignalsFromDisk();
   initSpyFeed().catch((err) => {
     console.warn('[SPY FEED] Init warning:', err?.message || err);
   });
@@ -4165,27 +4228,6 @@ async function startServer() {
       });
     } catch {}
   }, 30_000);
-
-  if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: false,
-      },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
-    });
-  }
-
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SARRAF SERVER] Full-stack sarraf engine running on http://0.0.0.0:${PORT}`);
-  });
 }
 
 // Graceful persistence on shutdown
@@ -4205,6 +4247,9 @@ function handleGracefulShutdown(signal: string) {
 }
 
 process.on('uncaughtException', (err: any) => {
+  if (err && err.code === 'EADDRINUSE') {
+    process.exit(0);
+  }
   const cat = err?.name || 'Error';
   const code = err?.code || 'UNCAUGHT';
   console.warn(`[PROCESS EXCEPTION CAUGHT] category=${cat} code=${code}`, err?.stack || err?.message || err);

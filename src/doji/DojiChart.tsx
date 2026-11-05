@@ -235,10 +235,10 @@ export const DojiChart: React.FC<DojiChartProps> = ({
         mouseWheel: true,
         pressedMouseMove: true,
         horzTouchDrag: true,
-        vertTouchDrag: true,
+        vertTouchDrag: false,
       },
       handleScale: {
-        axisPressedMouseMove: { time: true, price: true },
+        axisPressedMouseMove: { time: true, price: false },
         mouseWheel: true,
         pinch: true,
       },
