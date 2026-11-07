@@ -52,6 +52,9 @@ export interface RedSniperSettings {
   weightVolume: number; // default 0.25
   weightFreshness: number; // default 0.20
   weightHtf: number; // default 0.15
+  maxZoneHeightAtr?: number; // default 2.0 (if a zone is taller, clip its far side so height = maxZoneHeightAtr x ATR and mark "clipped")
+  dailyAlignmentUtcHour?: number; // default 0 (used when rebuilding 1D from M1)
+  h4AlignmentOffsetHours?: number; // default 0 (used when rebuilding 4H from M1)
 }
 
 export const RED_SNIPER_SETTINGS_STORAGE_KEY = 'redSniperSettings.v3';
@@ -80,6 +83,9 @@ export const DEFAULT_RED_SNIPER_SETTINGS: RedSniperSettings = {
   weightVolume: 0.25,
   weightFreshness: 0.2,
   weightHtf: 0.15,
+  maxZoneHeightAtr: 2.0,
+  dailyAlignmentUtcHour: 0,
+  h4AlignmentOffsetHours: 0,
 };
 
 export const PIVOT_LENGTH_BY_TF: Record<RedSniperTimeframe, number> = {
@@ -196,6 +202,9 @@ export interface RawBaseZone {
   bottom: number;
   untrimmedTop: number;
   untrimmedBottom: number;
+  unclippedTop?: number;
+  unclippedBottom?: number;
+  clipped?: boolean;
   trimmed: boolean;
   weak: boolean;
   minor?: boolean;
@@ -234,6 +243,7 @@ export interface FindZonesOptions {
   zonesPerSide?: number;
   hideConsumed?: boolean;
   parityShift?: boolean;
+  maxZoneHeightAtr?: number;
   retestMode?: RetestMode;
   retestGapAtr?: number;
   retestTolAtr?: number;
@@ -262,6 +272,9 @@ export interface ZoneDebugEntry {
   score: number;
   power: number;
   trimmed: boolean;
+  clipped?: boolean;
+  unclippedTop?: number;
+  unclippedBottom?: number;
   weak: boolean;
   minor?: boolean;
   bosConfirmed?: boolean;
@@ -312,6 +325,9 @@ export interface RedSniperZone {
   isAPlus?: boolean;
   confluenceTfs?: RedSniperTimeframe[];
   trimmed: boolean;
+  clipped?: boolean;
+  unclippedTop?: number;
+  unclippedBottom?: number;
   weak: boolean;
   minor?: boolean;
   bosConfirmed?: boolean;
@@ -734,6 +750,21 @@ export function sanitizeRedSniperSettings(
       typeof raw.weightHtf === 'number' && Number.isFinite(raw.weightHtf)
         ? Number(clamp(raw.weightHtf, 0.0, 0.9).toFixed(2))
         : DEFAULT_RED_SNIPER_SETTINGS.weightHtf,
+    maxZoneHeightAtr:
+      typeof raw.maxZoneHeightAtr === 'number' &&
+      Number.isFinite(raw.maxZoneHeightAtr)
+        ? Number(clamp(raw.maxZoneHeightAtr, 0, 10.0).toFixed(2))
+        : DEFAULT_RED_SNIPER_SETTINGS.maxZoneHeightAtr ?? 2.0,
+    dailyAlignmentUtcHour:
+      typeof raw.dailyAlignmentUtcHour === 'number' &&
+      Number.isFinite(raw.dailyAlignmentUtcHour)
+        ? clamp(Math.round(raw.dailyAlignmentUtcHour), -12, 23)
+        : DEFAULT_RED_SNIPER_SETTINGS.dailyAlignmentUtcHour ?? 0,
+    h4AlignmentOffsetHours:
+      typeof raw.h4AlignmentOffsetHours === 'number' &&
+      Number.isFinite(raw.h4AlignmentOffsetHours)
+        ? clamp(Math.round(raw.h4AlignmentOffsetHours), -12, 12)
+        : DEFAULT_RED_SNIPER_SETTINGS.h4AlignmentOffsetHours ?? 0,
   };
 }
 
@@ -1128,8 +1159,126 @@ function computeZoneSettingsHash(S: {
   hideConsumed: boolean;
   formingCandleIncluded: boolean;
   htfBias: TfBias;
+  maxZoneHeightAtr: number;
 }): string {
-  return `${S.mode}|${S.zonesPerSide}|${S.parityShift ? 1 : 0}|${S.retestMode}|${S.retestGapAtr}|${S.retestTolAtr}|${S.deadAtr}|${S.farAtr}|${S.hideConsumed ? 1 : 0}|${S.formingCandleIncluded ? 1 : 0}|${S.htfBias}`;
+  return `${S.mode}|${S.zonesPerSide}|${S.parityShift ? 1 : 0}|${S.retestMode}|${S.retestGapAtr}|${S.retestTolAtr}|${S.deadAtr}|${S.farAtr}|${S.hideConsumed ? 1 : 0}|${S.formingCandleIncluded ? 1 : 0}|${S.htfBias}|${S.maxZoneHeightAtr}`;
+}
+
+export interface OrderBlockBoxResult {
+  top: number;
+  bottom: number;
+  unclippedTop: number;
+  unclippedBottom: number;
+  untrimmedTop: number;
+  untrimmedBottom: number;
+  heightPts: number;
+  heightAtr: number;
+  unclippedHeightPts: number;
+  unclippedHeightAtr: number;
+  trimmed: boolean;
+  clipped: boolean;
+  eIdx: number;
+  eVolume: number;
+}
+
+/**
+ * Computes an Order Block's top/bottom for a given extreme bar index and INDICATOR_PARITY_SHIFT setting,
+ * and applies maxZoneHeightAtr clipping to the far side when height > maxZoneHeightAtr * atr.
+ */
+export function computeOrderBlockBoxForExtreme(
+  closedBars: Array<Pick<Candle, 'time' | 'open' | 'high' | 'low' | 'close'> & { tickVolume?: number }>,
+  extremeIdx: number,
+  bull: boolean,
+  parityShift: boolean,
+  atr: number,
+  maxZoneHeightAtr: number = DEFAULT_RED_SNIPER_SETTINGS.maxZoneHeightAtr ?? 2.0
+): OrderBlockBoxResult {
+  const safeExtremeIdx = clamp(extremeIdx, 0, Math.max(0, closedBars.length - 1));
+  const eIdx = parityShift ? Math.max(0, safeExtremeIdx - 1) : safeExtremeIdx;
+  const extremeCandle = closedBars[safeExtremeIdx];
+  const eCandle = closedBars[eIdx];
+  const eHl2 = (eCandle.high + eCandle.low) / 2;
+  const eHlcc4 = (eCandle.high + eCandle.low + 2 * eCandle.close) / 4;
+
+  let rawTop: number;
+  let rawBottom: number;
+  let trimmed = false;
+
+  if (bull) {
+    rawBottom = extremeCandle.low;
+    rawTop = eHl2 >= rawBottom ? eHl2 : (extremeCandle.high + extremeCandle.low) / 2;
+    const mid = (rawTop + rawBottom) / 2;
+    if (mid < Math.min(eCandle.open, eCandle.close) && rawTop > eHlcc4) {
+      rawTop = mid;
+      trimmed = true;
+    }
+  } else {
+    rawTop = extremeCandle.high;
+    rawBottom = eHl2 <= rawTop ? eHl2 : (extremeCandle.high + extremeCandle.low) / 2;
+    const mid = (rawTop + rawBottom) / 2;
+    if (mid > Math.max(eCandle.open, eCandle.close) && rawBottom < eHlcc4) {
+      rawBottom = mid;
+      trimmed = true;
+    }
+  }
+
+  if (rawTop - rawBottom < 0.05) {
+    if (bull) rawTop = rawBottom + 0.05;
+    else rawBottom = rawTop - 0.05;
+  }
+
+  const unclippedTop = Number(rawTop.toFixed(2));
+  const unclippedBottom = Number(rawBottom.toFixed(2));
+  const safeAtr = Math.max(0.1, atr);
+  const unclippedHeightPts = Number(Math.max(0.05, unclippedTop - unclippedBottom).toFixed(2));
+  const unclippedHeightAtr = Number((unclippedHeightPts / safeAtr).toFixed(2));
+
+  let clipped = false;
+  let finalTop = rawTop;
+  let finalBottom = rawBottom;
+
+  if (
+    typeof maxZoneHeightAtr === 'number' &&
+    Number.isFinite(maxZoneHeightAtr) &&
+    maxZoneHeightAtr > 0
+  ) {
+    const maxHeightPts = maxZoneHeightAtr * safeAtr;
+    if (rawTop - rawBottom > maxHeightPts + 1e-6) {
+      // Clip the far (distal) side so that height = maxZoneHeightAtr * ATR
+      if (bull) {
+        finalBottom = finalTop - maxHeightPts;
+      } else {
+        finalTop = finalBottom + maxHeightPts;
+      }
+      clipped = true;
+    }
+  }
+
+  const top = Number(finalTop.toFixed(2));
+  const bottom = Number(finalBottom.toFixed(2));
+  const heightPts = Number(Math.max(0.05, top - bottom).toFixed(2));
+  const heightAtr = Number((heightPts / safeAtr).toFixed(2));
+  const eVolume =
+    typeof eCandle.tickVolume === 'number' && Number.isFinite(eCandle.tickVolume)
+      ? eCandle.tickVolume
+      : 0;
+
+  return {
+    top,
+    bottom,
+    unclippedTop,
+    unclippedBottom,
+    untrimmedTop: Number((bull ? eHl2 : extremeCandle.high).toFixed(2)),
+    untrimmedBottom: Number((bull ? extremeCandle.low : eHl2).toFixed(2)),
+    heightPts,
+    heightAtr,
+    unclippedHeightPts,
+    unclippedHeightAtr,
+    trimmed,
+    clipped,
+    eIdx,
+    eVolume,
+  };
 }
 
 /**
@@ -1181,6 +1330,10 @@ export function findZonesWithAudit(
   );
   const parityShift =
     typeof o.parityShift === 'boolean' ? o.parityShift : INDICATOR_PARITY_SHIFT;
+  const maxZoneHeightAtr =
+    typeof o.maxZoneHeightAtr === 'number' && Number.isFinite(o.maxZoneHeightAtr)
+      ? Math.max(0, o.maxZoneHeightAtr)
+      : DEFAULT_RED_SNIPER_SETTINGS.maxZoneHeightAtr ?? 2.0;
 
   const S = {
     mode: o.mode ?? ('WICK' as ZoneMode),
@@ -1195,6 +1348,7 @@ export function findZonesWithAudit(
     showConsumedZones: !hideConsumed,
     formingCandleIncluded: o.formingCandleIncluded ?? true,
     htfBias: o.htfBias ?? ('NEUT' as TfBias),
+    maxZoneHeightAtr,
   };
 
   const totalBars = c ? c.length : 0;
@@ -1426,44 +1580,23 @@ export function findZonesWithAudit(
         }
       }
 
-      // Let E be the candle ONE BAR BEFORE the extreme candle when parityShift=true (or extreme itself when false)
-      const eIdx = S.parityShift ? Math.max(0, extremeIdx - 1) : extremeIdx;
       const extremeCandle = closedBars[extremeIdx];
-      const eCandle = closedBars[eIdx];
-      const eHl2 = (eCandle.high + eCandle.low) / 2;
-      const eHlcc4 =
-        (eCandle.high + eCandle.low + 2 * eCandle.close) / 4;
-
-      let rawTop: number;
-      let rawBottom: number;
-      let trimmed = false;
-
-      if (ev.bull) {
-        rawBottom = extremeCandle.low;
-        rawTop = eHl2 >= rawBottom ? eHl2 : (extremeCandle.high + extremeCandle.low) / 2;
-        const mid = (rawTop + rawBottom) / 2;
-        if (mid < Math.min(eCandle.open, eCandle.close) && rawTop > eHlcc4) {
-          rawTop = mid;
-          trimmed = true;
-        }
-      } else {
-        rawTop = extremeCandle.high;
-        rawBottom = eHl2 <= rawTop ? eHl2 : (extremeCandle.high + extremeCandle.low) / 2;
-        const mid = (rawTop + rawBottom) / 2;
-        if (mid > Math.max(eCandle.open, eCandle.close) && rawBottom < eHlcc4) {
-          rawBottom = mid;
-          trimmed = true;
-        }
-      }
-
-      if (rawTop - rawBottom < 0.05) {
-        if (ev.bull) rawTop = rawBottom + 0.05;
-        else rawBottom = rawTop - 0.05;
-      }
-
-      const boxTop = Number(rawTop.toFixed(2));
-      const boxBottom = Number(rawBottom.toFixed(2));
       const pivotAtr = Math.max(0.1, A[extremeIdx] || atr14);
+      const obBox = computeOrderBlockBoxForExtreme(
+        closedBars,
+        extremeIdx,
+        ev.bull,
+        S.parityShift,
+        pivotAtr,
+        S.maxZoneHeightAtr
+      );
+
+      const boxTop = obBox.top;
+      const boxBottom = obBox.bottom;
+      const eIdx = obBox.eIdx;
+      const eVolume = obBox.eVolume;
+      const trimmed = obBox.trimmed;
+      const clipped = obBox.clipped;
 
       // Measure departure in ATR units from OB to break bar
       const depMove = ev.bull
@@ -1472,10 +1605,6 @@ export function findZonesWithAudit(
       const depAtr = Number((depMove / pivotAtr).toFixed(2));
 
       const originIndex = extremeIdx;
-      const eVolume =
-        typeof eCandle.tickVolume === 'number' && Number.isFinite(eCandle.tickVolume)
-          ? eCandle.tickVolume
-          : 0;
       const key = `${tf}-${ev.bull ? 'BULL' : 'BEAR'}-${originIndex}-${boxBottom.toFixed(2)}-${boxTop.toFixed(2)}`;
 
       const candidateZone: RawBaseZone = {
@@ -1491,9 +1620,12 @@ export function findZonesWithAudit(
         breakIndex: i,
         top: boxTop,
         bottom: boxBottom,
-        untrimmedTop: Number((ev.bull ? eHl2 : extremeCandle.high).toFixed(2)),
-        untrimmedBottom: Number((ev.bull ? extremeCandle.low : eHl2).toFixed(2)),
+        untrimmedTop: obBox.untrimmedTop,
+        untrimmedBottom: obBox.untrimmedBottom,
+        unclippedTop: obBox.unclippedTop,
+        unclippedBottom: obBox.unclippedBottom,
         trimmed,
+        clipped,
         weak: false,
         minor: false,
         choch: ev.choch,
@@ -1539,7 +1671,7 @@ export function findZonesWithAudit(
           skippedOverlapOBs.push({
             ...candidateZone,
             overlapPct,
-            overlapDecision: `dropped:overlap(${overlapPct}%)`,
+            overlapDecision: `dropped:overlap(${overlapPct}%)${clipped ? ' [clipped]' : ''}`,
             droppedReason: 'overlap',
           });
           continue;
@@ -1555,7 +1687,7 @@ export function findZonesWithAudit(
         zone: {
           ...candidateZone,
           overlapPct: 0,
-          overlapDecision: 'kept:no-overlap',
+          overlapDecision: clipped ? 'kept:no-overlap (clipped)' : 'kept:no-overlap',
           droppedReason: 'kept',
         },
         away: alreadyOutside,
@@ -2631,9 +2763,15 @@ export function analyzeTimeframe(
     nextHigherTfBiasOverride ??
     (tf === '1h' || tf === '4h' || tf === '1d' ? bias4h : bias1h);
 
+  const maxZoneHeightAtr =
+    typeof settings.maxZoneHeightAtr === 'number' &&
+    Number.isFinite(settings.maxZoneHeightAtr)
+      ? Math.max(0, settings.maxZoneHeightAtr)
+      : DEFAULT_RED_SNIPER_SETTINGS.maxZoneHeightAtr ?? 2.0;
+
   const volFirst = closedBars[0]?.tickVolume ?? 0;
   const volLast = closedBars[closedN - 1]?.tickVolume ?? 0;
-  const tfSettingsHash = `${settings.zoneMode}|${zonesPerSide}|${INDICATOR_PARITY_SHIFT ? 1 : 0}|${effectiveRetestMode}|${settings.retestGapAtr}|${settings.deadAtr}|${farAtr}|${hideConsumed ? 1 : 0}|${formingCandleIncluded ? 1 : 0}|${effectiveHtfBias}|${bias1h}|${bias4h}|${volFirst}:${volLast}`;
+  const tfSettingsHash = `${settings.zoneMode}|${zonesPerSide}|${INDICATOR_PARITY_SHIFT ? 1 : 0}|${effectiveRetestMode}|${settings.retestGapAtr}|${settings.deadAtr}|${farAtr}|${hideConsumed ? 1 : 0}|${formingCandleIncluded ? 1 : 0}|${effectiveHtfBias}|${bias1h}|${bias4h}|${maxZoneHeightAtr}|${volFirst}:${volLast}`;
   const closedSig = computeClosedBarsSignature(closedBars);
   const tfCacheKey = `${tf}::${lastClosedCandleTime}::${tfSettingsHash}::${closedSig}`;
 
@@ -2651,6 +2789,7 @@ export function analyzeTimeframe(
       formingCandleIncluded,
       livePrice: px,
       htfBias: effectiveHtfBias,
+      maxZoneHeightAtr,
     });
 
     const updateZoneForLivePx = (z: RedSniperZone): RedSniperZone => {
@@ -2685,6 +2824,7 @@ export function analyzeTimeframe(
     formingCandleIncluded,
     livePrice: closedRefPrice,
     htfBias: effectiveHtfBias,
+    maxZoneHeightAtr,
   });
 
   const structures = audit.structures ?? computeStructureEvents(tf, bars, formingCandleIncluded);
@@ -2730,7 +2870,8 @@ export function analyzeTimeframe(
       : 'HTF against';
 
     const checksLabel = checks.length > 0 ? checks.join('+') : 'NONE';
-    const breakdown = `${choch ? 'CHoCH' : 'BOS'} · checks(${checks.length}/6: ${checksLabel}) · tests ${rz.tests} · ${rz.pctLeft}% left · ${htfLabel}`;
+    const clippedNote = rz.clipped ? ' · clipped' : '';
+    const breakdown = `${choch ? 'CHoCH' : 'BOS'} · checks(${checks.length}/6: ${checksLabel}) · tests ${rz.tests} · ${rz.pctLeft}% left · ${htfLabel}${clippedNote}`;
     const chartLabel = formatZoneChartLabel({
       side,
       bull,
@@ -2777,6 +2918,9 @@ export function analyzeTimeframe(
       entryConfirmed: Boolean(rz.entryConfirmed),
       isAPlus,
       trimmed: rz.trimmed,
+      clipped: Boolean(rz.clipped),
+      unclippedTop: rz.unclippedTop ?? top,
+      unclippedBottom: rz.unclippedBottom ?? bottom,
       weak: false,
       minor: false,
       bosConfirmed: true,
@@ -2825,6 +2969,9 @@ export function analyzeTimeframe(
         score: z.score,
         power: z.power,
         trimmed: z.trimmed,
+        clipped: Boolean(z.clipped),
+        unclippedTop: z.unclippedTop,
+        unclippedBottom: z.unclippedBottom,
         weak: z.weak,
         minor: z.minor,
         bosConfirmed: z.bosConfirmed,
@@ -2833,7 +2980,9 @@ export function analyzeTimeframe(
         distanceAtr: distAtr,
         isFar: z.isFar,
         overlapPct: rz.overlapPct ?? 0,
-        overlapDecision: rz.overlapDecision ?? 'kept:no-overlap',
+        overlapDecision:
+          rz.overlapDecision ??
+          (z.clipped ? 'kept:no-overlap (clipped)' : 'kept:no-overlap'),
         farDecision:
           rz.farDecision ??
           (z.isFar ? `FAR (>${farAtr}xATR)` : `NEAR (<=${farAtr}xATR)`),
@@ -2861,6 +3010,9 @@ export function analyzeTimeframe(
         score: z.score,
         power: z.power,
         trimmed: z.trimmed,
+        clipped: Boolean(z.clipped),
+        unclippedTop: z.unclippedTop,
+        unclippedBottom: z.unclippedBottom,
         weak: z.weak,
         minor: z.minor,
         bosConfirmed: z.bosConfirmed,
@@ -3024,10 +3176,34 @@ export function analyzeAllTimeframes(
   mergedZones: MergedRedSniperZone[];
   verdict: VerdictResult;
 } {
-  const verdict = computeMultiTimeframeVerdict(barsMap);
+  const h4Offset =
+    typeof settings.h4AlignmentOffsetHours === 'number' &&
+    Number.isFinite(settings.h4AlignmentOffsetHours)
+      ? Math.round(settings.h4AlignmentOffsetHours)
+      : 0;
+  const d1Offset =
+    typeof settings.dailyAlignmentUtcHour === 'number' &&
+    Number.isFinite(settings.dailyAlignmentUtcHour)
+      ? Math.round(settings.dailyAlignmentUtcHour)
+      : 0;
+
+  const m1Bars = barsMap['1m'] || [];
+  const effectiveBarsMap: RedSniperBarsMap = {
+    ...barsMap,
+    '4h':
+      m1Bars.length >= 60 && (h4Offset !== 0 || (barsMap['4h'] || []).length === 0)
+        ? rebuildTimeframeFromM1WithAlignment(m1Bars, '4h', h4Offset)
+        : barsMap['4h'] || [],
+    '1d':
+      m1Bars.length >= 60 && (d1Offset !== 0 || (barsMap['1d'] || []).length === 0)
+        ? rebuildTimeframeFromM1WithAlignment(m1Bars, '1d', d1Offset)
+        : barsMap['1d'] || [],
+  };
+
+  const verdict = computeMultiTimeframeVerdict(effectiveBarsMap);
   const biasByTf = {} as Record<RedSniperTimeframe, TfBias>;
   for (const tf of RED_SNIPER_TIMEFRAMES) {
-    biasByTf[tf] = computeTfBias(barsMap[tf] || []).bias;
+    biasByTf[tf] = computeTfBias(effectiveBarsMap[tf] || []).bias;
   }
 
   const byTf = {} as Record<RedSniperTimeframe, TimeframeAnalysis>;
@@ -3036,7 +3212,7 @@ export function analyzeAllTimeframes(
     const nextHtfBias = biasByTf[nextHtf] ?? verdict.bias1h;
     byTf[tf] = analyzeTimeframe(
       tf,
-      barsMap[tf] || [],
+      effectiveBarsMap[tf] || [],
       verdict.bias1h,
       verdict.bias4h,
       livePriceOverride,
@@ -4982,3 +5158,484 @@ export function runReplay24hToCompletion(
   }
   return state;
 }
+
+/**
+ * PHASE 6 ITEM 1: Backfill Banner State helper for UI & Diagnostics.
+ */
+export interface BackfillBannerViewState {
+  showBanner: boolean;
+  state: 'NOT_RUN' | 'RUNNING' | 'FAILED' | 'COMPLETED';
+  bannerText: string;
+  providerError: string | null;
+  progressPct: number;
+}
+
+export function classifyBackfillErrorText(rawError: string | null | undefined): string {
+  const msg = String(rawError || '').trim();
+  if (!msg) return 'unknown provider error';
+  const lower = msg.toLowerCase();
+  if (lower.includes('rate limit') || lower.includes('429') || lower.includes('too many requests')) {
+    return lower.startsWith('rate limit') ? msg : `rate limit (${msg})`;
+  }
+  if (
+    lower.includes('instrument not found') ||
+    lower.includes('invalid instrument') ||
+    lower.includes('unknown instrument') ||
+    lower.includes('404')
+  ) {
+    return lower.startsWith('instrument not found') ? msg : `instrument not found (${msg})`;
+  }
+  if (
+    lower.includes('network blocked') ||
+    lower.includes('enotfound') ||
+    lower.includes('econnrefused') ||
+    lower.includes('etimedout') ||
+    lower.includes('econnreset') ||
+    lower.includes('fetch failed') ||
+    lower.includes('socket hang up') ||
+    lower.includes('network') ||
+    lower.includes('403') ||
+    lower.includes('401')
+  ) {
+    return lower.startsWith('network blocked') ? msg : `network blocked (${msg})`;
+  }
+  return msg;
+}
+
+export function getBackfillBannerViewState(
+  backfill?: {
+    running?: boolean;
+    status?: 'idle' | 'running' | 'completed' | 'error';
+    progressPct?: number;
+    completedChunks?: number;
+    error?: string | null;
+  } | null
+): BackfillBannerViewState {
+  if (!backfill) {
+    return {
+      showBanner: true,
+      state: 'NOT_RUN',
+      bannerText: 'BACKFILL NOT RUN',
+      providerError: null,
+      progressPct: 0,
+    };
+  }
+  const pct = Math.max(0, Math.min(100, Math.round(backfill.progressPct || 0)));
+  if (backfill.running || backfill.status === 'running') {
+    return {
+      showBanner: true,
+      state: 'RUNNING',
+      bannerText: `BACKFILL RUNNING ${pct}%`,
+      providerError: backfill.error ? classifyBackfillErrorText(backfill.error) : null,
+      progressPct: pct,
+    };
+  }
+  if (backfill.status === 'error' || (backfill.error && backfill.status !== 'completed')) {
+    const errText = classifyBackfillErrorText(backfill.error);
+    return {
+      showBanner: true,
+      state: 'FAILED',
+      bannerText: `BACKFILL FAILED: ${errText}`,
+      providerError: errText,
+      progressPct: pct,
+    };
+  }
+  if (backfill.status === 'completed') {
+    return {
+      showBanner: false,
+      state: 'COMPLETED',
+      bannerText: 'BACKFILL COMPLETED 100%',
+      providerError: null,
+      progressPct: 100,
+    };
+  }
+  return {
+    showBanner: true,
+    state: 'NOT_RUN',
+    bannerText:
+      (backfill.completedChunks || 0) > 0
+        ? `BACKFILL NOT RUN (PAUSED AT ${pct}%)`
+        : 'BACKFILL NOT RUN',
+    providerError: null,
+    progressPct: pct,
+  };
+}
+
+/**
+ * PHASE 6 ITEM 2: Zone Height Parity Report
+ * Lists every alive zone for the selected TF with top, bottom, height in points, height in ATR,
+ * the INDICATOR_PARITY_SHIFT setting used, and side-by-side heights for
+ * INDICATOR_PARITY_SHIFT = true and false on the same zones.
+ */
+export interface ZoneHeightSideStats {
+  parityShift: boolean;
+  top: number;
+  bottom: number;
+  unclippedTop: number;
+  unclippedBottom: number;
+  heightPts: number;
+  heightAtr: number;
+  unclippedHeightPts: number;
+  unclippedHeightAtr: number;
+  clipped: boolean;
+  trimmed: boolean;
+}
+
+export interface ZoneHeightReportRow {
+  id: string;
+  tf: RedSniperTimeframe;
+  side: ZoneSide;
+  bull: boolean;
+  originIndex: number;
+  time: number;
+  timeUtc: string;
+  top: number;
+  bottom: number;
+  unclippedTop: number;
+  unclippedBottom: number;
+  heightPts: number;
+  heightAtr: number;
+  unclippedHeightPts: number;
+  unclippedHeightAtr: number;
+  clipped: boolean;
+  debugMark: string;
+  parityShiftUsed: boolean;
+  maxZoneHeightAtr: number;
+  atr: number;
+  shiftTrue: ZoneHeightSideStats;
+  shiftFalse: ZoneHeightSideStats;
+  heightDiffPts: number;
+}
+
+export interface ZoneHeightReport {
+  tf: RedSniperTimeframe;
+  atr14: number;
+  parityShiftUsed: boolean;
+  maxZoneHeightAtr: number;
+  referenceTargetHint: string;
+  rows: ZoneHeightReportRow[];
+  avgHeightShiftTruePts: number;
+  avgHeightShiftFalsePts: number;
+}
+
+export function computeZoneHeightReport(
+  bars: Candle[],
+  tf: RedSniperTimeframe,
+  settings: RedSniperSettings = DEFAULT_RED_SNIPER_SETTINGS,
+  parityShiftOverride?: boolean,
+  formingCandleIncluded: boolean = true
+): ZoneHeightReport {
+  const parityShiftUsed =
+    typeof parityShiftOverride === 'boolean'
+      ? parityShiftOverride
+      : INDICATOR_PARITY_SHIFT;
+  const maxZoneHeightAtr =
+    typeof settings.maxZoneHeightAtr === 'number' &&
+    Number.isFinite(settings.maxZoneHeightAtr)
+      ? Math.max(0, settings.maxZoneHeightAtr)
+      : DEFAULT_RED_SNIPER_SETTINGS.maxZoneHeightAtr ?? 2.0;
+
+  const referenceTargetHint =
+    tf === '5m'
+      ? '5m reference zones: ~2–6 pts tall'
+      : tf === '15m'
+      ? '15m reference zones: ~8–16 pts tall'
+      : `${tf.toUpperCase()} max height cap: ${maxZoneHeightAtr.toFixed(1)}x ATR`;
+
+  if (!bars || bars.length < 12) {
+    return {
+      tf,
+      atr14: 2.0,
+      parityShiftUsed,
+      maxZoneHeightAtr,
+      referenceTargetHint,
+      rows: [],
+      avgHeightShiftTruePts: 0,
+      avgHeightShiftFalsePts: 0,
+    };
+  }
+
+  const closedBars =
+    formingCandleIncluded && bars.length > 1
+      ? bars.slice(0, bars.length - 1)
+      : bars;
+  const A = atrSeries(closedBars);
+  const atr14 = Number(Math.max(0.1, A[closedBars.length - 1] || 2.0).toFixed(2));
+
+  const zonesPerSide = clamp(settings.zonesPerSide ?? 5, 3, 5);
+  const hideConsumed =
+    typeof settings.hideConsumed === 'boolean'
+      ? settings.hideConsumed
+      : !settings.showConsumedZones;
+
+  const audit = findZonesWithAudit(bars, tf, {
+    mode: settings.zoneMode,
+    zonesPerSide,
+    hideConsumed,
+    parityShift: parityShiftUsed,
+    retestMode: settings.retestModeOverride
+      ? settings.retestMode
+      : resolveDefaultRetestModeForTf(tf),
+    retestGapAtr: settings.retestGapAtr,
+    deadAtr: settings.deadAtr,
+    farAtr: settings.farAtr,
+    formingCandleIncluded,
+    maxZoneHeightAtr,
+  });
+
+  // Alive zones (non-overlap, non-dead)
+  const aliveList = audit.selected;
+
+  const rows: ZoneHeightReportRow[] = aliveList.map((rz) => {
+    const bull = Boolean(rz.bull ?? !rz.supply);
+    const side: ZoneSide = bull ? 'BUY' : 'SELL';
+    const originIdx = clamp(rz.originIndex ?? rz.startIdx, 0, closedBars.length - 1);
+    const zAtr = Math.max(0.1, rz.pivotAtr || A[originIdx] || atr14);
+
+    const boxTrue = computeOrderBlockBoxForExtreme(
+      closedBars,
+      originIdx,
+      bull,
+      true,
+      zAtr,
+      maxZoneHeightAtr
+    );
+    const boxFalse = computeOrderBlockBoxForExtreme(
+      closedBars,
+      originIdx,
+      bull,
+      false,
+      zAtr,
+      maxZoneHeightAtr
+    );
+    const activeBox = parityShiftUsed ? boxTrue : boxFalse;
+
+    return {
+      id: `${tf}-${side}-${rz.time}-${activeBox.bottom.toFixed(2)}-${activeBox.top.toFixed(2)}`,
+      tf,
+      side,
+      bull,
+      originIndex: originIdx,
+      time: rz.time,
+      timeUtc:
+        new Date(rz.time * 1000).toISOString().replace('T', ' ').slice(0, 16) +
+        ' UTC',
+      top: activeBox.top,
+      bottom: activeBox.bottom,
+      unclippedTop: activeBox.unclippedTop,
+      unclippedBottom: activeBox.unclippedBottom,
+      heightPts: activeBox.heightPts,
+      heightAtr: activeBox.heightAtr,
+      unclippedHeightPts: activeBox.unclippedHeightPts,
+      unclippedHeightAtr: activeBox.unclippedHeightAtr,
+      clipped: activeBox.clipped,
+      debugMark: activeBox.clipped ? 'clipped' : 'raw',
+      parityShiftUsed,
+      maxZoneHeightAtr,
+      atr: Number(zAtr.toFixed(2)),
+      shiftTrue: {
+        parityShift: true,
+        top: boxTrue.top,
+        bottom: boxTrue.bottom,
+        unclippedTop: boxTrue.unclippedTop,
+        unclippedBottom: boxTrue.unclippedBottom,
+        heightPts: boxTrue.heightPts,
+        heightAtr: boxTrue.heightAtr,
+        unclippedHeightPts: boxTrue.unclippedHeightPts,
+        unclippedHeightAtr: boxTrue.unclippedHeightAtr,
+        clipped: boxTrue.clipped,
+        trimmed: boxTrue.trimmed,
+      },
+      shiftFalse: {
+        parityShift: false,
+        top: boxFalse.top,
+        bottom: boxFalse.bottom,
+        unclippedTop: boxFalse.unclippedTop,
+        unclippedBottom: boxFalse.unclippedBottom,
+        heightPts: boxFalse.heightPts,
+        heightAtr: boxFalse.heightAtr,
+        unclippedHeightPts: boxFalse.unclippedHeightPts,
+        unclippedHeightAtr: boxFalse.unclippedHeightAtr,
+        clipped: boxFalse.clipped,
+        trimmed: boxFalse.trimmed,
+      },
+      heightDiffPts: Number(
+        Math.abs(boxTrue.unclippedHeightPts - boxFalse.unclippedHeightPts).toFixed(2)
+      ),
+    };
+  });
+
+  const avgTrue =
+    rows.length > 0
+      ? Number(
+          (
+            rows.reduce((s, r) => s + r.shiftTrue.heightPts, 0) / rows.length
+          ).toFixed(2)
+        )
+      : 0;
+  const avgFalse =
+    rows.length > 0
+      ? Number(
+          (
+            rows.reduce((s, r) => s + r.shiftFalse.heightPts, 0) / rows.length
+          ).toFixed(2)
+        )
+      : 0;
+
+  return {
+    tf,
+    atr14,
+    parityShiftUsed,
+    maxZoneHeightAtr,
+    referenceTargetHint,
+    rows,
+    avgHeightShiftTruePts: avgTrue,
+    avgHeightShiftFalsePts: avgFalse,
+  };
+}
+
+/**
+ * PHASE 6 ITEM 3: Candle Alignment Check (4H & 1D)
+ * Rebuilds 4H and 1D from M1 using h4AlignmentOffsetHours and dailyAlignmentUtcHour,
+ * and prints the last 5 candles (open time UTC, open, high, low, close).
+ */
+export interface CandleAlignmentRow {
+  time: number;
+  openTimeUtc: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export interface CandleAlignmentCheckReport {
+  h4AlignmentOffsetHours: number;
+  dailyAlignmentUtcHour: number;
+  rebuiltFromM1: {
+    '4h': boolean;
+    '1d': boolean;
+  };
+  last5H4: CandleAlignmentRow[];
+  last5D1: CandleAlignmentRow[];
+}
+
+export function alignTimeSecWithHourOffset(
+  timeSec: number,
+  periodSec: number,
+  offsetHours: number = 0
+): number {
+  const offsetSec = Math.round(offsetHours * 3600);
+  const shifted = timeSec - offsetSec;
+  const bucketed = Math.floor(shifted / periodSec) * periodSec;
+  return bucketed + offsetSec;
+}
+
+export function rebuildTimeframeFromM1WithAlignment(
+  m1Bars: Candle[],
+  tf: '4h' | '1d',
+  offsetHours: number = 0
+): Candle[] {
+  if (!m1Bars || m1Bars.length === 0) return [];
+  const periodSec = tf === '4h' ? 14_400 : 86_400;
+  const sorted = [...m1Bars].sort((a, b) => a.time - b.time);
+  const out: Candle[] = [];
+  let cur: Candle | null = null;
+
+  for (const bar of sorted) {
+    const bucketTime = alignTimeSecWithHourOffset(bar.time, periodSec, offsetHours);
+    if (!cur || cur.time !== bucketTime) {
+      if (cur) out.push(cur);
+      cur = {
+        time: bucketTime,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        tickVolume: bar.tickVolume ?? 1,
+        buyVol: bar.buyVol ?? 0,
+        sellVol: bar.sellVol ?? 0,
+      };
+    } else {
+      if (bar.high > cur.high) cur.high = bar.high;
+      if (bar.low < cur.low) cur.low = bar.low;
+      cur.close = bar.close;
+      cur.tickVolume = (cur.tickVolume || 0) + (bar.tickVolume ?? 1);
+      cur.buyVol = (cur.buyVol || 0) + (bar.buyVol ?? 0);
+      cur.sellVol = (cur.sellVol || 0) + (bar.sellVol ?? 0);
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+function formatCandleAlignmentRows(
+  candles: Candle[],
+  lastN: number = 5
+): CandleAlignmentRow[] {
+  const slice = candles.slice(-Math.max(1, lastN));
+  return slice.map((c) => ({
+    time: c.time,
+    openTimeUtc:
+      new Date(c.time * 1000).toISOString().replace('T', ' ').slice(0, 19) +
+      ' UTC',
+    open: Number(c.open.toFixed(2)),
+    high: Number(c.high.toFixed(2)),
+    low: Number(c.low.toFixed(2)),
+    close: Number(c.close.toFixed(2)),
+  }));
+}
+
+export function computeCandleAlignmentCheck(
+  barsMap: Partial<Record<RedSniperTimeframe, Candle[]>>,
+  settings: Pick<
+    RedSniperSettings,
+    'h4AlignmentOffsetHours' | 'dailyAlignmentUtcHour'
+  > = {
+    h4AlignmentOffsetHours: 0,
+    dailyAlignmentUtcHour: 0,
+  },
+  lastN: number = 5
+): CandleAlignmentCheckReport {
+  const h4Offset =
+    typeof settings.h4AlignmentOffsetHours === 'number' &&
+    Number.isFinite(settings.h4AlignmentOffsetHours)
+      ? Math.round(settings.h4AlignmentOffsetHours)
+      : 0;
+  const d1Offset =
+    typeof settings.dailyAlignmentUtcHour === 'number' &&
+    Number.isFinite(settings.dailyAlignmentUtcHour)
+      ? Math.round(settings.dailyAlignmentUtcHour)
+      : 0;
+
+  const m1 = barsMap['1m'] || [];
+  const rawH4 = barsMap['4h'] || [];
+  const rawD1 = barsMap['1d'] || [];
+
+  // Rebuild 4H and 1D from M1 when M1 bars are available and either offset != 0 or rebuilding is requested
+  const canRebuildFromM1 = m1.length >= 60;
+  const h4Source =
+    canRebuildFromM1 && (h4Offset !== 0 || rawH4.length === 0)
+      ? rebuildTimeframeFromM1WithAlignment(m1, '4h', h4Offset)
+      : rawH4.length > 0
+      ? rawH4
+      : rebuildTimeframeFromM1WithAlignment(m1, '4h', h4Offset);
+
+  const d1Source =
+    canRebuildFromM1 && (d1Offset !== 0 || rawD1.length === 0)
+      ? rebuildTimeframeFromM1WithAlignment(m1, '1d', d1Offset)
+      : rawD1.length > 0
+      ? rawD1
+      : rebuildTimeframeFromM1WithAlignment(m1, '1d', d1Offset);
+
+  return {
+    h4AlignmentOffsetHours: h4Offset,
+    dailyAlignmentUtcHour: d1Offset,
+    rebuiltFromM1: {
+      '4h': canRebuildFromM1 && (h4Offset !== 0 || rawH4.length === 0),
+      '1d': canRebuildFromM1 && (d1Offset !== 0 || rawD1.length === 0),
+    },
+    last5H4: formatCandleAlignmentRows(h4Source, lastN),
+    last5D1: formatCandleAlignmentRows(d1Source, lastN),
+  };
+}
+

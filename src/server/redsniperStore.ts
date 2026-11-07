@@ -14,6 +14,23 @@ export interface RedSniperStoredCandle {
   buyVol: number;
   sellVol: number;
   isClosed?: boolean;
+  source?: 'hist' | 'live';
+}
+
+export interface RedSniperBackfillStatus {
+  running: boolean;
+  status: 'idle' | 'running' | 'completed' | 'error';
+  provider: string;
+  progressPct: number;
+  completedChunks: number;
+  totalChunks: number;
+  calibratedOffsetPts: number | null;
+  offsetWarning: string | null;
+  m1HistBars: number;
+  d1HistBars: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
 }
 
 export interface ServerBotLogEntry {
@@ -72,9 +89,13 @@ export interface RedSniperHealthReport {
   lastWriteTime: number | null;
   lastWriteIso: string | null;
   dbSource: string;
+  dataDirPath?: string;
+  dataDirFreeBytes?: number | null;
+  dataDirFreeFormatted?: string;
   botLogCount: number;
   firestoreOps?: FirestoreOpsReport;
   readLimitExceeded?: boolean;
+  backfill?: RedSniperBackfillStatus;
 }
 
 export interface CandleStore {
@@ -262,6 +283,7 @@ export class SqliteStore implements RedSniperCombinedStore {
         buy_vol REAL NOT NULL DEFAULT 0,
         sell_vol REAL NOT NULL DEFAULT 0,
         is_closed INTEGER NOT NULL DEFAULT 1,
+        source TEXT NOT NULL DEFAULT 'live',
         PRIMARY KEY (tf, time)
       );
 
@@ -288,6 +310,12 @@ export class SqliteStore implements RedSniperCombinedStore {
 
       CREATE INDEX IF NOT EXISTS idx_redsniper_bot_log_time ON redsniper_bot_log(time DESC);
     `);
+
+    try {
+      db.run(`ALTER TABLE redsniper_candles ADD COLUMN source TEXT NOT NULL DEFAULT 'live';`);
+    } catch {
+      // Column already exists
+    }
 
     this.dbInstance = db;
     this.isInitialized = true;
@@ -333,20 +361,33 @@ export class SqliteStore implements RedSniperCombinedStore {
     if (!this.dbInstance || !candles || candles.length === 0) return 0;
     let saved = 0;
     try {
-      for (const c of candles) {
-        if (
-          c &&
-          typeof c.time === 'number' &&
-          Number.isFinite(c.time) &&
-          Number.isFinite(c.open) &&
-          Number.isFinite(c.high) &&
-          Number.isFinite(c.low) &&
-          Number.isFinite(c.close)
-        ) {
-          this.dbInstance.run(
-            `INSERT OR REPLACE INTO redsniper_candles (tf, time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-            [
+      this.dbInstance.run('BEGIN TRANSACTION;');
+      const stmt = this.dbInstance.prepare(
+        `INSERT INTO redsniper_candles (tf, time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(tf, time) DO UPDATE SET
+           open = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.open ELSE excluded.open END,
+           high = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.high ELSE excluded.high END,
+           low = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.low ELSE excluded.low END,
+           close = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.close ELSE excluded.close END,
+           tick_volume = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.tick_volume ELSE excluded.tick_volume END,
+           buy_vol = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.buy_vol ELSE excluded.buy_vol END,
+           sell_vol = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.sell_vol ELSE excluded.sell_vol END,
+           is_closed = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.is_closed ELSE excluded.is_closed END,
+           source = CASE WHEN redsniper_candles.source = 'live' OR excluded.source = 'live' THEN 'live' ELSE 'hist' END;`
+      );
+      try {
+        for (const c of candles) {
+          if (
+            c &&
+            typeof c.time === 'number' &&
+            Number.isFinite(c.time) &&
+            Number.isFinite(c.open) &&
+            Number.isFinite(c.high) &&
+            Number.isFinite(c.low) &&
+            Number.isFinite(c.close)
+          ) {
+            stmt.run([
               tf,
               c.time,
               c.open,
@@ -357,15 +398,22 @@ export class SqliteStore implements RedSniperCombinedStore {
               Math.max(0, c.buyVol || 0),
               Math.max(0, c.sellVol || 0),
               c.isClosed === false ? 0 : 1,
-            ]
-          );
-          saved++;
+              c.source === 'hist' ? 'hist' : 'live',
+            ]);
+            saved++;
+          }
         }
+      } finally {
+        stmt.free();
       }
+      this.dbInstance.run('COMMIT;');
       if (saved > 0) {
         this.persist();
       }
     } catch (err: any) {
+      try {
+        this.dbInstance.run('ROLLBACK;');
+      } catch {}
       console.error(`[RED SNIPER SQLITE] Error saving candles for ${tf}:`, err?.message);
     }
     return saved;
@@ -374,11 +422,12 @@ export class SqliteStore implements RedSniperCombinedStore {
   public async getCandles(tf: string, limit: number = 5000): Promise<RedSniperStoredCandle[]> {
     if (!this.dbInstance) return [];
     try {
-      const safeLimit = Math.max(1, Math.min(5000, Number(limit) || 5000));
+      const maxCap = tf === '1m' ? 400000 : 15000;
+      const safeLimit = Math.max(1, Math.min(maxCap, Number(limit) || 5000));
       const res = this.dbInstance.exec(`
-        SELECT time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed
+        SELECT time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed, source
         FROM (
-          SELECT time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed
+          SELECT time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed, source
           FROM redsniper_candles
           WHERE tf = '${tf.replace(/'/g, "''")}'
           ORDER BY time DESC
@@ -398,6 +447,7 @@ export class SqliteStore implements RedSniperCombinedStore {
           buyVol: Number(row[6]),
           sellVol: Number(row[7]),
           isClosed: Boolean(row[8]),
+          source: row[9] === 'hist' ? 'hist' : 'live',
         }));
       }
     } catch (err: any) {
@@ -574,15 +624,20 @@ export function dedupeChunkCandles(
   const map = new Map<number, RedSniperStoredCandle>();
   for (const c of existing || []) {
     if (c && typeof c.time === 'number' && Number.isFinite(c.time) && c.time > 0) {
-      map.set(c.time, { ...c });
+      map.set(c.time, { ...c, source: c.source === 'hist' ? 'hist' : 'live' });
     }
   }
   for (const c of incoming || []) {
     if (c && typeof c.time === 'number' && Number.isFinite(c.time) && c.time > 0) {
       const prev = map.get(c.time);
+      const inSource = c.source === 'hist' ? 'hist' : 'live';
       if (!prev) {
-        map.set(c.time, { ...c });
+        map.set(c.time, { ...c, source: inSource });
       } else {
+        const prevSource = prev.source === 'hist' ? 'hist' : 'live';
+        if (prevSource === 'live' && inSource === 'hist') {
+          continue;
+        }
         const tickVolume = c.tickVolume > 0 ? c.tickVolume : prev.tickVolume;
         const inFlow = (c.buyVol || 0) + (c.sellVol || 0);
         const prevFlow = (prev.buyVol || 0) + (prev.sellVol || 0);
@@ -596,13 +651,14 @@ export function dedupeChunkCandles(
         map.set(c.time, {
           time: c.time,
           open: c.open,
-          high: Math.max(c.high, prev.high),
-          low: Math.min(c.low, prev.low),
+          high: prevSource === inSource ? Math.max(c.high, prev.high) : c.high,
+          low: prevSource === inSource ? Math.min(c.low, prev.low) : c.low,
           close: c.close,
           tickVolume,
           buyVol,
           sellVol,
           isClosed: c.isClosed ?? prev.isClosed,
+          source: inSource,
         });
       }
     }
@@ -1003,7 +1059,8 @@ export class FirestoreStore implements RedSniperCombinedStore {
     this.logHourlyStatsIfDue();
 
     const list = this.memoryCache[tf] || [];
-    const safeLimit = Math.max(1, Math.min(5000, Number(limit) || 5000));
+    const maxCap = tf === '1m' ? 400000 : 15000;
+    const safeLimit = Math.max(1, Math.min(maxCap, Number(limit) || 5000));
     return list.slice(-safeLimit);
   }
 

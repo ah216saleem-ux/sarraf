@@ -210,8 +210,8 @@ export interface DecisionEngineResult {
 const REQUIRED_SILENCE_SECONDS = 180; // 3 minutes of live data
 const SPOT_GREEN_MAX_AGE_MS = 3000; // SPOT dot is green only when fresh (<3s)
 export const COOLDOWN_DURATION_MS = 60 * 60 * 1000; // 60 minutes cooldown after trade fully closes
-export const TRADE_EXPIRY_MS = 60 * 60 * 1000; // 60 minutes expiry before TP1 is hit
-export const MAX_TRADE_LIFETIME_MS = 3 * 60 * 60 * 1000; // 3 hours hard maximum trade lifetime after TP1 is hit
+export const TRADE_EXPIRY_MS = 260 * 60 * 1000; // 260 minutes expiry before TP1 is hit
+export const MAX_TRADE_LIFETIME_MS = 260 * 60 * 1000; // 260 minutes hard maximum trade lifetime after TP1 is hit
 export const MAX_TRADES_PER_DAY = 5; // Max 5 trades per UTC day
 
 // ============================================================================
@@ -1867,7 +1867,7 @@ export function evaluateActiveTradeTick(
     tp3R: Number(rawTp3R.toFixed(2)),
   };
 
-  // 1. Check Expiry (60 minutes — only applies if TP1 has NOT been hit)
+  // 1. Check Expiry (260 minutes — only applies if TP1 has NOT been hit)
   if (!trade.tp1Hit && now >= trade.expiryTime) {
     updated.status = 'CLOSED';
     updated.outcome = 'EXPIRED';
@@ -1996,7 +1996,7 @@ export function evaluateActiveTradeTick(
     }
   }
 
-  // 4. Hard Maximum Trade Lifetime (3 hours) after TP1 is hit:
+  // 4. Hard Maximum Trade Lifetime (260 minutes) after TP1 is hit:
   // If reached after TP1 without hitting TP3 or BE stop, close at market with outcome 'EXPIRED_AFTER_TP1'
   // and realizedR = real locked R (50% at tp1R, plus 25% at tp2R if hit, plus runner fraction at market).
   if (updated.tp1Hit && now - trade.entryTime >= MAX_TRADE_LIFETIME_MS) {

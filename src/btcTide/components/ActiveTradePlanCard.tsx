@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { BtcTideTradeRecord } from '../../server/btcTideSignalDatabase';
 import { BtcFeedStatus } from '../types';
+import { MAX_TRADE_LIFETIME_MS } from '../signalEngine';
 import {
   Crosshair,
   ShieldCheck,
@@ -39,9 +40,6 @@ function formatCountdown(targetMs: number): string {
   const ss = String(diffSec % 60).padStart(2, '0');
   return hh > 0 ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`;
 }
-
-const MAX_TRADE_LIFETIME_MS = 3 * 60 * 60 * 1000;
-
 export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.memo(
   ({ trade, lastClosedTrade = null, currentPrice, status, isSpotStale = false, spotAgeMs = 0 }) => {
     const isStaleOrOffline = isSpotStale || status === 'STALE' || status === 'OFFLINE';
@@ -94,8 +92,8 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
                 <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
                 <span>
                   {expiredAlertTrade.outcome === 'EXPIRED_AFTER_TP1'
-                    ? 'MAX 3H LIFETIME AFTER TP1 - CLOSE AT MARKET'
-                    : 'SIGNAL EXPIRED - CLOSE AT MARKET'}
+                    ? 'MAX 260M LIFETIME AFTER TP1 - CLOSE AT MARKET'
+                    : 'SIGNAL EXPIRED (260M) - CLOSE AT MARKET'}
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-3 text-[11px]">
@@ -300,10 +298,10 @@ export const ActiveTradePlanCard: React.FC<ActiveTradePlanCardProps> = React.mem
               </div>
             </div>
 
-            {/* 60m Expiry Countdown (or 3h Max Lifetime Countdown after TP1) */}
+            {/* 260m Expiry Countdown (or 260m Max Lifetime Countdown after TP1) */}
             <div className="px-2.5 py-1.5 rounded-lg bg-black/60 border border-white/10 text-neutral-300 flex items-center gap-1.5">
               <Clock className="w-3.5 h-3.5 text-[#FFD97A]" />
-              <span>{trade.tp1Hit ? `BE STOP (MAX 3H: ${expiryCountdown})` : `EXP: ${expiryCountdown}`}</span>
+              <span>{trade.tp1Hit ? `BE STOP (MAX 260M: ${expiryCountdown})` : `EXP: ${expiryCountdown}`}</span>
             </div>
           </div>
         </div>

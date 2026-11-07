@@ -21,6 +21,7 @@ import {
   SL_MAX_PCT,
   TP_MODE,
   TP1_LOW_R_WARNING_TEXT,
+  TRADE_EXPIRY_MS,
 } from '../btcTide/signalEngine.ts';
 import {
   notifyNewBtcTideSignal,
@@ -130,6 +131,20 @@ export async function runBtcTideVerificationTests() {
     assert(
       trade.tp1R === 0.53 && trade.tp2R === 1.06 && trade.tp3R === 1.59,
       `True R values are tpDist/slDist: +${trade.tp1R}R / +${trade.tp2R}R / +${trade.tp3R}R`
+    );
+    assert(
+      TRADE_EXPIRY_MS === 260 * 60 * 1000 && trade.expiryTime - trade.entryTime === 260 * 60 * 1000,
+      'Trade expiry window is 260 minutes (15,600,000 ms)'
+    );
+    const tickAt60m = evaluateActiveTradeTick(trade, trade.entryPrice, trade.entryTime + 60 * 60 * 1000);
+    assert(
+      tickAt60m.closed === false && tickAt60m.updatedTrade.status === 'ACTIVE',
+      'Trade remains ACTIVE at 60 minutes (does not expire early before 260 minutes)'
+    );
+    const tickAt260m = evaluateActiveTradeTick(trade, trade.entryPrice, trade.entryTime + 260 * 60 * 1000);
+    assert(
+      tickAt260m.closed === true && tickAt260m.updatedTrade.outcome === 'EXPIRED',
+      'Trade expires only after 260 minutes if neither SL nor TP was hit'
     );
 
     // Verify cap-instead-of-block vs >0.2x atr15m inside-swing block:

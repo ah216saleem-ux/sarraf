@@ -390,7 +390,7 @@ export const BtcTideView: React.FC = () => {
         )}
       </div>
 
-      {/* Dashboard Alert Banner when latest signal expired (30m pre-TP1 or 3h max lifetime after TP1) */}
+      {/* Dashboard Alert Banner when latest signal expired (260m pre-TP1 or 260m max lifetime after TP1) */}
       {!activeTrade &&
         (closedTrades[0]?.outcome === 'EXPIRED' ||
           closedTrades[0]?.outcome === 'EXPIRED_AFTER_TP1') && (
@@ -399,8 +399,8 @@ export const BtcTideView: React.FC = () => {
               <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
               <span>
                 {closedTrades[0].outcome === 'EXPIRED_AFTER_TP1'
-                  ? `MAX 3H LIFETIME AFTER TP1 - CLOSE AT MARKET (${closedTrades[0].side})`
-                  : `SIGNAL EXPIRED - CLOSE AT MARKET (${closedTrades[0].side})`}
+                  ? `MAX 260M LIFETIME AFTER TP1 - CLOSE AT MARKET (${closedTrades[0].side})`
+                  : `SIGNAL EXPIRED (260M) - CLOSE AT MARKET (${closedTrades[0].side})`}
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-3 text-[11px]">

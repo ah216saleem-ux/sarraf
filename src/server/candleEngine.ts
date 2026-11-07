@@ -5,6 +5,7 @@ import {
   DATA_DIR,
   writeJsonAtomic,
   recoverCorruptedFileFromLatestBackup,
+  getDataDirDiskStats,
 } from './deploymentSafety.ts';
 import {
   initRedSniperDatabase,
@@ -24,9 +25,29 @@ import {
   RedSniperGap,
   RedSniperHealthReport,
   RedSniperStoredCandle,
+  RedSniperBackfillStatus,
   ServerBotLogEntry,
   RED_SNIPER_DIRECT_TFS as STORE_DIRECT_TFS,
 } from './redsniperStore.ts';
+import {
+  HistoryProvider,
+  DukascopyProvider,
+  OandaProvider,
+  createHistoryProvider,
+  buildFiveDayM1Chunks,
+  computeMedianCloseOffset,
+  applyOffsetToHistCandles,
+  mergeHistAndLiveCandles,
+  rebuildSingleTimeframeFromM1,
+  rebuildTimeframesFromMergedM1,
+  classifyBackfillProviderError,
+  formatBackfillBannerState,
+  initBackfillStatusFromDisk,
+  runRedSniperHistoryBackfill,
+  triggerAsyncRedSniperBackfill,
+  getRedSniperBackfillStatus,
+  BackfillBannerState,
+} from './historyBackfill.ts';
 
 export {
   initRedSniperDatabase,
@@ -35,8 +56,30 @@ export {
   getRedSniperStore,
   initActiveStore,
   setRedSniperStore,
+  DukascopyProvider,
+  OandaProvider,
+  createHistoryProvider,
+  buildFiveDayM1Chunks,
+  computeMedianCloseOffset,
+  applyOffsetToHistCandles,
+  mergeHistAndLiveCandles,
+  rebuildSingleTimeframeFromM1,
+  rebuildTimeframesFromMergedM1,
+  classifyBackfillProviderError,
+  formatBackfillBannerState,
+  initBackfillStatusFromDisk,
+  runRedSniperHistoryBackfill,
+  triggerAsyncRedSniperBackfill,
+  getRedSniperBackfillStatus,
+  getDataDirDiskStats,
 };
-export type { RedSniperHealthReport, RedSniperGap };
+export type {
+  RedSniperHealthReport,
+  RedSniperGap,
+  RedSniperBackfillStatus,
+  HistoryProvider,
+  BackfillBannerState,
+};
 
 export interface Candle {
   openTime: string; // ISO string
@@ -49,6 +92,7 @@ export interface Candle {
   hasGapBefore?: boolean;
   gapDurationMinutes?: number;
   usableForZones?: boolean;
+  source?: 'hist' | 'live';
 }
 
 export interface CandleStore {
@@ -302,8 +346,8 @@ export function buildD1FromH1(h1Candles: Candle[]): Candle[] {
   return result.sort((a, b) => new Date(a.openTime).getTime() - new Date(b.openTime).getTime());
 }
 
-// Merge candle series keeping history and sorted ascending
-export function mergeCandleSeries(existing: Candle[], incoming: Candle[], maxLimit: number = 5000): Candle[] {
+// Merge candle series keeping history and sorted ascending ('live' wins over 'hist' in overlap)
+export function mergeCandleSeries(existing: Candle[], incoming: Candle[], maxLimit: number = 10000): Candle[] {
   const byTime = new Map<number, Candle>();
   for (const c of existing) {
     const t = new Date(c.openTime).getTime();
@@ -314,6 +358,10 @@ export function mergeCandleSeries(existing: Candle[], incoming: Candle[], maxLim
   for (const c of incoming) {
     const t = new Date(c.openTime).getTime();
     if (!isNaN(t)) {
+      const prev = byTime.get(t);
+      if (prev && prev.source === 'live' && c.source === 'hist') {
+        continue;
+      }
       byTime.set(t, { ...c, openTime: new Date(t).toISOString() });
     }
   }
@@ -405,11 +453,13 @@ function candleToRedSniperStored(c: Candle, tf: RedSniperDirectStoreTf): RedSnip
     buyVol: 0,
     sellVol: 0,
     isClosed: Boolean(c.isClosed),
+    source: c.source === 'hist' ? 'hist' : 'live',
   };
 }
 
 /**
  * Pure deduplication and merge by candle `time` (unix seconds), sorted ascending.
+ * Live candles ('live') win over historical ('hist') candles in the overlap.
  * Preserves local buyVol/sellVol ratio when incoming official OHLC has 0 buyVol/sellVol.
  */
 export function dedupeAndMergeRedSniperCandles(
@@ -421,15 +471,20 @@ export function dedupeAndMergeRedSniperCandles(
 
   for (const c of existing) {
     if (!c || !Number.isFinite(c.time) || c.time <= 0) continue;
-    byTime.set(c.time, { ...c });
+    byTime.set(c.time, { ...c, source: c.source === 'hist' ? 'hist' : 'live' });
   }
 
   for (const c of incoming) {
     if (!c || !Number.isFinite(c.time) || c.time <= 0) continue;
     const prev = byTime.get(c.time);
+    const inSource = c.source === 'hist' ? 'hist' : 'live';
     if (!prev) {
-      byTime.set(c.time, { ...c });
+      byTime.set(c.time, { ...c, source: inSource });
     } else {
+      // Live candles always win over historical candles in the overlap
+      if (prev.source === 'live' && inSource === 'hist') {
+        continue;
+      }
       const tickVolume = c.tickVolume > 0 ? c.tickVolume : prev.tickVolume;
       const inFlow = (c.buyVol || 0) + (c.sellVol || 0);
       const prevFlow = (prev.buyVol || 0) + (prev.sellVol || 0);
@@ -452,6 +507,7 @@ export function dedupeAndMergeRedSniperCandles(
         buyVol,
         sellVol,
         isClosed: c.isClosed ?? prev.isClosed,
+        source: inSource,
       });
     }
   }
@@ -580,13 +636,14 @@ function loadRedSniperJsonlForTf(tf: RedSniperDirectStoreTf): RedSniperStoredCan
             buyVol: Math.max(0, Number(obj.buyVol ?? 0)),
             sellVol: Math.max(0, Number(obj.sellVol ?? 0)),
             isClosed: obj.isClosed !== false,
+            source: obj.source === 'hist' ? 'hist' : 'live',
           });
         }
       } catch {
         // Skip malformed line
       }
     }
-    const maxCap = tf === '1m' ? 10000 : 5000;
+    const maxCap = tf === '1m' ? 400000 : 10000;
     return dedupeAndMergeRedSniperCandles([], parsed, maxCap);
   } catch (err: any) {
     console.warn(`[RED SNIPER STORE] Failed reading ${filePath}:`, err?.message);
@@ -617,7 +674,9 @@ export async function saveRedSniperJsonlStoreToDisk(): Promise<number> {
       try {
         const filePath = getRedSniperJsonlFilePath(tf);
         const tmpPath = `${filePath}.tmp`;
-        const payload = closedBars.map((b) => JSON.stringify(b)).join('\n') + '\n';
+        // Keep JSONL bounded to 15000 for 1m and 10000 for HTFs so disk writes stay fast while SQLite holds full 400k M1
+        const jsonlSlice = tf === '1m' ? closedBars.slice(-15000) : closedBars.slice(-10000);
+        const payload = jsonlSlice.map((b) => JSON.stringify(b)).join('\n') + '\n';
         fs.writeFileSync(tmpPath, payload, 'utf-8');
         fs.renameSync(tmpPath, filePath);
       } catch {}
@@ -645,7 +704,7 @@ function syncStoreToRedSniperMemory(): void {
       const sc = candleToRedSniperStored(c, tf);
       if (sc) converted.push(sc);
     }
-    const maxCap = tf === '1m' ? 10000 : 5000;
+    const maxCap = tf === '1m' ? 400000 : 10000;
     redSniperStore[tf] = dedupeAndMergeRedSniperCandles(redSniperStore[tf], converted, maxCap);
   }
 }
@@ -655,9 +714,10 @@ export function loadCandlesFromDisk(): CandleStore {
   ensureDataDir();
   for (const tf of RED_SNIPER_DIRECT_TFS) {
     redSniperStore[tf] = loadRedSniperJsonlForTf(tf);
-    const fromSqlite = getCandlesFromSqlite(tf, 10000);
+    const maxCap = tf === '1m' ? 400000 : 10000;
+    const fromSqlite = getCandlesFromSqlite(tf, maxCap);
     if (fromSqlite.length > 0) {
-      redSniperStore[tf] = dedupeAndMergeRedSniperCandles(redSniperStore[tf], fromSqlite, tf === '1m' ? 10000 : 5000);
+      redSniperStore[tf] = dedupeAndMergeRedSniperCandles(redSniperStore[tf], fromSqlite, maxCap);
     }
   }
   if (fs.existsSync(DATA_FILE)) {
@@ -678,7 +738,7 @@ export function loadCandlesFromDisk(): CandleStore {
           D1: parsed.D1 || [],
         };
         syncStoreToRedSniperMemory();
-        // Also ensure store.M1..D1 includes any older candles from redSniperStore JSONL
+        // Also ensure store.M1..D1 includes any older candles from redSniperStore
         const toLegacy = (sc: RedSniperStoredCandle): Candle => ({
           openTime: new Date(sc.time * 1000).toISOString(),
           open: sc.open,
@@ -688,14 +748,15 @@ export function loadCandlesFromDisk(): CandleStore {
           volume: sc.tickVolume || 1,
           isClosed: sc.isClosed !== false,
           usableForZones: true,
+          source: sc.source === 'hist' ? 'hist' : 'live',
         });
-        store.M1 = mergeCandleSeries(redSniperStore['1m'].map(toLegacy), store.M1, 10000);
-        store.M5 = mergeCandleSeries(redSniperStore['5m'].map(toLegacy), store.M5, 5000);
-        store.M15 = mergeCandleSeries(redSniperStore['15m'].map(toLegacy), store.M15, 5000);
-        store.M30 = mergeCandleSeries(redSniperStore['30m'].map(toLegacy), store.M30, 5000);
-        store.H1 = mergeCandleSeries(redSniperStore['1h'].map(toLegacy), store.H1, 5000);
-        store.H4 = mergeCandleSeries(redSniperStore['4h'].map(toLegacy), store.H4, 5000);
-        store.D1 = mergeCandleSeries(redSniperStore['1d'].map(toLegacy), store.D1, 5000);
+        store.M1 = mergeCandleSeries(redSniperStore['1m'].slice(-10000).map(toLegacy), store.M1, 10000);
+        store.M5 = mergeCandleSeries(redSniperStore['5m'].map(toLegacy), store.M5, 10000);
+        store.M15 = mergeCandleSeries(redSniperStore['15m'].map(toLegacy), store.M15, 10000);
+        store.M30 = mergeCandleSeries(redSniperStore['30m'].map(toLegacy), store.M30, 10000);
+        store.H1 = mergeCandleSeries(redSniperStore['1h'].map(toLegacy), store.H1, 10000);
+        store.H4 = mergeCandleSeries(redSniperStore['4h'].map(toLegacy), store.H4, 10000);
+        store.D1 = mergeCandleSeries(redSniperStore['1d'].map(toLegacy), store.D1, 10000);
 
         runGapDetectionAudit();
         saveRedSniperJsonlStoreToDisk();
@@ -876,6 +937,7 @@ async function fetchTimeframeOhlcPage(
       volume: Number(b.tickVolume || b.volume || 1),
       isClosed: idx < chronological.length - 1,
       usableForZones: true,
+      source: 'live',
     };
   });
 }
@@ -927,6 +989,131 @@ export function getActiveRedSniperGaps(): RedSniperGap[] {
   return activeRedSniperGaps;
 }
 
+export function areAnyRedSniperTimeframesBelowMinimum(): boolean {
+  const checkTfs: Array<Exclude<RedSniperDirectStoreTf, '1m'>> = [
+    '5m',
+    '15m',
+    '30m',
+    '1h',
+    '4h',
+    '1d',
+  ];
+  for (const tf of checkTfs) {
+    const loaded = redSniperStore[tf]?.length ?? 0;
+    const minReq = REQUIRED_MIN_BARS_BY_TF[tf] ?? 1000;
+    if (loaded < minReq) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function persistMergedBackfillCandles(
+  mergedByTf: Record<RedSniperDirectStoreTf, RedSniperStoredCandle[]>,
+  offsetPts: number
+): Promise<void> {
+  const toLegacy = (sc: RedSniperStoredCandle): Candle => ({
+    openTime: new Date(sc.time * 1000).toISOString(),
+    open: sc.open,
+    high: sc.high,
+    low: sc.low,
+    close: sc.close,
+    volume: sc.tickVolume || 1,
+    isClosed: sc.isClosed !== false,
+    usableForZones: true,
+    source: sc.source === 'hist' ? 'hist' : 'live',
+  });
+
+  for (const tf of RED_SNIPER_DIRECT_TFS) {
+    const maxCap = tf === '1m' ? 400000 : 10000;
+    redSniperStore[tf] = dedupeAndMergeRedSniperCandles(
+      redSniperStore[tf],
+      mergedByTf[tf] || [],
+      maxCap
+    );
+  }
+
+  store.M1 = mergeCandleSeries(
+    redSniperStore['1m'].slice(-10000).map(toLegacy),
+    store.M1,
+    10000
+  );
+  store.M5 = mergeCandleSeries(
+    redSniperStore['5m'].map(toLegacy),
+    store.M5,
+    10000
+  );
+  store.M15 = mergeCandleSeries(
+    redSniperStore['15m'].map(toLegacy),
+    store.M15,
+    10000
+  );
+  store.M30 = mergeCandleSeries(
+    redSniperStore['30m'].map(toLegacy),
+    store.M30,
+    10000
+  );
+  store.H1 = mergeCandleSeries(
+    redSniperStore['1h'].map(toLegacy),
+    store.H1,
+    10000
+  );
+  store.H4 = mergeCandleSeries(
+    redSniperStore['4h'].map(toLegacy),
+    store.H4,
+    10000
+  );
+  store.D1 = mergeCandleSeries(
+    redSniperStore['1d'].map(toLegacy),
+    store.D1,
+    10000
+  );
+  store.htfBootstrapMethod = `DEEP_HISTORY_BACKFILL_MERGED (offset=${
+    offsetPts >= 0 ? '+' : ''
+  }${offsetPts.toFixed(3)}pts)`;
+
+  await saveRedSniperJsonlStoreToDisk();
+  saveCandlesToDisk();
+
+  console.log(
+    `[RED SNIPER BACKFILL] Persisted merged history | 5m=${redSniperStore['5m'].length}/${REQUIRED_MIN_BARS_BY_TF['5m']}, 15m=${redSniperStore['15m'].length}/${REQUIRED_MIN_BARS_BY_TF['15m']}, 30m=${redSniperStore['30m'].length}/${REQUIRED_MIN_BARS_BY_TF['30m']}, 1h=${redSniperStore['1h'].length}/${REQUIRED_MIN_BARS_BY_TF['1h']}, 4h=${redSniperStore['4h'].length}/${REQUIRED_MIN_BARS_BY_TF['4h']}, 1d=${redSniperStore['1d'].length}/${REQUIRED_MIN_BARS_BY_TF['1d']}`
+  );
+}
+
+/**
+ * Execute or trigger the deep history backfill job and merge into the Red Sniper store.
+ */
+export async function executeRedSniperBackfill(options?: {
+  forceReset?: boolean;
+  asyncMode?: boolean;
+  throttleMs?: number;
+}): Promise<RedSniperBackfillStatus> {
+  syncStoreToRedSniperMemory();
+  const liveCandlesByTf: Partial<Record<RedSniperStoreTf, RedSniperStoredCandle[]>> = {};
+  for (const tf of RED_SNIPER_DIRECT_TFS) {
+    liveCandlesByTf[tf] = (redSniperStore[tf] || []).filter(
+      (c) => c.source !== 'hist'
+    );
+  }
+
+  const runOpts = {
+    forceReset: options?.forceReset ?? false,
+    throttleMs: options?.throttleMs ?? 15,
+    liveCandlesByTf,
+    onPersistMerged: persistMergedBackfillCandles,
+  };
+
+  if (options?.asyncMode) {
+    triggerAsyncRedSniperBackfill(runOpts).catch((err) => {
+      console.warn('[RED SNIPER BACKFILL] Background job warning:', err?.message);
+    });
+    return getRedSniperBackfillStatus();
+  }
+
+  const res = await runRedSniperHistoryBackfill(runOpts);
+  return res.status;
+}
+
 /**
  * Poll broker OHLC (M1 first, plus M5/M15/M30/H1/H4/D1) and merge/persist closed candles at least once per minute.
  * Compares newest stored M1 time with now, fills broker history, and updates remaining holes in activeRedSniperGaps.
@@ -945,17 +1132,17 @@ export async function syncBrokerCandlesToStore(): Promise<number> {
     ]);
 
     if (m1Bars.length > 0) store.M1 = mergeCandleSeries(store.M1, m1Bars, 10000);
-    if (m5Bars.length > 0) store.M5 = mergeCandleSeries(store.M5, m5Bars, 5000);
-    if (m15Bars.length > 0) store.M15 = mergeCandleSeries(store.M15, m15Bars, 5000);
-    if (m30Bars.length > 0) store.M30 = mergeCandleSeries(store.M30, m30Bars, 5000);
-    if (h1Bars.length > 0) store.H1 = mergeCandleSeries(store.H1, h1Bars, 5000);
-    if (h4Bars.length > 0) store.H4 = mergeCandleSeries(store.H4, h4Bars, 5000);
-    if (d1Bars.length > 0) store.D1 = mergeCandleSeries(store.D1, d1Bars, 5000);
+    if (m5Bars.length > 0) store.M5 = mergeCandleSeries(store.M5, m5Bars, 10000);
+    if (m15Bars.length > 0) store.M15 = mergeCandleSeries(store.M15, m15Bars, 10000);
+    if (m30Bars.length > 0) store.M30 = mergeCandleSeries(store.M30, m30Bars, 10000);
+    if (h1Bars.length > 0) store.H1 = mergeCandleSeries(store.H1, h1Bars, 10000);
+    if (h4Bars.length > 0) store.H4 = mergeCandleSeries(store.H4, h4Bars, 10000);
+    if (d1Bars.length > 0) store.D1 = mergeCandleSeries(store.D1, d1Bars, 10000);
 
     syncStoreToRedSniperMemory();
 
     // Gap detection: check any remaining holes in M1 candles compared with now (never invent candles)
-    activeRedSniperGaps = detectRedSniperGaps(redSniperStore['1m']);
+    activeRedSniperGaps = detectRedSniperGaps(redSniperStore['1m'].slice(-10000));
 
     const savedCount = await saveRedSniperJsonlStoreToDisk();
     if (savedCount > 0) {
@@ -963,6 +1150,12 @@ export async function syncBrokerCandlesToStore(): Promise<number> {
         `[RED SNIPER STORE] saved ${savedCount} candles | barsLoaded per TF: 5m=${redSniperStore['5m'].length}/${REQUIRED_MIN_BARS_BY_TF['5m']}, 15m=${redSniperStore['15m'].length}/${REQUIRED_MIN_BARS_BY_TF['15m']}, 30m=${redSniperStore['30m'].length}/${REQUIRED_MIN_BARS_BY_TF['30m']}, 1h=${redSniperStore['1h'].length}/${REQUIRED_MIN_BARS_BY_TF['1h']}, 4h=${redSniperStore['4h'].length}/${REQUIRED_MIN_BARS_BY_TF['4h']}, 1d=${redSniperStore['1d'].length}/${REQUIRED_MIN_BARS_BY_TF['1d']}`
       );
     }
+
+    // Automatically trigger background deep history backfill on startup/sync if any timeframe is below its minimum
+    if (areAnyRedSniperTimeframesBelowMinimum() && !getRedSniperBackfillStatus().running) {
+      executeRedSniperBackfill({ asyncMode: true }).catch(() => {});
+    }
+
     return savedCount;
   } catch (err: any) {
     console.error('[RED SNIPER STORE] Periodic broker sync error:', err?.message);
@@ -988,9 +1181,10 @@ export async function seedRedSniperMemoryFromStore(): Promise<void> {
   const storeInstance = getRedSniperStore();
   for (const tf of RED_SNIPER_DIRECT_TFS) {
     try {
-      const fromStore = await storeInstance.getCandles(tf, 10000);
+      const maxCap = tf === '1m' ? 400000 : 10000;
+      const fromStore = await storeInstance.getCandles(tf, maxCap);
       if (fromStore.length > 0) {
-        redSniperStore[tf] = dedupeAndMergeRedSniperCandles(redSniperStore[tf], fromStore, tf === '1m' ? 10000 : 5000);
+        redSniperStore[tf] = dedupeAndMergeRedSniperCandles(redSniperStore[tf], fromStore, maxCap);
       }
     } catch {}
   }
@@ -998,10 +1192,11 @@ export async function seedRedSniperMemoryFromStore(): Promise<void> {
 
 /**
  * Health telemetry returning stored rows per timeframe, oldest and newest candle time,
- * last write time, backend, persistent flag, gaps, firestoreOps counters, and instance uptime.
+ * last write time, backend, persistent flag, gaps, firestoreOps counters, backfill progress, and instance uptime.
  */
 export async function getRedSniperHealth(): Promise<RedSniperHealthReport> {
   const storeInstance = getRedSniperStore();
+  const diskStats = getDataDirDiskStats(DATA_DIR);
   try {
     const base = await storeInstance.getHealth();
     return {
@@ -1011,8 +1206,12 @@ export async function getRedSniperHealth(): Promise<RedSniperHealthReport> {
       isKService: Boolean(process.env.K_SERVICE),
       instanceUptimeSeconds: Math.floor(process.uptime()),
       gaps: activeRedSniperGaps,
+      dataDirPath: diskStats.dataDirPath,
+      dataDirFreeBytes: diskStats.dataDirFreeBytes,
+      dataDirFreeFormatted: diskStats.dataDirFreeFormatted,
       firestoreOps: base.firestoreOps,
       readLimitExceeded: base.readLimitExceeded,
+      backfill: getRedSniperBackfillStatus(),
     };
   } catch (err: any) {
     return {
@@ -1031,8 +1230,12 @@ export async function getRedSniperHealth(): Promise<RedSniperHealthReport> {
       lastWriteTime: null,
       lastWriteIso: null,
       dbSource: storeInstance.getDbSource(),
+      dataDirPath: diskStats.dataDirPath,
+      dataDirFreeBytes: diskStats.dataDirFreeBytes,
+      dataDirFreeFormatted: diskStats.dataDirFreeFormatted,
       botLogCount: 0,
       readLimitExceeded: false,
+      backfill: getRedSniperBackfillStatus(),
     };
   }
 }
@@ -1060,7 +1263,8 @@ export async function getRedSniperCandlesForApi(
     ? (tfRaw as RedSniperStoreTf)
     : '1m';
   const reqMin = REQUIRED_MIN_BARS_BY_TF[tf] ?? 1000;
-  const limit = Math.max(1, Math.min(5000, Math.max(reqMin, Number(limitRaw) || 5000)));
+  const maxAllowed = tf === '1m' ? 50000 : 10000;
+  const limit = Math.max(1, Math.min(maxAllowed, Math.max(reqMin, Number(limitRaw) || 5000)));
 
   syncStoreToRedSniperMemory();
 
@@ -1073,11 +1277,17 @@ export async function getRedSniperCandlesForApi(
   const storeInstance = getRedSniperStore();
   if (tf !== '3m') {
     try {
+      const maxCap = tf === '1m' ? 400000 : 10000;
       const fromStore = await storeInstance.getCandles(tf, limit);
       if (fromStore.length > 0) {
-        redSniperStore[tf] = dedupeAndMergeRedSniperCandles(redSniperStore[tf], fromStore, tf === '1m' ? 10000 : 5000);
+        redSniperStore[tf] = dedupeAndMergeRedSniperCandles(redSniperStore[tf], fromStore, maxCap);
       }
     } catch {}
+  }
+
+  // If any timeframe is still below its required minimum and backfill is not running, trigger background backfill
+  if (areAnyRedSniperTimeframesBelowMinimum() && !getRedSniperBackfillStatus().running) {
+    executeRedSniperBackfill({ asyncMode: true }).catch(() => {});
   }
 
   const m1Stored = redSniperStore['1m'] || [];
@@ -1248,6 +1458,10 @@ export async function bootstrapHistoricalCandles(): Promise<boolean> {
 
     runGapDetectionAudit();
     saveCandlesToDisk();
+
+    if (areAnyRedSniperTimeframesBelowMinimum() && !getRedSniperBackfillStatus().running) {
+      executeRedSniperBackfill({ asyncMode: true }).catch(() => {});
+    }
 
     console.log(
       `[RED SNIPER HISTORY] Startup barsLoaded per TF: 5m=${store.M5.length}/${REQUIRED_MIN_BARS_BY_TF['5m']}, 15m=${store.M15.length}/${REQUIRED_MIN_BARS_BY_TF['15m']}, 30m=${store.M30.length}/${REQUIRED_MIN_BARS_BY_TF['30m']}, 1h=${store.H1.length}/${REQUIRED_MIN_BARS_BY_TF['1h']}, 4h=${store.H4.length}/${REQUIRED_MIN_BARS_BY_TF['4h']}, 1d=${store.D1.length}/${REQUIRED_MIN_BARS_BY_TF['1d']} (${store.htfBootstrapMethod})`

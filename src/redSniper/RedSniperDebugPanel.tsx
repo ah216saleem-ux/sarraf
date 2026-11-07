@@ -12,6 +12,9 @@ import {
   ZoneComparisonReport,
   analyzeAllTimeframes,
   compareZonesWithReference,
+  computeCandleAlignmentCheck,
+  computeZoneHeightReport,
+  getBackfillBannerViewState,
   setIndicatorParityShift,
 } from './engine';
 
@@ -26,12 +29,31 @@ export interface FirestoreOpsReport {
   lastHourlyLogIso: string;
 }
 
+export interface RedSniperBackfillStatusData {
+  running: boolean;
+  status: 'idle' | 'running' | 'completed' | 'error';
+  provider: string;
+  progressPct: number;
+  completedChunks: number;
+  totalChunks: number;
+  calibratedOffsetPts: number | null;
+  offsetWarning: string | null;
+  m1HistBars: number;
+  d1HistBars: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
+}
+
 export interface RedSniperHealthData {
   ok: boolean;
   backend?: 'firestore' | 'sqlite';
   persistent?: boolean;
   isKService?: boolean;
   instanceUptimeSeconds?: number;
+  dataDirPath?: string;
+  dataDirFreeBytes?: number | null;
+  dataDirFreeFormatted?: string;
   gaps?: Array<{
     from: number;
     to: number;
@@ -53,6 +75,7 @@ export interface RedSniperHealthData {
   botLogCount: number;
   firestoreOps?: FirestoreOpsReport;
   readLimitExceeded?: boolean;
+  backfill?: RedSniperBackfillStatusData;
 }
 
 export interface RedSniperDebugPanelProps {
@@ -98,6 +121,17 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
     INDICATOR_PARITY_SHIFT
   );
 
+  // Local diagnostic overrides (synced with settings when onUpdateSettings is provided)
+  const [localMaxZoneHeightAtr, setLocalMaxZoneHeightAtr] = useState<number>(
+    settings.maxZoneHeightAtr ?? 2.0
+  );
+  const [localH4Offset, setLocalH4Offset] = useState<number>(
+    settings.h4AlignmentOffsetHours ?? 0
+  );
+  const [localD1UtcHour, setLocalD1UtcHour] = useState<number>(
+    settings.dailyAlignmentUtcHour ?? 0
+  );
+
   // Compare Zones tool state
   const [compareOpen, setCompareOpen] = useState<boolean>(true);
   const [compareTf, setCompareTf] = useState<RedSniperTimeframe>(selectedTf);
@@ -109,9 +143,34 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
   );
   const [compareTolerance, setCompareTolerance] = useState<number>(3);
 
+  // Phase 6 Item 2: Zone height report tool state
+  const [heightReportOpen, setHeightReportOpen] = useState<boolean>(true);
+  const [heightReportTf, setHeightReportTf] =
+    useState<RedSniperTimeframe>(selectedTf);
+
+  // Phase 6 Item 3: Alignment check tool state
+  const [alignmentOpen, setAlignmentOpen] = useState<boolean>(true);
+
   useEffect(() => {
     setCompareTf(selectedTf);
+    setHeightReportTf(selectedTf);
   }, [selectedTf]);
+
+  useEffect(() => {
+    if (typeof settings.maxZoneHeightAtr === 'number') {
+      setLocalMaxZoneHeightAtr(settings.maxZoneHeightAtr);
+    }
+    if (typeof settings.h4AlignmentOffsetHours === 'number') {
+      setLocalH4Offset(settings.h4AlignmentOffsetHours);
+    }
+    if (typeof settings.dailyAlignmentUtcHour === 'number') {
+      setLocalD1UtcHour(settings.dailyAlignmentUtcHour);
+    }
+  }, [
+    settings.maxZoneHeightAtr,
+    settings.h4AlignmentOffsetHours,
+    settings.dailyAlignmentUtcHour,
+  ]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -119,6 +178,9 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
     }, 500);
     return () => clearInterval(timer);
   }, []);
+
+  const [backfillTriggering, setBackfillTriggering] = useState<boolean>(false);
+  const [backfillUiError, setBackfillUiError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -133,17 +195,72 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
         .catch(() => {});
     };
     fetchHealth();
-    const interval = setInterval(fetchHealth, 10000);
+    const interval = setInterval(fetchHealth, 3000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
   }, []);
 
+  const handleTriggerBackfill = async () => {
+    if (backfillTriggering || health?.backfill?.running) return;
+    setBackfillTriggering(true);
+    setBackfillUiError(null);
+    try {
+      const res = await fetch('/api/redsniper/backfill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ forceReset: false }),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json?.backfill) {
+          setHealth((prev) =>
+            prev ? { ...prev, backfill: json.backfill } : prev
+          );
+        }
+      } else {
+        setBackfillUiError(`HTTP ${res.status} (${res.statusText || 'failed'})`);
+      }
+    } catch (err: any) {
+      setBackfillUiError(err?.message || 'network blocked');
+    } finally {
+      setBackfillTriggering(false);
+    }
+  };
+
+  const effectiveSettings = useMemo<RedSniperSettings>(
+    () => ({
+      ...settings,
+      maxZoneHeightAtr: localMaxZoneHeightAtr,
+      h4AlignmentOffsetHours: localH4Offset,
+      dailyAlignmentUtcHour: localD1UtcHour,
+    }),
+    [settings, localMaxZoneHeightAtr, localH4Offset, localD1UtcHour]
+  );
+
   const computedByTf = useMemo(() => {
-    if (propByTf) return propByTf;
-    return analyzeAllTimeframes(bars, livePrice, settings).byTf;
-  }, [propByTf, bars, livePrice, settings, parityShiftState]);
+    if (
+      propByTf &&
+      localMaxZoneHeightAtr === (settings.maxZoneHeightAtr ?? 2.0) &&
+      localH4Offset === (settings.h4AlignmentOffsetHours ?? 0) &&
+      localD1UtcHour === (settings.dailyAlignmentUtcHour ?? 0)
+    ) {
+      return propByTf;
+    }
+    return analyzeAllTimeframes(bars, livePrice, effectiveSettings).byTf;
+  }, [
+    propByTf,
+    bars,
+    livePrice,
+    settings,
+    effectiveSettings,
+    parityShiftState,
+    localMaxZoneHeightAtr,
+    localH4Offset,
+    localD1UtcHour,
+  ]);
 
   const compareReport = useMemo((): {
     sellReport: ZoneComparisonReport;
@@ -175,12 +292,77 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
     compareTolerance,
   ]);
 
+  const zoneHeightReport = useMemo(() => {
+    const tfBars = bars[heightReportTf] || [];
+    return computeZoneHeightReport(
+      tfBars,
+      heightReportTf,
+      effectiveSettings,
+      parityShiftState
+    );
+  }, [bars, heightReportTf, effectiveSettings, parityShiftState]);
+
+  const alignmentReport = useMemo(() => {
+    return computeCandleAlignmentCheck(
+      bars,
+      {
+        h4AlignmentOffsetHours: localH4Offset,
+        dailyAlignmentUtcHour: localD1UtcHour,
+      },
+      5
+    );
+  }, [bars, localH4Offset, localD1UtcHour]);
+
+  const backfillBanner = useMemo(() => {
+    const bf = health?.backfill
+      ? {
+          ...health.backfill,
+          error: health.backfill.error || backfillUiError,
+        }
+      : backfillUiError
+      ? { status: 'error' as const, error: backfillUiError, progressPct: 0 }
+      : null;
+    return getBackfillBannerViewState(bf);
+  }, [health?.backfill, backfillUiError]);
+
   const handleToggleParityShift = () => {
     const next = !parityShiftState;
     setIndicatorParityShift(next);
     setParityShiftState(next);
     if (onUpdateSettings) {
       onUpdateSettings({});
+    }
+  };
+
+  const handleSelectParityShift = (val: boolean) => {
+    setIndicatorParityShift(val);
+    setParityShiftState(val);
+    if (onUpdateSettings) {
+      onUpdateSettings({});
+    }
+  };
+
+  const handleUpdateMaxZoneHeightAtr = (val: number) => {
+    const clamped = Math.max(0, Math.min(10, Number(val.toFixed(2))));
+    setLocalMaxZoneHeightAtr(clamped);
+    if (onUpdateSettings) {
+      onUpdateSettings({ maxZoneHeightAtr: clamped });
+    }
+  };
+
+  const handleUpdateH4Offset = (val: number) => {
+    const clamped = Math.max(-12, Math.min(12, Math.round(val)));
+    setLocalH4Offset(clamped);
+    if (onUpdateSettings) {
+      onUpdateSettings({ h4AlignmentOffsetHours: clamped });
+    }
+  };
+
+  const handleUpdateD1UtcHour = (val: number) => {
+    const clamped = Math.max(-12, Math.min(23, Math.round(val)));
+    setLocalD1UtcHour(clamped);
+    if (onUpdateSettings) {
+      onUpdateSettings({ dailyAlignmentUtcHour: clamped });
     }
   };
 
@@ -224,6 +406,53 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
 
   return (
     <div className="rounded-lg border border-red-500/30 bg-black/95 p-3.5 font-mono text-xs text-slate-200 shadow-xl">
+      {/* PHASE 6 ITEM 1: BACKFILL VISIBILITY BANNER WHEN NOT COMPLETED */}
+      {backfillBanner.showBanner && (
+        <div
+          className={`mb-2.5 flex flex-wrap items-center justify-between gap-2 rounded border px-3 py-2 font-bold shadow-sm ${
+            backfillBanner.state === 'FAILED'
+              ? 'border-rose-500 bg-rose-950/60 text-rose-200'
+              : backfillBanner.state === 'RUNNING'
+              ? 'border-amber-500 bg-amber-950/50 text-amber-200 animate-pulse'
+              : 'border-cyan-500/60 bg-cyan-950/40 text-cyan-200'
+          }`}
+        >
+          <div className="flex flex-col gap-0.5">
+            <div className="flex items-center gap-2 text-[11px]">
+              <span>
+                {backfillBanner.state === 'FAILED'
+                  ? '⚠️'
+                  : backfillBanner.state === 'RUNNING'
+                  ? '⏳'
+                  : 'ℹ️'}
+              </span>
+              <span>{backfillBanner.bannerText}</span>
+              {health?.backfill && (
+                <span className="text-[10px] font-normal text-neutral-300">
+                  ({health.backfill.provider.toUpperCase()} · chunks{' '}
+                  {health.backfill.completedChunks}/{health.backfill.totalChunks})
+                </span>
+              )}
+            </div>
+            {backfillBanner.providerError && (
+              <div className="text-[10px] font-normal text-rose-300">
+                PROVIDER ERROR: {backfillBanner.providerError}
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={handleTriggerBackfill}
+            disabled={backfillTriggering || backfillBanner.state === 'RUNNING'}
+            className="cursor-pointer rounded border border-cyan-400/70 bg-cyan-900/50 px-2.5 py-1 text-[10px] font-extrabold text-cyan-100 hover:bg-cyan-800/60 disabled:opacity-50"
+          >
+            {backfillBanner.state === 'RUNNING'
+              ? `RUNNING ${backfillBanner.progressPct}%`
+              : 'RUN BACKFILL'}
+          </button>
+        </div>
+      )}
+
       {/* STORAGE PERSISTENCE WARNING */}
       {health && health.persistent === false && (
         <div className="mb-2.5 flex items-center gap-2 rounded border border-red-500 bg-red-600/30 px-3 py-1.5 font-bold text-red-200 shadow-sm animate-pulse">
@@ -266,7 +495,50 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {health?.backfill && (
+            <span
+              className={`rounded border px-2 py-0.5 text-[10px] font-bold ${
+                health.backfill.running
+                  ? 'border-amber-500/60 bg-amber-950/40 text-amber-300 animate-pulse'
+                  : health.backfill.status === 'completed'
+                  ? 'border-emerald-500/50 bg-emerald-950/30 text-emerald-300'
+                  : health.backfill.status === 'error'
+                  ? 'border-rose-500/60 bg-rose-950/40 text-rose-300'
+                  : 'border-white/20 bg-white/5 text-neutral-300'
+              }`}
+              title={`Provider: ${health.backfill.provider.toUpperCase()} | Chunks: ${health.backfill.completedChunks}/${health.backfill.totalChunks}${
+                health.backfill.calibratedOffsetPts !== null
+                  ? ` | Calibrated Offset: ${
+                      health.backfill.calibratedOffsetPts >= 0 ? '+' : ''
+                    }${health.backfill.calibratedOffsetPts.toFixed(2)} pts`
+                  : ''
+              }`}
+            >
+              {health.backfill.running
+                ? `BACKFILL ${health.backfill.progressPct}%`
+                : health.backfill.status === 'completed'
+                ? `BACKFILL 100%${
+                    health.backfill.calibratedOffsetPts !== null
+                      ? ` · Δ ${
+                          health.backfill.calibratedOffsetPts >= 0 ? '+' : ''
+                        }${health.backfill.calibratedOffsetPts.toFixed(2)}pt`
+                      : ''
+                  }`
+                : `BACKFILL ${health.backfill.progressPct}%`}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={handleTriggerBackfill}
+            disabled={backfillTriggering || Boolean(health?.backfill?.running)}
+            className="cursor-pointer rounded border border-cyan-500/50 bg-cyan-950/30 px-2 py-0.5 text-[10px] font-bold text-cyan-300 disabled:opacity-50"
+            title="POST /api/redsniper/backfill (resumable 260d M1 + 1000d D1 backfill)"
+          >
+            {health?.backfill?.running
+              ? `BACKFILL ${health.backfill.progressPct}%`
+              : 'RUN BACKFILL'}
+          </button>
           <button
             type="button"
             onClick={handleToggleParityShift}
@@ -281,7 +553,7 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
         </div>
       </div>
 
-      {/* Live Feed Status */}
+      {/* Live Feed Status & Persistent DATA_DIR Info */}
       <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">
         <div>
           <span className="text-slate-500">FEED: </span>
@@ -309,6 +581,18 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
           <span className="text-slate-500">SPREAD: </span>
           <span className="font-semibold text-slate-300">{spreadText}</span>
         </div>
+        <div className="col-span-2 sm:col-span-2">
+          <span className="text-slate-500">DATA_DIR PATH: </span>
+          <span className="font-semibold text-cyan-300">
+            {health?.dataDirPath || '/app/data'}
+          </span>
+        </div>
+        <div>
+          <span className="text-slate-500">DATA_DIR FREE: </span>
+          <span className="font-semibold text-emerald-300">
+            {health?.dataDirFreeFormatted || 'N/A'}
+          </span>
+        </div>
       </div>
 
       {/* Phase 4 Item 1: HISTORY DEPTH (barsLoaded per TF vs Required Minimums) + BUY/SELL zone counts */}
@@ -318,8 +602,16 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
             BARS LOADED PER TIMEFRAME (REQUIRED DEPTH &amp; ACTIVE ZONES)
           </span>
           <span className="text-[10px] text-neutral-400">
-            ZONES/SIDE: <strong className="text-white">{settings.zonesPerSide ?? 5}</strong> · HIDE CONSUMED:{' '}
-            <strong className="text-white">{settings.hideConsumed ? 'TRUE' : 'FALSE'}</strong>
+            ZONES/SIDE:{' '}
+            <strong className="text-white">{settings.zonesPerSide ?? 5}</strong> ·
+            MAX H:{' '}
+            <strong className="text-white">
+              {localMaxZoneHeightAtr.toFixed(2)}x ATR
+            </strong>{' '}
+            · HIDE CONSUMED:{' '}
+            <strong className="text-white">
+              {settings.hideConsumed ? 'TRUE' : 'FALSE'}
+            </strong>
           </span>
         </div>
 
@@ -389,6 +681,336 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
         </div>
       </div>
 
+      {/* PHASE 6 ITEM 2: ZONE HEIGHT REPORT TOOL */}
+      <div className="mt-3 border-t border-white/10 pt-2.5">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setHeightReportOpen((v) => !v)}
+              className="cursor-pointer rounded border border-[#d9ac4a]/60 bg-[#7a1422]/60 px-2.5 py-1 text-[10px] font-bold text-[#d9ac4a]"
+            >
+              {heightReportOpen
+                ? '▼ ZONE HEIGHT REPORT'
+                : '▶ ZONE HEIGHT REPORT'}
+            </button>
+            <span className="text-[10px] text-neutral-400">
+              {zoneHeightReport.referenceTargetHint} · ATR14:{' '}
+              <strong className="text-white">
+                {zoneHeightReport.atr14.toFixed(2)}
+              </strong>
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            {DIAG_TFS.map((tf) => (
+              <button
+                key={tf}
+                type="button"
+                onClick={() => setHeightReportTf(tf)}
+                className={`cursor-pointer rounded px-2 py-0.5 text-[10px] font-bold uppercase ${
+                  heightReportTf === tf
+                    ? 'border border-[#d83a4c] bg-[#7a1422] text-white'
+                    : 'border border-white/15 bg-black text-neutral-400'
+                }`}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {heightReportOpen && (
+          <div className="space-y-2 rounded border border-white/15 bg-black/75 p-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-2 text-[10px]">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-neutral-400">
+                  INDICATOR_PARITY_SHIFT:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleSelectParityShift(true)}
+                  className={`cursor-pointer rounded px-2 py-0.5 font-bold ${
+                    parityShiftState
+                      ? 'border border-emerald-500/60 bg-emerald-950/40 text-emerald-300'
+                      : 'border border-white/15 bg-black text-neutral-400'
+                  }`}
+                >
+                  TRUE (E = extreme - 1)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSelectParityShift(false)}
+                  className={`cursor-pointer rounded px-2 py-0.5 font-bold ${
+                    !parityShiftState
+                      ? 'border border-emerald-500/60 bg-emerald-950/40 text-emerald-300'
+                      : 'border border-white/15 bg-black text-neutral-400'
+                  }`}
+                >
+                  FALSE (E = extreme)
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-1.5">
+                  <span className="text-neutral-400">maxZoneHeightAtr:</span>
+                  <input
+                    type="number"
+                    step="0.25"
+                    min="0"
+                    max="10"
+                    value={localMaxZoneHeightAtr}
+                    onChange={(e) =>
+                      handleUpdateMaxZoneHeightAtr(
+                        Number(e.target.value) || 0
+                      )
+                    }
+                    className="w-16 rounded border border-white/25 bg-black px-1.5 py-0.5 text-right text-[10px] font-bold text-amber-300 outline-none focus:border-amber-400"
+                  />
+                </label>
+                <span className="text-neutral-400">
+                  AVG SHIFT=TRUE:{' '}
+                  <strong className="text-white">
+                    {zoneHeightReport.avgHeightShiftTruePts.toFixed(2)} pts
+                  </strong>{' '}
+                  · AVG SHIFT=FALSE:{' '}
+                  <strong className="text-white">
+                    {zoneHeightReport.avgHeightShiftFalsePts.toFixed(2)} pts
+                  </strong>
+                </span>
+              </div>
+            </div>
+
+            {zoneHeightReport.rows.length === 0 ? (
+              <div className="py-2 text-center text-[10px] text-neutral-500">
+                No alive zones on {heightReportTf.toUpperCase()}.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-left text-[10px]">
+                  <thead>
+                    <tr className="border-b border-white/15 text-neutral-400">
+                      <th className="py-1 pr-2">SIDE</th>
+                      <th className="py-1 pr-2">TOP</th>
+                      <th className="py-1 pr-2">BOTTOM</th>
+                      <th className="py-1 pr-2">HEIGHT (PTS)</th>
+                      <th className="py-1 pr-2">HEIGHT (ATR)</th>
+                      <th className="py-1 pr-2">SHIFT USED</th>
+                      <th className="py-1 pr-2">SHIFT = TRUE (PTS / ATR)</th>
+                      <th className="py-1 pr-2">SHIFT = FALSE (PTS / ATR)</th>
+                      <th className="py-1">DEBUG</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {zoneHeightReport.rows.map((r) => (
+                      <tr
+                        key={r.id}
+                        className="border-b border-white/5 hover:bg-white/5"
+                      >
+                        <td
+                          className={`py-1 pr-2 font-bold ${
+                            r.side === 'BUY'
+                              ? 'text-emerald-400'
+                              : 'text-rose-400'
+                          }`}
+                        >
+                          {r.side}
+                        </td>
+                        <td className="py-1 pr-2 font-semibold text-white">
+                          {r.top.toFixed(2)}
+                        </td>
+                        <td className="py-1 pr-2 font-semibold text-white">
+                          {r.bottom.toFixed(2)}
+                        </td>
+                        <td className="py-1 pr-2 font-bold text-amber-300">
+                          {r.heightPts.toFixed(2)} pts
+                        </td>
+                        <td className="py-1 pr-2 text-cyan-300">
+                          {r.heightAtr.toFixed(2)}x ATR
+                        </td>
+                        <td className="py-1 pr-2 text-neutral-300">
+                          {r.parityShiftUsed ? 'true' : 'false'}
+                        </td>
+                        <td className="py-1 pr-2 text-neutral-200">
+                          {r.shiftTrue.bottom.toFixed(2)}–
+                          {r.shiftTrue.top.toFixed(2)} (
+                          <strong>{r.shiftTrue.heightPts.toFixed(2)}pt</strong> /{' '}
+                          {r.shiftTrue.heightAtr.toFixed(2)}x
+                          {r.shiftTrue.clipped
+                            ? `, raw ${r.shiftTrue.unclippedHeightPts.toFixed(1)}pt`
+                            : ''}
+                          )
+                        </td>
+                        <td className="py-1 pr-2 text-neutral-200">
+                          {r.shiftFalse.bottom.toFixed(2)}–
+                          {r.shiftFalse.top.toFixed(2)} (
+                          <strong>{r.shiftFalse.heightPts.toFixed(2)}pt</strong> /{' '}
+                          {r.shiftFalse.heightAtr.toFixed(2)}x
+                          {r.shiftFalse.clipped
+                            ? `, raw ${r.shiftFalse.unclippedHeightPts.toFixed(1)}pt`
+                            : ''}
+                          )
+                        </td>
+                        <td className="py-1">
+                          {r.clipped ? (
+                            <span className="rounded border border-amber-500/50 bg-amber-950/40 px-1.5 py-0.2 text-[9px] font-bold text-amber-300">
+                              clipped
+                            </span>
+                          ) : (
+                            <span className="text-neutral-500">raw</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* PHASE 6 ITEM 3: CANDLE ALIGNMENT CHECK (4H & 1D) */}
+      <div className="mt-3 border-t border-white/10 pt-2.5">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setAlignmentOpen((v) => !v)}
+              className="cursor-pointer rounded border border-[#d9ac4a]/60 bg-[#7a1422]/60 px-2.5 py-1 text-[10px] font-bold text-[#d9ac4a]"
+            >
+              {alignmentOpen ? '▼ ALIGNMENT CHECK' : '▶ ALIGNMENT CHECK'}
+            </button>
+            <span className="text-[10px] text-neutral-400">
+              Last 5 candles for 4H and 1D (UTC open time + OHLC)
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 text-[10px]">
+            <label className="flex items-center gap-1">
+              <span className="text-neutral-400">h4AlignmentOffsetHours:</span>
+              <input
+                type="number"
+                step="1"
+                min="-12"
+                max="12"
+                value={localH4Offset}
+                onChange={(e) =>
+                  handleUpdateH4Offset(Number(e.target.value) || 0)
+                }
+                className="w-14 rounded border border-white/25 bg-black px-1.5 py-0.5 text-right text-[10px] font-bold text-cyan-300 outline-none focus:border-cyan-400"
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              <span className="text-neutral-400">dailyAlignmentUtcHour:</span>
+              <input
+                type="number"
+                step="1"
+                min="-12"
+                max="23"
+                value={localD1UtcHour}
+                onChange={(e) =>
+                  handleUpdateD1UtcHour(Number(e.target.value) || 0)
+                }
+                className="w-14 rounded border border-white/25 bg-black px-1.5 py-0.5 text-right text-[10px] font-bold text-cyan-300 outline-none focus:border-cyan-400"
+              />
+            </label>
+          </div>
+        </div>
+
+        {alignmentOpen && (
+          <div className="grid grid-cols-1 gap-2 rounded border border-white/15 bg-black/75 p-2.5 sm:grid-cols-2">
+            {/* 4H Last 5 Candles */}
+            <div className="rounded border border-white/10 bg-black/60 p-2">
+              <div className="mb-1 flex items-center justify-between text-[10px] font-bold text-amber-300">
+                <span>
+                  4H LAST 5 CANDLES (offset {alignmentReport.h4AlignmentOffsetHours}h)
+                </span>
+                <span className="text-[9px] text-neutral-400">
+                  {alignmentReport.rebuiltFromM1['4h'] ? 'M1 REBUILT' : 'STORE/FEED'}
+                </span>
+              </div>
+              <table className="w-full border-collapse text-left text-[10px]">
+                <thead>
+                  <tr className="border-b border-white/10 text-neutral-400">
+                    <th className="py-0.5 pr-2">OPEN TIME UTC</th>
+                    <th className="py-0.5 pr-1">OPEN</th>
+                    <th className="py-0.5 pr-1">HIGH</th>
+                    <th className="py-0.5 pr-1">LOW</th>
+                    <th className="py-0.5">CLOSE</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {alignmentReport.last5H4.map((c) => (
+                    <tr key={c.time} className="border-b border-white/5">
+                      <td className="py-0.5 pr-2 text-neutral-300">
+                        {c.openTimeUtc}
+                      </td>
+                      <td className="py-0.5 pr-1 text-white">
+                        {c.open.toFixed(2)}
+                      </td>
+                      <td className="py-0.5 pr-1 text-emerald-300">
+                        {c.high.toFixed(2)}
+                      </td>
+                      <td className="py-0.5 pr-1 text-rose-300">
+                        {c.low.toFixed(2)}
+                      </td>
+                      <td className="py-0.5 font-semibold text-amber-300">
+                        {c.close.toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* 1D Last 5 Candles */}
+            <div className="rounded border border-white/10 bg-black/60 p-2">
+              <div className="mb-1 flex items-center justify-between text-[10px] font-bold text-amber-300">
+                <span>
+                  1D LAST 5 CANDLES (UTC hour {alignmentReport.dailyAlignmentUtcHour}h)
+                </span>
+                <span className="text-[9px] text-neutral-400">
+                  {alignmentReport.rebuiltFromM1['1d'] ? 'M1 REBUILT' : 'STORE/FEED'}
+                </span>
+              </div>
+              <table className="w-full border-collapse text-left text-[10px]">
+                <thead>
+                  <tr className="border-b border-white/10 text-neutral-400">
+                    <th className="py-0.5 pr-2">OPEN TIME UTC</th>
+                    <th className="py-0.5 pr-1">OPEN</th>
+                    <th className="py-0.5 pr-1">HIGH</th>
+                    <th className="py-0.5 pr-1">LOW</th>
+                    <th className="py-0.5">CLOSE</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {alignmentReport.last5D1.map((c) => (
+                    <tr key={c.time} className="border-b border-white/5">
+                      <td className="py-0.5 pr-2 text-neutral-300">
+                        {c.openTimeUtc}
+                      </td>
+                      <td className="py-0.5 pr-1 text-white">
+                        {c.open.toFixed(2)}
+                      </td>
+                      <td className="py-0.5 pr-1 text-emerald-300">
+                        {c.high.toFixed(2)}
+                      </td>
+                      <td className="py-0.5 pr-1 text-rose-300">
+                        {c.low.toFixed(2)}
+                      </td>
+                      <td className="py-0.5 font-semibold text-amber-300">
+                        {c.close.toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Phase 4 Item 9: COMPARE ZONES DEBUG TOOL */}
       <div className="mt-3 border-t border-white/10 pt-2.5">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -454,7 +1076,7 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-2 text-[10px]">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => {
@@ -466,6 +1088,18 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
                   className="cursor-pointer rounded border border-white/20 bg-white/5 px-2 py-0.5 text-[9.5px] font-semibold text-neutral-300 hover:text-white"
                 >
                   LOAD 15M PRESET
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCompareTf('4h');
+                    setExpectedSellInput('4350, 4300, 4290, 4270, 4235');
+                    setExpectedBuyInput('4055, 4030, 3930, 3891');
+                    setCompareTolerance(3);
+                  }}
+                  className="cursor-pointer rounded border border-white/20 bg-white/5 px-2 py-0.5 text-[9.5px] font-semibold text-neutral-300 hover:text-white"
+                >
+                  LOAD 4H PRESET
                 </button>
                 <span className="text-neutral-400">
                   Active {compareTf.toUpperCase()} zones:{' '}
@@ -681,4 +1315,3 @@ export const RedSniperDebugPanel: React.FC<RedSniperDebugPanelProps> = ({
 };
 
 export default RedSniperDebugPanel;
-

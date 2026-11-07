@@ -32,6 +32,7 @@
     "bcryptjs": "^3.0.3",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.3",
+    "dukascopy-node": "^1.51.1",
     "express": "^4.21.2",
     "firebase": "^12.19.0",
     "gsap": "^3.15.0",

@@ -396,7 +396,7 @@ export async function notifyBtcTideExpiry(
     const pnlStr = `${pnlUsd >= 0 ? "+" : "-"}$${Math.abs(pnlUsd).toFixed(2)} per 1 BTC`;
     const isAfterTp1 = trade.outcome === "EXPIRED_AFTER_TP1";
     const headerLine = isAfterTp1
-      ? `BTC/USD — MAX 3H LIFETIME AFTER TP1`
+      ? `BTC/USD — MAX 260M LIFETIME AFTER TP1`
       : `BTC/USD — SIGNAL EXPIRED`;
     const msg = [
       headerLine,

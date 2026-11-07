@@ -7,12 +7,68 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export const DATA_DIR = process.env.DATA_DIR
-  ? path.resolve(process.env.DATA_DIR)
-  : '/app/data';
+export const DATA_DIR = path.resolve(
+  process.env.DATA_DIR ||
+    process.env.RAILWAY_VOLUME_MOUNT_PATH ||
+    process.env.PERSISTENT_VOLUME ||
+    '/app/data'
+);
 try {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 } catch {}
+
+export interface DataDirDiskStats {
+  dataDirPath: string;
+  dataDirFreeBytes: number | null;
+  dataDirTotalBytes: number | null;
+  dataDirFreeFormatted: string;
+}
+
+export function formatBytesHuman(bytes: number | null | undefined): string {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
+    return 'unknown';
+  }
+  const gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 1) {
+    return `${gb.toFixed(2)} GB`;
+  }
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1) {
+    return `${mb.toFixed(1)} MB`;
+  }
+  const kb = bytes / 1024;
+  return `${kb.toFixed(0)} KB`;
+}
+
+export function getDataDirDiskStats(targetDir: string = DATA_DIR): DataDirDiskStats {
+  const absPath = path.resolve(targetDir);
+  try {
+    if (!fs.existsSync(absPath)) {
+      fs.mkdirSync(absPath, { recursive: true });
+    }
+    if (typeof fs.statfsSync === 'function') {
+      const stat = fs.statfsSync(absPath);
+      const freeBytes = Number(stat.bavail) * Number(stat.bsize);
+      const totalBytes = Number(stat.blocks) * Number(stat.bsize);
+      if (Number.isFinite(freeBytes) && freeBytes >= 0) {
+        return {
+          dataDirPath: absPath,
+          dataDirFreeBytes: freeBytes,
+          dataDirTotalBytes: Number.isFinite(totalBytes) ? totalBytes : null,
+          dataDirFreeFormatted: `${formatBytesHuman(freeBytes)} free`,
+        };
+      }
+    }
+  } catch {
+    // Fallback if statfsSync is unsupported on platform
+  }
+  return {
+    dataDirPath: absPath,
+    dataDirFreeBytes: null,
+    dataDirTotalBytes: null,
+    dataDirFreeFormatted: 'unknown',
+  };
+}
 
 const LEASE_FILE = path.resolve(DATA_DIR, 'instance_lease.json');
 const REPO_LEASE_FILE = path.resolve(process.cwd(), 'data', 'instance_lease.json');

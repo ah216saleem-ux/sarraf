@@ -1017,7 +1017,10 @@ function handleTradeTick(
         notifyBtcTideBreakevenClose(updatedTrade, price);
       } else if (updatedTrade.outcome === 'SL') {
         notifyBtcTideSlHit(updatedTrade, price);
-      } else if (updatedTrade.outcome === 'EXPIRED') {
+      } else if (
+        updatedTrade.outcome === 'EXPIRED' ||
+        updatedTrade.outcome === 'EXPIRED_AFTER_TP1'
+      ) {
         notifyBtcTideExpiry(updatedTrade, price);
       }
     } else {

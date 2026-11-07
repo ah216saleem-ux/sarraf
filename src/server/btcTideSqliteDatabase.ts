@@ -213,11 +213,11 @@ export function validateActiveTradeAgainstCurrentRules(
     expirySpanMs > TRADE_EXPIRY_MS + 60_000
   ) {
     reasons.push(
-      `expiry span ${Math.round(expirySpanMs / 60000)}m violates 60m pre-TP1 rule`
+      `expiry span ${Math.round(expirySpanMs / 60000)}m violates 260m pre-TP1 rule`
     );
   }
   if (nowMs - trade.entryTime > MAX_TRADE_LIFETIME_MS) {
-    reasons.push(`age exceeds 3h max trade lifetime`);
+    reasons.push(`age exceeds 260m max trade lifetime`);
   }
 
   return {
@@ -239,6 +239,7 @@ const SELECT_TRADE_COLUMNS = `
 export function voidInvalidActiveTradesInSqlite(nowMs: number = Date.now()): number {
   if (!dbInstance) return 0;
   let voidedCount = 0;
+  let updatedExpiryCount = 0;
   try {
     const res = dbInstance.exec(`
       SELECT ${SELECT_TRADE_COLUMNS}
@@ -265,10 +266,19 @@ export function voidInvalidActiveTradesInSqlite(nowMs: number = Date.now()): num
             [nowMs, trade.id]
           );
           voidedCount++;
+        } else if (trade.expiryTime - trade.entryTime < TRADE_EXPIRY_MS) {
+          const newExpiryTime = trade.entryTime + TRADE_EXPIRY_MS;
+          dbInstance.run(
+            `UPDATE btc_tide_signals
+             SET expiry_time = ?
+             WHERE id = ?;`,
+            [newExpiryTime, trade.id]
+          );
+          updatedExpiryCount++;
         }
       }
     }
-    if (voidedCount > 0) {
+    if (voidedCount > 0 || updatedExpiryCount > 0) {
       persistSqliteToDisk();
     }
   } catch (err: any) {

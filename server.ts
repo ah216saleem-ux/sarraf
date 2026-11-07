@@ -23,6 +23,8 @@ import {
   initRedSniperDatabase,
   getRedSniperHealth,
   seedRedSniperMemoryFromStore,
+  executeRedSniperBackfill,
+  getRedSniperBackfillStatus,
 } from './src/server/candleEngine.ts';
 import {
   initActiveStore,
@@ -3606,9 +3608,9 @@ app.get('/api/redsniper/candles', requireTerminalUserAuth, async (req, res) => {
   }
 
   const rawLimit = req.query.limit !== undefined ? Number(req.query.limit) : 5000;
-  if (isNaN(rawLimit) || rawLimit < 1 || rawLimit > 5000) {
+  if (isNaN(rawLimit) || rawLimit < 1 || rawLimit > 10000) {
     return res.status(400).json({
-      error: 'Invalid limit: limit must be a positive integer between 1 and 5000.',
+      error: 'Invalid limit: limit must be a positive integer between 1 and 10000.',
       bars: [],
       candles: [],
     });
@@ -3628,6 +3630,35 @@ app.get('/api/redsniper/candles', requireTerminalUserAuth, async (req, res) => {
       candles: [],
     });
   }
+});
+
+// POST /api/redsniper/backfill - Trigger or resume deep history backfill job (Protected behind terminal auth)
+app.post('/api/redsniper/backfill', requireTerminalUserAuth, async (req, res) => {
+  try {
+    const forceReset = Boolean(req.body?.forceReset);
+    const wait = Boolean(req.body?.wait);
+    const backfill = await executeRedSniperBackfill({
+      forceReset,
+      asyncMode: !wait,
+    });
+    return res.json({
+      status: 'SUCCESS',
+      backfill,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      error: err?.message || 'Failed to start Red Sniper history backfill',
+      backfill: getRedSniperBackfillStatus(),
+    });
+  }
+});
+
+// GET /api/redsniper/backfill - Get current backfill job status
+app.get('/api/redsniper/backfill', requireTerminalUserAuth, (_req, res) => {
+  return res.json({
+    status: 'SUCCESS',
+    backfill: getRedSniperBackfillStatus(),
+  });
 });
 
 // GET /api/redsniper/bot-log - Persistent Red Sniper bot trade log (last 200 entries)
@@ -3654,7 +3685,7 @@ app.delete('/api/redsniper/bot-log', requireTerminalOwnerAuth, async (_req, res)
   return res.json({ status: 'SUCCESS', count: entries.length, entries });
 });
 
-// GET /api/redsniper/health - Health telemetry returning stored rows per timeframe, oldest and newest candle time, last write time, backend, persistent, gaps, and uptime
+// GET /api/redsniper/health - Health telemetry returning stored rows per timeframe, oldest and newest candle time, last write time, backend, persistent, gaps, backfill, and uptime
 app.get('/api/redsniper/health', async (_req, res) => {
   const health = await getRedSniperHealth();
   return res.json(health);

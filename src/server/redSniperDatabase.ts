@@ -13,6 +13,7 @@ export interface RedSniperStoredCandle {
   buyVol: number;
   sellVol: number;
   isClosed?: boolean;
+  source?: 'hist' | 'live';
 }
 
 export type ServerBotLogType =
@@ -145,8 +146,8 @@ function seedFromExistingDiskFilesIfEmpty(db: Database): void {
             const obj = JSON.parse(trimmed);
             if (obj && typeof obj.time === 'number' && Number.isFinite(obj.open)) {
               db.run(
-                `INSERT OR REPLACE INTO redsniper_candles (tf, time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+                `INSERT OR REPLACE INTO redsniper_candles (tf, time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed, source)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
                 [
                   tf,
                   obj.time,
@@ -158,6 +159,7 @@ function seedFromExistingDiskFilesIfEmpty(db: Database): void {
                   Math.max(0, Number(obj.buyVol ?? 0)),
                   Math.max(0, Number(obj.sellVol ?? 0)),
                   obj.isClosed === false ? 0 : 1,
+                  obj.source === 'hist' ? 'hist' : 'live',
                 ]
               );
               importedCandles++;
@@ -253,6 +255,7 @@ export async function initRedSniperDatabase(customPath?: string): Promise<Databa
       buy_vol REAL NOT NULL DEFAULT 0,
       sell_vol REAL NOT NULL DEFAULT 0,
       is_closed INTEGER NOT NULL DEFAULT 1,
+      source TEXT NOT NULL DEFAULT 'live',
       PRIMARY KEY (tf, time)
     );
 
@@ -285,6 +288,12 @@ export async function initRedSniperDatabase(customPath?: string): Promise<Databa
     );
   `);
 
+  try {
+    db.run(`ALTER TABLE redsniper_candles ADD COLUMN source TEXT NOT NULL DEFAULT 'live';`);
+  } catch {
+    // Column already exists
+  }
+
   seedFromExistingDiskFilesIfEmpty(db);
 
   dbInstance = db;
@@ -316,20 +325,33 @@ export function saveCandlesToSqlite(candles: RedSniperStoredCandle[], tf: string
   if (!dbInstance || !candles || candles.length === 0) return;
 
   try {
-    for (const c of candles) {
-      if (
-        c &&
-        typeof c.time === 'number' &&
-        Number.isFinite(c.time) &&
-        Number.isFinite(c.open) &&
-        Number.isFinite(c.high) &&
-        Number.isFinite(c.low) &&
-        Number.isFinite(c.close)
-      ) {
-        dbInstance.run(
-          `INSERT OR REPLACE INTO redsniper_candles (tf, time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-          [
+    dbInstance.run('BEGIN TRANSACTION;');
+    const stmt = dbInstance.prepare(
+      `INSERT INTO redsniper_candles (tf, time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(tf, time) DO UPDATE SET
+         open = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.open ELSE excluded.open END,
+         high = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.high ELSE excluded.high END,
+         low = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.low ELSE excluded.low END,
+         close = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.close ELSE excluded.close END,
+         tick_volume = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.tick_volume ELSE excluded.tick_volume END,
+         buy_vol = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.buy_vol ELSE excluded.buy_vol END,
+         sell_vol = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.sell_vol ELSE excluded.sell_vol END,
+         is_closed = CASE WHEN redsniper_candles.source = 'live' AND excluded.source = 'hist' THEN redsniper_candles.is_closed ELSE excluded.is_closed END,
+         source = CASE WHEN redsniper_candles.source = 'live' OR excluded.source = 'live' THEN 'live' ELSE 'hist' END;`
+    );
+    try {
+      for (const c of candles) {
+        if (
+          c &&
+          typeof c.time === 'number' &&
+          Number.isFinite(c.time) &&
+          Number.isFinite(c.open) &&
+          Number.isFinite(c.high) &&
+          Number.isFinite(c.low) &&
+          Number.isFinite(c.close)
+        ) {
+          stmt.run([
             tf,
             c.time,
             c.open,
@@ -340,12 +362,19 @@ export function saveCandlesToSqlite(candles: RedSniperStoredCandle[], tf: string
             Math.max(0, c.buyVol || 0),
             Math.max(0, c.sellVol || 0),
             c.isClosed === false ? 0 : 1,
-          ]
-        );
+            c.source === 'hist' ? 'hist' : 'live',
+          ]);
+        }
       }
+    } finally {
+      stmt.free();
     }
+    dbInstance.run('COMMIT;');
     persistRedSniperDatabase();
   } catch (err: any) {
+    try {
+      dbInstance.run('ROLLBACK;');
+    } catch {}
     console.error(`[RED SNIPER SQLITE] Error saving candles for ${tf}:`, err?.message);
   }
 }
@@ -354,11 +383,12 @@ export function getCandlesFromSqlite(tf: string, limit: number = 5000): RedSnipe
   if (!dbInstance) return [];
 
   try {
-    const safeLimit = Math.max(1, Math.min(10000, Number(limit) || 5000));
+    const maxCap = tf === '1m' ? 400000 : 15000;
+    const safeLimit = Math.max(1, Math.min(maxCap, Number(limit) || 5000));
     const res = dbInstance.exec(`
-      SELECT time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed
+      SELECT time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed, source
       FROM (
-        SELECT time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed
+        SELECT time, open, high, low, close, tick_volume, buy_vol, sell_vol, is_closed, source
         FROM redsniper_candles
         WHERE tf = '${tf.replace(/'/g, "''")}'
         ORDER BY time DESC
@@ -378,6 +408,7 @@ export function getCandlesFromSqlite(tf: string, limit: number = 5000): RedSnipe
         buyVol: Number(row[6]),
         sellVol: Number(row[7]),
         isClosed: Boolean(row[8]),
+        source: row[9] === 'hist' ? 'hist' : 'live',
       }));
     }
   } catch (err: any) {
