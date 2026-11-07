@@ -43,6 +43,7 @@ import { SettingsTab } from './SettingsTab';
 import { PerformanceTab } from './PerformanceTab';
 import { GoLiveChecklistTab } from './GoLiveChecklistTab';
 import { SarrafCommandView } from '../command/SarrafCommandView';
+import { SarrafWhalesView } from '../sarrafWhales/SarrafWhalesView';
 import { SarrafAtlasView } from '../atlas/SarrafAtlasView';
 import { BlackstoneView } from '../blackstone/BlackstoneView';
 import { FireZonePage } from '../fireZone/FireZonePage';
@@ -153,7 +154,7 @@ const DashboardPriceHeader: React.FC<{ fallbackPrice: number | null; fallbackSta
   }
 );
 
-export type SarrafSubView = 'COMMAND' | 'DECK' | 'ATLAS' | 'blackstone' | 'fireZone';
+export type SarrafSubView = 'COMMAND' | 'WHALES' | 'DECK' | 'ATLAS' | 'blackstone' | 'fireZone';
 
 interface SarrafSubPillItem {
   id: SarrafSubView;
@@ -166,6 +167,7 @@ interface SarrafSubPillItem {
 
 const SARRAF_SUB_PILLS: SarrafSubPillItem[] = [
   { id: 'COMMAND', label: 'SARRAF COMMAND', badge: 'LIVE', icon: 'zap', roles: ['admin', 'trader'] },
+  { id: 'WHALES', label: 'SARRAF WHALES', badge: 'AI', roles: ['admin', 'trader'] },
   { id: 'DECK', label: 'TRADING DECK', adminLockIndicator: true, roles: ['admin', 'trader'] },
   { id: 'ATLAS', label: 'SARRAF ATLAS', badge: 'ZONES', icon: 'compass', roles: ['admin', 'trader'] },
   { id: 'blackstone', label: 'BLACKSTONE', badge: 'PLAN', roles: ['admin', 'trader'] },
@@ -940,13 +942,15 @@ export const DashboardView: React.FC = () => {
               </div>
 
               <span className="text-[10px] font-mono text-neutral-500 hidden md:inline shrink-0 pl-2">
-                SECTION: {sarrafSection === 'COMMAND' ? 'SARRAF COMMAND' : sarrafSection === 'DECK' ? 'TRADING DECK' : sarrafSection === 'ATLAS' ? 'SARRAF ATLAS' : sarrafSection === 'blackstone' ? 'BLACKSTONE' : 'FIRE ZONE'}
+                SECTION: {sarrafSection === 'COMMAND' ? 'SARRAF COMMAND' : sarrafSection === 'WHALES' ? 'SARRAF WHALES' : sarrafSection === 'DECK' ? 'TRADING DECK' : sarrafSection === 'ATLAS' ? 'SARRAF ATLAS' : sarrafSection === 'blackstone' ? 'BLACKSTONE' : 'FIRE ZONE'}
               </span>
             </div>
 
             {/* View Render */}
             {sarrafSection === 'COMMAND' ? (
               <SarrafCommandView />
+            ) : sarrafSection === 'WHALES' ? (
+              <SarrafWhalesView />
             ) : sarrafSection === 'ATLAS' ? (
               <SarrafAtlasView />
             ) : sarrafSection === 'blackstone' ? (
