@@ -12,7 +12,9 @@
     "lint": "tsc --noEmit",
     "test:spy": "tsx server/spy/spyEngine.test.ts",
     "test:firezone": "tsx src/fireZone/engine.test.ts",
-    "test:redsniper": "tsx src/redSniper/engine.test.ts"
+    "test:redsniper": "tsx src/redSniper/engine.test.ts",
+    "test:whales": "tsx src/server/sarrafWhales/engine.test.ts",
+    "backtest:whales": "tsx src/server/sarrafWhales/backtest.ts"
   },
   "dependencies": {
     "@google-cloud/firestore": "^9.4.0",

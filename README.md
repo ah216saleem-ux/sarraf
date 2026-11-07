@@ -43,6 +43,25 @@ KEEPALIVE_URL=https://your-production-domain.up.railway.app/api/btc-tide/health
 
 ---
 
+## 🐋 SARRAF WHALES — 24/7 AI Zone Agent
+
+New sub-tab **SARRAF WHALES** (next to SARRAF COMMAND). Code: `src/server/sarrafWhales/` (engine) and `src/sarrafWhales/SarrafWhalesView.tsx` (tab).
+
+**How it works**
+1. **Candidate zones (code, no AI):** order blocks, FVGs, swings (M15/H1/H4), previous-day high/low, session highs/lows, $25 round numbers, tick-volume nodes and (optional) OANDA order-book clusters are merged into scored zones `B1..Bn` / `S1..Sn`.
+2. **AI agent (Gemini):** researches price, ATR, trends, weekly CFTC COT whale positioning, order book, news, estimated whale bursts, its saved lessons and recent results — then may only answer with a zone ID or `NO_TRADE` (enum-locked JSON). It cannot invent prices.
+3. **Validator (code):** entry = zone, stop $10–12 beyond it (no trade if structure needs more), TP1 ≥ 1.5R at opposite zones, news/closed-market/exhausted-range gates.
+4. **Lifecycle:** entry only after an M5 rejection candle inside the zone · TP1 closes 50% + SL to breakeven · TP2 closes 30% + SL to TP1 · TP3 rest · max 3h · 30 min cooldown after a loss · max 4 trades/day · failed zones ignored for 24h.
+5. **Schedule:** watcher every 30s; AI re-plan every 60 min plus immediately on zone fail, trade close, plan expiry, London/NY open and after high-impact news (min 10 min apart). Daily AI self-review at 22:00 UTC saves lessons for the next runs. Falls back to the rules engine if Gemini is down.
+
+**Endpoints:** `GET /api/sarraf-whales/state`, `/candles?tf=M15`, `/health` · `POST /replan`, `/refresh-data` (header `x-admin-token`).
+
+**Tests / backtest:** `npm run test:whales` · `npm run backtest:whales` (rules-engine baseline on stored candles — the AI must beat this).
+
+State is saved in `DATA_DIR/sarraf_whales_state.json`. Env vars: see `.env.example` (SARRAF WHALES section).
+
+---
+
 ## 🚀 Recommended Deployment Option A: Railway (with Persistent Volume)
 
 Railway provides continuous always-on execution and high-performance persistent NVMe disk mounts.

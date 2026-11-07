@@ -204,6 +204,7 @@ import {
   writeJsonAtomic,
 } from './src/server/deploymentSafety.ts';
 import { runPhase5BTestSuite } from './src/server/phase5bTests.ts';
+import { registerSarrafWhalesRoutes, startSarrafWhalesEngine } from './src/server/sarrafWhales/engine.ts';
 import { runSummaryAlertTestSuite } from './src/server/sarrafSummaryAlertTests.ts';
 import { runMarketClosedAndTelegramTestSuite } from './src/server/sarrafLandingMarketTests.ts';
 import {
@@ -4149,6 +4150,14 @@ async function startServer() {
   loadSignalsFromDisk();
   loadCommandSignalsFromDisk();
   loadSpySignalsFromDisk();
+
+  // SARRAF WHALES — 24/7 AI zone agent (routes must be registered before the SPA fallback)
+  try {
+    registerSarrafWhalesRoutes(app);
+    startSarrafWhalesEngine();
+  } catch (err: any) {
+    console.warn('[SARRAF WHALES] failed to start:', err?.message || err);
+  }
 
   // Mount Vite middleware (with HMR & WebSocket server strictly disabled) or static assets BEFORE binding port 3000
   if (process.env.NODE_ENV !== 'production') {
